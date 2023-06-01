@@ -10,19 +10,16 @@
 
 namespace SQL::AST {
 
-RefPtr<SQLResult> CreateSchema::execute(ExecutionContext& context) const
+ResultOr<ResultSet> CreateSchema::execute(ExecutionContext& context) const
 {
-    auto schema_def = context.database->get_schema(m_schema_name);
-    if (schema_def) {
-        if (m_is_error_if_schema_exists) {
-            return SQLResult::construct(SQLCommand::Create, SQLErrorCode::SchemaExists, m_schema_name);
-        }
-        return SQLResult::construct(SQLCommand::Create);
+    auto schema_def = SchemaDef::construct(m_schema_name);
+
+    if (auto result = context.database->add_schema(*schema_def); result.is_error()) {
+        if (result.error().error() != SQLErrorCode::SchemaExists || m_is_error_if_schema_exists)
+            return result.release_error();
     }
 
-    schema_def = SchemaDef::construct(m_schema_name);
-    context.database->add_schema(*schema_def);
-    return SQLResult::construct(SQLCommand::Create, 0, 1);
+    return ResultSet { SQLCommand::Create };
 }
 
 }

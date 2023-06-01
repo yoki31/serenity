@@ -8,11 +8,13 @@
 
 #include "Forward.h"
 #include "RegexOptions.h"
+#include <AK/Error.h>
 
-#include <AK/FlyString.h>
+#include <AK/DeprecatedFlyString.h>
+#include <AK/DeprecatedString.h>
 #include <AK/HashMap.h>
 #include <AK/MemMem.h>
-#include <AK/String.h>
+#include <AK/RedBlackTree.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <AK/Utf16View.h>
@@ -23,15 +25,146 @@
 
 namespace regex {
 
+template<typename T>
+class COWVector {
+    struct Detail : RefCounted<Detail> {
+        Vector<T> m_members;
+    };
+
+public:
+    COWVector()
+        : m_detail(make_ref_counted<Detail>())
+    {
+    }
+
+    COWVector(COWVector const&) = default;
+    COWVector(COWVector&&) = default;
+
+    COWVector& operator=(COWVector const&) = default;
+    COWVector& operator=(COWVector&&) = default;
+
+    Vector<T> release() &&
+    {
+        if (m_detail->ref_count() == 1)
+            return exchange(m_detail->m_members, Vector<T>());
+
+        return m_detail->m_members;
+    }
+
+    void append(T const& value)
+    {
+        return append(T { value });
+    }
+
+    void append(T&& value)
+    {
+        copy();
+        m_detail->m_members.append(move(value));
+    }
+
+    void resize(size_t size)
+    {
+        copy();
+        m_detail->m_members.resize(size);
+    }
+
+    void ensure_capacity(size_t capacity)
+    {
+        if (m_detail->m_members.capacity() >= capacity)
+            return;
+
+        copy();
+        m_detail->m_members.ensure_capacity(capacity);
+    }
+
+    template<typename... Args>
+    void empend(Args&&... args)
+    {
+        copy();
+        m_detail->m_members.empend(forward<Args>(args)...);
+    }
+
+    void clear()
+    {
+        if (m_detail->ref_count() > 1)
+            m_detail = make_ref_counted<Detail>();
+        else
+            m_detail->m_members.clear();
+    }
+
+    T& at(size_t index)
+    {
+        // We're handing out a mutable reference, so make sure we own the data exclusively.
+        copy();
+        return m_detail->m_members.at(index);
+    }
+
+    T const& at(size_t index) const
+    {
+        return m_detail->m_members.at(index);
+    }
+
+    T& operator[](size_t index)
+    {
+        // We're handing out a mutable reference, so make sure we own the data exclusively.
+        copy();
+        return m_detail->m_members[index];
+    }
+
+    T const& operator[](size_t index) const
+    {
+        return m_detail->m_members[index];
+    }
+
+    size_t capacity() const
+    {
+        return m_detail->m_members.capacity();
+    }
+
+    size_t size() const
+    {
+        return m_detail->m_members.size();
+    }
+
+    bool is_empty() const
+    {
+        return m_detail->m_members.is_empty();
+    }
+
+    T const& first() const
+    {
+        return m_detail->m_members.first();
+    }
+
+    T const& last() const
+    {
+        return m_detail->m_members.last();
+    }
+
+private:
+    void copy()
+    {
+        if (m_detail->ref_count() <= 1)
+            return;
+        auto new_detail = make_ref_counted<Detail>();
+        new_detail->m_members = m_detail->m_members;
+        m_detail = new_detail;
+    }
+
+    NonnullRefPtr<Detail> m_detail;
+};
+
 class RegexStringView {
 public:
-    RegexStringView(char const* chars)
-        : m_view(StringView { chars })
+    RegexStringView() = default;
+
+    RegexStringView(DeprecatedString const& string)
+        : m_view(string.view())
     {
     }
 
     RegexStringView(String const& string)
-        : m_view(string.view())
+        : m_view(string.bytes_as_string_view())
     {
     }
 
@@ -55,7 +188,7 @@ public:
     {
     }
 
-    explicit RegexStringView(String&&) = delete;
+    explicit RegexStringView(DeprecatedString&&) = delete;
 
     StringView string_view() const
     {
@@ -121,9 +254,9 @@ public:
             [&](auto const&) {
                 if (code_point <= 0x7f)
                     return 1;
-                else if (code_point <= 0x07ff)
+                if (code_point <= 0x07ff)
                     return 2;
-                else if (code_point <= 0xffff)
+                if (code_point <= 0xffff)
                     return 3;
                 return 4;
             });
@@ -139,21 +272,21 @@ public:
         return view;
     }
 
-    RegexStringView construct_as_same(Span<u32> data, Optional<String>& optional_string_storage, Vector<u16, 1>& optional_utf16_storage) const
+    RegexStringView construct_as_same(Span<u32> data, Optional<DeprecatedString>& optional_string_storage, Utf16Data& optional_utf16_storage) const
     {
         auto view = m_view.visit(
             [&]<typename T>(T const&) {
                 StringBuilder builder;
                 for (auto ch : data)
                     builder.append(ch); // Note: The type conversion is intentional.
-                optional_string_storage = builder.build();
+                optional_string_storage = builder.to_deprecated_string();
                 return RegexStringView { T { *optional_string_storage } };
             },
             [&](Utf32View) {
                 return RegexStringView { Utf32View { data.data(), data.size() } };
             },
             [&](Utf16View) {
-                optional_utf16_storage = AK::utf32_to_utf16(Utf32View { data.data(), data.size() });
+                optional_utf16_storage = AK::utf32_to_utf16(Utf32View { data.data(), data.size() }).release_value_but_fixme_should_propagate_errors();
                 return RegexStringView { Utf16View { optional_utf16_storage } };
             });
 
@@ -172,6 +305,9 @@ public:
                 return new_views;
             },
             [](Utf32View view) {
+                if (view.is_empty())
+                    return Vector<RegexStringView> { view };
+
                 Vector<RegexStringView> views;
                 u32 newline = '\n';
                 while (!view.is_empty()) {
@@ -187,6 +323,9 @@ public:
                 return views;
             },
             [](Utf16View view) {
+                if (view.is_empty())
+                    return Vector<RegexStringView> { view };
+
                 Vector<RegexStringView> views;
                 u16 newline = '\n';
                 while (!view.is_empty()) {
@@ -201,7 +340,10 @@ public:
                     views.empend(view);
                 return views;
             },
-            [](Utf8View& view) {
+            [](Utf8View const& view) {
+                if (view.is_empty())
+                    return Vector<RegexStringView> { view };
+
                 Vector<RegexStringView> views;
                 auto it = view.begin();
                 auto previous_newline_position_it = it;
@@ -245,15 +387,28 @@ public:
         return view;
     }
 
-    String to_string() const
+    DeprecatedString to_deprecated_string() const
     {
         return m_view.visit(
-            [](StringView view) { return view.to_string(); },
-            [](Utf16View view) { return view.to_utf8(Utf16View::AllowInvalidCodeUnits::Yes); },
+            [](StringView view) { return view.to_deprecated_string(); },
+            [](Utf16View view) { return view.to_deprecated_string(Utf16View::AllowInvalidCodeUnits::Yes).release_value_but_fixme_should_propagate_errors(); },
             [](auto& view) {
                 StringBuilder builder;
                 for (auto it = view.begin(); it != view.end(); ++it)
                     builder.append_code_point(*it);
+                return builder.to_deprecated_string();
+            });
+    }
+
+    ErrorOr<String> to_string() const
+    {
+        return m_view.visit(
+            [](StringView view) { return String::from_utf8(view); },
+            [](Utf16View view) { return view.to_utf8(Utf16View::AllowInvalidCodeUnits::Yes); },
+            [](auto& view) -> ErrorOr<String> {
+                StringBuilder builder;
+                for (auto it = view.begin(); it != view.end(); ++it)
+                    TRY(builder.try_append_code_point(*it));
                 return builder.to_string();
             });
     }
@@ -264,9 +419,11 @@ public:
         return m_view.visit(
             [&](StringView view) -> u32 {
                 auto ch = view[index];
-                if (ch < 0)
-                    return 256u + ch;
-                return ch;
+                if constexpr (IsSigned<char>) {
+                    if (ch < 0)
+                        return 256u + ch;
+                    return ch;
+                }
             },
             [&](Utf32View const& view) -> u32 { return view[index]; },
             [&](Utf16View const& view) -> u32 { return view.code_point_at(index); },
@@ -296,22 +453,17 @@ public:
     bool operator==(char const* cstring) const
     {
         return m_view.visit(
-            [&](Utf32View) { return to_string() == cstring; },
-            [&](Utf16View) { return to_string() == cstring; },
+            [&](Utf32View) { return to_deprecated_string() == cstring; },
+            [&](Utf16View) { return to_deprecated_string() == cstring; },
             [&](Utf8View const& view) { return view.as_string() == cstring; },
             [&](StringView view) { return view == cstring; });
     }
 
-    bool operator!=(char const* cstring) const
-    {
-        return !(*this == cstring);
-    }
-
-    bool operator==(String const& string) const
+    bool operator==(DeprecatedString const& string) const
     {
         return m_view.visit(
-            [&](Utf32View) { return to_string() == string; },
-            [&](Utf16View) { return to_string() == string; },
+            [&](Utf32View) { return to_deprecated_string() == string; },
+            [&](Utf16View) { return to_deprecated_string() == string; },
             [&](Utf8View const& view) { return view.as_string() == string; },
             [&](StringView view) { return view == string; });
     }
@@ -319,15 +471,10 @@ public:
     bool operator==(StringView string) const
     {
         return m_view.visit(
-            [&](Utf32View) { return to_string() == string; },
-            [&](Utf16View) { return to_string() == string; },
+            [&](Utf32View) { return to_deprecated_string() == string; },
+            [&](Utf16View) { return to_deprecated_string() == string; },
             [&](Utf8View const& view) { return view.as_string() == string; },
             [&](StringView view) { return view == string; });
-    }
-
-    bool operator!=(StringView other) const
-    {
-        return !(*this == other);
     }
 
     bool operator==(Utf32View const& other) const
@@ -336,47 +483,32 @@ public:
             [&](Utf32View view) {
                 return view.length() == other.length() && __builtin_memcmp(view.code_points(), other.code_points(), view.length() * sizeof(u32)) == 0;
             },
-            [&](Utf16View) { return to_string() == RegexStringView { other }.to_string(); },
-            [&](Utf8View const& view) { return view.as_string() == RegexStringView { other }.to_string(); },
-            [&](StringView view) { return view == RegexStringView { other }.to_string(); });
-    }
-
-    bool operator!=(Utf32View const& other) const
-    {
-        return !(*this == other);
+            [&](Utf16View) { return to_deprecated_string() == RegexStringView { other }.to_deprecated_string(); },
+            [&](Utf8View const& view) { return view.as_string() == RegexStringView { other }.to_deprecated_string(); },
+            [&](StringView view) { return view == RegexStringView { other }.to_deprecated_string(); });
     }
 
     bool operator==(Utf16View const& other) const
     {
         return m_view.visit(
-            [&](Utf32View) { return to_string() == RegexStringView { other }.to_string(); },
+            [&](Utf32View) { return to_deprecated_string() == RegexStringView { other }.to_deprecated_string(); },
             [&](Utf16View const& view) { return view == other; },
-            [&](Utf8View const& view) { return view.as_string() == RegexStringView { other }.to_string(); },
-            [&](StringView view) { return view == RegexStringView { other }.to_string(); });
-    }
-
-    bool operator!=(Utf16View const& other) const
-    {
-        return !(*this == other);
+            [&](Utf8View const& view) { return view.as_string() == RegexStringView { other }.to_deprecated_string(); },
+            [&](StringView view) { return view == RegexStringView { other }.to_deprecated_string(); });
     }
 
     bool operator==(Utf8View const& other) const
     {
         return m_view.visit(
-            [&](Utf32View) { return to_string() == other.as_string(); },
-            [&](Utf16View) { return to_string() == other.as_string(); },
+            [&](Utf32View) { return to_deprecated_string() == other.as_string(); },
+            [&](Utf16View) { return to_deprecated_string() == other.as_string(); },
             [&](Utf8View const& view) { return view.as_string() == other.as_string(); },
             [&](StringView view) { return other.as_string() == view; });
     }
 
-    bool operator!=(Utf8View const& other) const
-    {
-        return !(*this == other);
-    }
-
     bool equals(RegexStringView other) const
     {
-        return other.m_view.visit([&](auto const& view) { return operator==(view); });
+        return other.m_view.visit([this](auto const& view) { return operator==(view); });
     }
 
     bool equals_ignoring_case(RegexStringView other) const
@@ -385,7 +517,7 @@ public:
         return m_view.visit(
             [&](StringView view) {
                 return other.m_view.visit(
-                    [&](StringView other_view) { return view.equals_ignoring_case(other_view); },
+                    [&](StringView other_view) { return view.equals_ignoring_ascii_case(other_view); },
                     [](auto&) -> bool { TODO(); });
             },
             [&](Utf16View view) {
@@ -439,19 +571,19 @@ public:
     }
 
 private:
-    Variant<StringView, Utf8View, Utf16View, Utf32View> m_view;
+    Variant<StringView, Utf8View, Utf16View, Utf32View> m_view { StringView {} };
     bool m_unicode { false };
 };
 
 class Match final {
 private:
-    Optional<FlyString> string;
+    Optional<DeprecatedFlyString> string;
 
 public:
     Match() = default;
     ~Match() = default;
 
-    Match(RegexStringView const view_, size_t const line_, size_t const column_, size_t const global_offset_)
+    Match(RegexStringView view_, size_t const line_, size_t const column_, size_t const global_offset_)
         : view(view_)
         , line(line_)
         , column(column_)
@@ -460,7 +592,7 @@ public:
     {
     }
 
-    Match(String const string_, size_t const line_, size_t const column_, size_t const global_offset_)
+    Match(DeprecatedString string_, size_t const line_, size_t const column_, size_t const global_offset_)
         : string(move(string_))
         , view(string.value().view())
         , line(line_)
@@ -489,8 +621,8 @@ public:
         left_column = 0;
     }
 
-    RegexStringView view { nullptr };
-    Optional<FlyString> capture_group_name {};
+    RegexStringView view {};
+    Optional<DeprecatedFlyString> capture_group_name {};
     size_t line { 0 };
     size_t column { 0 };
     size_t global_offset { 0 };
@@ -501,7 +633,7 @@ public:
 };
 
 struct MatchInput {
-    RegexStringView view { nullptr };
+    RegexStringView view {};
     AllOptions regex_options {};
     size_t start_offset { 0 }; // For Stateful matches, saved and restored from Regex::start_offset.
 
@@ -514,6 +646,7 @@ struct MatchInput {
     mutable size_t fail_counter { 0 };
     mutable Vector<size_t> saved_positions;
     mutable Vector<size_t> saved_code_unit_positions;
+    mutable Vector<size_t> saved_forks_since_last_save;
     mutable HashMap<u64, u64> checkpoints;
     mutable Optional<size_t> fork_to_replace;
 };
@@ -524,10 +657,11 @@ struct MatchState {
     size_t string_position_in_code_units { 0 };
     size_t instruction_position { 0 };
     size_t fork_at_position { 0 };
+    size_t forks_since_last_save { 0 };
     Optional<size_t> initiating_fork;
-    Vector<Match> matches;
-    Vector<Vector<Match>> capture_group_matches;
-    Vector<u64> repetition_marks;
+    COWVector<Match> matches;
+    COWVector<Vector<Match>> capture_group_matches;
+    COWVector<u64> repetition_marks;
 };
 
 }
@@ -538,7 +672,7 @@ template<>
 struct AK::Formatter<regex::RegexStringView> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, regex::RegexStringView value)
     {
-        auto string = value.to_string();
+        auto string = value.to_deprecated_string();
         return Formatter<StringView>::format(builder, string);
     }
 };

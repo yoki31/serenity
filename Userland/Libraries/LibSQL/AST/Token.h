@@ -1,14 +1,15 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  * Copyright (c) 2021, Jan de Visser <jan@de-visser.net>
+ * Copyright (c) 2021, Mahmoud Mandour <ma.mandourr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/DeprecatedString.h>
 #include <AK/HashMap.h>
-#include <AK/String.h>
 #include <AK/StringView.h>
 
 namespace SQL::AST {
@@ -53,6 +54,7 @@ namespace SQL::AST {
     __ENUMERATE_SQL_TOKEN("DEFERRED", Deferred, Keyword)                  \
     __ENUMERATE_SQL_TOKEN("DELETE", Delete, Keyword)                      \
     __ENUMERATE_SQL_TOKEN("DESC", Desc, Keyword)                          \
+    __ENUMERATE_SQL_TOKEN("DESCRIBE", Describe, Keyword)                  \
     __ENUMERATE_SQL_TOKEN("DETACH", Detach, Keyword)                      \
     __ENUMERATE_SQL_TOKEN("DISTINCT", Distinct, Keyword)                  \
     __ENUMERATE_SQL_TOKEN("DO", Do, Keyword)                              \
@@ -67,6 +69,7 @@ namespace SQL::AST {
     __ENUMERATE_SQL_TOKEN("EXISTS", Exists, Keyword)                      \
     __ENUMERATE_SQL_TOKEN("EXPLAIN", Explain, Keyword)                    \
     __ENUMERATE_SQL_TOKEN("FAIL", Fail, Keyword)                          \
+    __ENUMERATE_SQL_TOKEN("FALSE", False, Keyword)                        \
     __ENUMERATE_SQL_TOKEN("FILTER", Filter, Keyword)                      \
     __ENUMERATE_SQL_TOKEN("FIRST", First, Keyword)                        \
     __ENUMERATE_SQL_TOKEN("FOLLOWING", Following, Keyword)                \
@@ -149,6 +152,7 @@ namespace SQL::AST {
     __ENUMERATE_SQL_TOKEN("TO", To, Keyword)                              \
     __ENUMERATE_SQL_TOKEN("TRANSACTION", Transaction, Keyword)            \
     __ENUMERATE_SQL_TOKEN("TRIGGER", Trigger, Keyword)                    \
+    __ENUMERATE_SQL_TOKEN("TRUE", True, Keyword)                          \
     __ENUMERATE_SQL_TOKEN("UNBOUNDED", Unbounded, Keyword)                \
     __ENUMERATE_SQL_TOKEN("UNION", Union, Keyword)                        \
     __ENUMERATE_SQL_TOKEN("UNIQUE", Unique, Keyword)                      \
@@ -169,6 +173,7 @@ namespace SQL::AST {
     __ENUMERATE_SQL_TOKEN("_blob_", BlobLiteral, Blob)                    \
     __ENUMERATE_SQL_TOKEN("_eof_", Eof, Invalid)                          \
     __ENUMERATE_SQL_TOKEN("_invalid_", Invalid, Invalid)                  \
+    __ENUMERATE_SQL_TOKEN("?", Placeholder, Operator)                     \
     __ENUMERATE_SQL_TOKEN("&", Ampersand, Operator)                       \
     __ENUMERATE_SQL_TOKEN("*", Asterisk, Operator)                        \
     __ENUMERATE_SQL_TOKEN(",", Comma, Punctuation)                        \
@@ -219,7 +224,7 @@ struct SourcePosition {
 
 class Token {
 public:
-    Token(TokenType type, String value, SourcePosition start_position, SourcePosition end_position)
+    Token(TokenType type, DeprecatedString value, SourcePosition start_position, SourcePosition end_position)
         : m_type(type)
         , m_value(move(value))
         , m_start_position(start_position)
@@ -234,7 +239,7 @@ public:
     TokenType type() const { return m_type; }
     TokenCategory category() const { return category(m_type); }
 
-    String const& value() const { return m_value; }
+    DeprecatedString const& value() const { return m_value; }
     double double_value() const;
 
     SourcePosition const& start_position() const { return m_start_position; }
@@ -242,7 +247,7 @@ public:
 
 private:
     TokenType m_type;
-    String m_value;
+    DeprecatedString m_value;
     SourcePosition m_start_position;
     SourcePosition m_end_position;
 };

@@ -24,6 +24,15 @@ public:
         return nullptr;
     }
 
+    Element* previous_element_in_pre_order()
+    {
+        for (auto* node = static_cast<NodeType*>(this)->previous_in_pre_order(); node; node = node->previous_in_pre_order()) {
+            if (is<Element>(*node))
+                return verify_cast<Element>(node);
+        }
+        return nullptr;
+    }
+
     Element* next_element_sibling()
     {
         for (auto* sibling = static_cast<NodeType*>(this)->next_sibling(); sibling; sibling = sibling->next_sibling()) {
@@ -42,9 +51,10 @@ public:
         return nullptr;
     }
 
-    const Element* previous_element_sibling() const { return const_cast<NonDocumentTypeChildNode*>(this)->previous_element_sibling(); }
-    const Element* next_element_sibling() const { return const_cast<NonDocumentTypeChildNode*>(this)->next_element_sibling(); }
-    const Element* next_element_in_pre_order() const { return const_cast<NonDocumentTypeChildNode*>(this)->next_element_in_pre_order(); }
+    Element const* previous_element_sibling() const { return const_cast<NonDocumentTypeChildNode*>(this)->previous_element_sibling(); }
+    Element const* previous_element_in_pre_order() const { return const_cast<NonDocumentTypeChildNode*>(this)->previous_element_in_pre_order(); }
+    Element const* next_element_sibling() const { return const_cast<NonDocumentTypeChildNode*>(this)->next_element_sibling(); }
+    Element const* next_element_in_pre_order() const { return const_cast<NonDocumentTypeChildNode*>(this)->next_element_in_pre_order(); }
 
 protected:
     NonDocumentTypeChildNode() = default;

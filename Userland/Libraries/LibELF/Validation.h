@@ -6,12 +6,12 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <LibC/elf.h>
 
 namespace ELF {
 
-bool validate_elf_header(const ElfW(Ehdr) & elf_header, size_t file_size, bool verbose = true);
-bool validate_program_headers(const ElfW(Ehdr) & elf_header, size_t file_size, const u8* buffer, size_t buffer_size, String* interpreter_path, bool verbose = true);
+bool validate_elf_header(ElfW(Ehdr) const& elf_header, size_t file_size, bool verbose = true);
+ErrorOr<bool> validate_program_headers(ElfW(Ehdr) const& elf_header, size_t file_size, ReadonlyBytes buffer, StringBuilder* interpreter_path_builder = nullptr, bool verbose = true);
 
 } // end namespace ELF

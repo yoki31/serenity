@@ -22,8 +22,7 @@ describe("correct behavior", () => {
         checkCommonResults(duration1, duration2);
     });
 
-    // FIXME: Un-skip once ParseTemporalDurationString is implemented
-    test.skip("duration strings", () => {
+    test("duration strings", () => {
         const duration1 = "P1D";
         const duration2 = "P2D";
         checkCommonResults(duration1, duration2);
@@ -100,5 +99,15 @@ describe("errors", () => {
         expect(() => {
             Temporal.Duration.compare(duration, duration, { relativeTo: zonedDateTime });
         }).toThrowWithMessage(TypeError, "null is not a function");
+    });
+
+    test("UTC designator only allowed with bracketed time zone", () => {
+        const duration = new Temporal.Duration();
+        expect(() => {
+            Temporal.Duration.compare(duration, duration, { relativeTo: "2022-08-18T17:01Z" });
+        }).toThrowWithMessage(
+            RangeError,
+            "Invalid relativeTo string '2022-08-18T17:01Z': must not contain a UTC designator without bracketed time zone"
+        );
     });
 });

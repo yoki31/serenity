@@ -1,10 +1,14 @@
 #!/usr/bin/env -S bash ../.port_include.sh
-port=bash
-version=5.1.8
-useconfigure=true
+port='bash'
+version='5.2.15'
+useconfigure='true'
+use_fresh_config_sub='true'
+use_fresh_config_guess='true'
+config_sub_paths=("support/config.sub")
+config_guess_paths=("support/config.guess")
 configopts=("--disable-nls" "--without-bash-malloc")
-files="https://ftpmirror.gnu.org/gnu/bash/bash-${version}.tar.gz bash-${version}.tar.gz 0cfb5c9bb1a29f800a97bd242d19511c997a1013815b805e0fdd32214113d6be"
-auth_type="sha256"
+files="https://ftpmirror.gnu.org/gnu/bash/bash-${version}.tar.gz bash-${version}.tar.gz 13720965b5f4fc3a0d4b61dd37e7565c741da9a5be24edc2ae00182fc1b3588c"
+auth_type='sha256'
 
 build() {
     run_replace_in_file "s/define GETCWD_BROKEN 1/undef GETCWD_BROKEN/" config.h

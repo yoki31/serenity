@@ -16,17 +16,17 @@ If invoked without any arguments, `mount` prints a list of all currently mounted
 filesystems.
 
 If invoked as `mount -a`, `mount` mounts all the filesystems configured in
-`/etc/fstab`. This is normally done on system startup by
-[`SystemServer`(7)](../man7/SystemServer.md).
+`/etc/fstab` and `/etc/fstab.d/*`. This is normally done on system startup by
+[`SystemServer`(7)](help://man/7/SystemServer).
 
 Otherwise, `mount` performs a single filesystem mount. Source should be a path
 to a file containing the filesystem image. Target and fstype have the same
-meaning as in the [`mount`(2)](../man2/mount.md) syscall (if not specified,
+meaning as in the [`mount`(2)](help://man/2/mount) syscall (if not specified,
 fstype defaults to `ext2`).
 
 A special source value "none" is recognized, in which case
-[`mount`(8)](mount.md) will not attempt to open the source as a file, and will
-pass an invalid file descriptor to [`mount`(2)](../man2/mount.md). This is
+[`mount`(8)](help://man/8/mount) will not attempt to open the source as a file, and will
+pass an invalid file descriptor to [`mount`(2)](help://man/2/mount). This is
 useful for mounting  pseudo filesystems.
 
 Options correspond to the mount flags, and should be specified as a
@@ -36,7 +36,8 @@ Additionally, the name `defaults` is accepted and ignored.
 ## Files
 
 * `/etc/fstab` - read by `mount -a` on startup to find out which filesystems to mount.
-* `/proc/df` - read by `mount` to get information about mounted filesystems.
+* `/etc/fstab.d` - directory with drop-in additions to the normal `fstab` file, also read by `mount -a`.
+* `/sys/kernel/df` - read by `mount` to get information about mounted filesystems.
 
 ## Examples
 
@@ -47,4 +48,4 @@ Additionally, the name `defaults` is accepted and ignored.
 
 ## See also
 
-* [`mount`(2)](../man2/mount.md)
+* [`mount`(2)](help://man/2/mount)

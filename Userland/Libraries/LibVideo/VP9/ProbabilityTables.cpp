@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Hunter Salyer <thefalsehonesty@gmail.com>
+ * Copyright (c) 2022, Gregory Bertilson <zaggy1024@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -401,8 +402,8 @@ static constexpr InterModeProbs default_inter_mode_probs = {
     { 7, 166, 63 }, // 2 = two predicted mvs
     { 7, 94, 66 },  // 3 = one predicted/zero and one new mv
     { 8, 64, 46 },  // 4 = two new mvs
-    { 17, 81, 31 }, // 5 = one intra neighbour + x
-    { 25, 29, 30 }, // 6 = two intra neighbours
+    { 17, 81, 31 }, // 5 = one intra neighbor + x
+    { 25, 29, 30 }, // 6 = two intra neighbors
 };
 
 static constexpr InterpFilterProbs default_interp_filter_probs = {
@@ -1170,9 +1171,9 @@ KfUVModeProbs const& ProbabilityTables::kf_uv_mode_prob() const
     return constant_kf_uv_mode_prob;
 }
 
-void ProbabilityTables::save_probs(size_t index)
+void ProbabilityTables::save_probs(u8 index)
 {
-    m_saved_probability_tables.insert(index, m_current_probability_table);
+    m_saved_probability_tables[index] = m_current_probability_table;
 }
 
 void ProbabilityTables::reset_probs()
@@ -1200,7 +1201,7 @@ void ProbabilityTables::reset_probs()
     __builtin_memcpy(m_current_probability_table.coef_probs, default_coef_probs, sizeof(CoefProbs));
 }
 
-void ProbabilityTables::load_probs(size_t index)
+void ProbabilityTables::load_probs(u8 index)
 {
     auto old_table = m_current_probability_table;
     m_current_probability_table = m_saved_probability_tables.at(index);
@@ -1208,7 +1209,7 @@ void ProbabilityTables::load_probs(size_t index)
     __builtin_memcpy(m_current_probability_table.tx_probs, old_table.tx_probs, sizeof(TxProbs));
 }
 
-void ProbabilityTables::load_probs2(size_t index)
+void ProbabilityTables::load_probs2(u8 index)
 {
     auto new_table = m_saved_probability_tables.at(index);
     __builtin_memcpy(m_current_probability_table.skip_prob, new_table.skip_prob, sizeof(SkipProb));

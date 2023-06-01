@@ -4,15 +4,20 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Base64.h>
 #include <AK/Debug.h>
 #include <AK/Endian.h>
 #include <LibCore/ConfigFile.h>
 #include <LibCore/DateTime.h>
 #include <LibCore/File.h>
+#include <LibCore/StandardPaths.h>
 #include <LibCore/Timer.h>
 #include <LibCrypto/ASN1/ASN1.h>
 #include <LibCrypto/ASN1/PEM.h>
+#include <LibCrypto/PK/Code/EMSA_PKCS1_V1_5.h>
 #include <LibCrypto/PK/Code/EMSA_PSS.h>
+#include <LibFileSystem/FileSystem.h>
+#include <LibTLS/Certificate.h>
 #include <LibTLS/TLSv12.h>
 #include <errno.h>
 
@@ -90,7 +95,8 @@ void TLSv12::consume(ReadonlyBytes record)
     }
 
     if (index) {
-        m_context.message_buffer = m_context.message_buffer.slice(index, m_context.message_buffer.size() - index);
+        // FIXME: Propagate errors.
+        m_context.message_buffer = MUST(m_context.message_buffer.slice(index, m_context.message_buffer.size() - index));
     }
 }
 
@@ -98,99 +104,152 @@ bool Certificate::is_valid() const
 {
     auto now = Core::DateTime::now();
 
-    if (now < not_before) {
-        dbgln("certificate expired (not yet valid, signed for {})", not_before.to_string());
+    if (now < validity.not_before) {
+        dbgln("certificate expired (not yet valid, signed for {})", validity.not_before.to_deprecated_string());
         return false;
     }
 
-    if (not_after < now) {
-        dbgln("certificate expired (expiry date {})", not_after.to_string());
+    if (validity.not_after < now) {
+        dbgln("certificate expired (expiry date {})", validity.not_after.to_deprecated_string());
         return false;
     }
 
     return true;
 }
 
+// https://www.ietf.org/rfc/rfc5280.html#page-12
+bool Certificate::is_self_signed()
+{
+    if (m_is_self_signed.has_value())
+        return *m_is_self_signed;
+
+    // Self-signed certificates are self-issued certificates where the digital
+    // signature may be verified by the public key bound into the certificate.
+    if (!this->is_self_issued)
+        m_is_self_signed.emplace(false);
+
+    // FIXME: Actually check if we sign ourself
+
+    m_is_self_signed.emplace(true);
+    return *m_is_self_signed;
+}
+
 void TLSv12::try_disambiguate_error() const
 {
     dbgln("Possible failure cause(s): ");
     switch ((AlertDescription)m_context.critical_error) {
-    case AlertDescription::HandshakeFailure:
+    case AlertDescription::HANDSHAKE_FAILURE:
         if (!m_context.cipher_spec_set) {
             dbgln("- No cipher suite in common with {}", m_context.extensions.SNI);
         } else {
             dbgln("- Unknown internal issue");
         }
         break;
-    case AlertDescription::InsufficientSecurity:
+    case AlertDescription::INSUFFICIENT_SECURITY:
         dbgln("- No cipher suite in common with {} (the server is oh so secure)", m_context.extensions.SNI);
         break;
-    case AlertDescription::ProtocolVersion:
+    case AlertDescription::PROTOCOL_VERSION:
         dbgln("- The server refused to negotiate with TLS 1.2 :(");
         break;
-    case AlertDescription::UnexpectedMessage:
+    case AlertDescription::UNEXPECTED_MESSAGE:
         dbgln("- We sent an invalid message for the state we're in.");
         break;
-    case AlertDescription::BadRecordMAC:
+    case AlertDescription::BAD_RECORD_MAC:
         dbgln("- Bad MAC record from our side.");
         dbgln("- Ciphertext wasn't an even multiple of the block length.");
         dbgln("- Bad block cipher padding.");
         dbgln("- If both sides are compliant, the only cause is messages being corrupted in the network.");
         break;
-    case AlertDescription::RecordOverflow:
+    case AlertDescription::RECORD_OVERFLOW:
         dbgln("- Sent a ciphertext record which has a length bigger than 18432 bytes.");
         dbgln("- Sent record decrypted to a compressed record that has a length bigger than 18432 bytes.");
         dbgln("- If both sides are compliant, the only cause is messages being corrupted in the network.");
         break;
-    case AlertDescription::DecompressionFailure:
+    case AlertDescription::DECOMPRESSION_FAILURE_RESERVED:
         dbgln("- We sent invalid input for decompression (e.g. data that would expand to excessive length)");
         break;
-    case AlertDescription::IllegalParameter:
+    case AlertDescription::ILLEGAL_PARAMETER:
         dbgln("- We sent a parameter in the handshake that is out of range or inconsistent with the other parameters.");
         break;
-    case AlertDescription::DecodeError:
+    case AlertDescription::DECODE_ERROR:
         dbgln("- The message we sent cannot be decoded because a field was out of range or the length was incorrect.");
         dbgln("- If both sides are compliant, the only cause is messages being corrupted in the network.");
         break;
-    case AlertDescription::DecryptError:
+    case AlertDescription::DECRYPT_ERROR:
         dbgln("- A handshake crypto operation failed. This includes signature verification and validating Finished.");
         break;
-    case AlertDescription::AccessDenied:
+    case AlertDescription::ACCESS_DENIED:
         dbgln("- The certificate is valid, but once access control was applied, the sender decided to stop negotiation.");
         break;
-    case AlertDescription::InternalError:
+    case AlertDescription::INTERNAL_ERROR:
         dbgln("- No one knows, but it isn't a protocol failure.");
         break;
-    case AlertDescription::DecryptionFailed:
-    case AlertDescription::NoCertificate:
-    case AlertDescription::ExportRestriction:
+    case AlertDescription::DECRYPTION_FAILED_RESERVED:
+    case AlertDescription::NO_CERTIFICATE_RESERVED:
+    case AlertDescription::EXPORT_RESTRICTION_RESERVED:
         dbgln("- No one knows, the server sent a non-compliant alert.");
         break;
     default:
         dbgln("- No one knows.");
         break;
     }
+
+    dbgln("- {}", enum_to_value((AlertDescription)m_context.critical_error));
 }
 
 void TLSv12::set_root_certificates(Vector<Certificate> certificates)
 {
-    if (!m_context.root_ceritificates.is_empty())
+    if (!m_context.root_certificates.is_empty()) {
         dbgln("TLS warn: resetting root certificates!");
+        m_context.root_certificates.clear();
+    }
 
     for (auto& cert : certificates) {
-        if (!cert.is_valid())
-            dbgln("Certificate for {} by {} is invalid, things may or may not work!", cert.subject.subject, cert.issuer.subject);
+        if (!cert.is_valid()) {
+            dbgln("Certificate for {} by {} is invalid, things may or may not work!", cert.subject.common_name(), cert.issuer.common_name());
+        }
         // FIXME: Figure out what we should do when our root certs are invalid.
+
+        m_context.root_certificates.set(MUST(cert.subject.to_string()).to_deprecated_string(), cert);
     }
-    m_context.root_ceritificates = move(certificates);
+    dbgln_if(TLS_DEBUG, "{}: Set {} root certificates", this, m_context.root_certificates.size());
 }
 
-bool Context::verify_chain() const
+static bool wildcard_matches(StringView host, StringView subject)
+{
+    if (host == subject)
+        return true;
+
+    if (subject.starts_with("*."sv)) {
+        auto maybe_first_dot_index = host.find('.');
+        if (maybe_first_dot_index.has_value()) {
+            auto first_dot_index = maybe_first_dot_index.release_value();
+            return wildcard_matches(host.substring_view(first_dot_index + 1), subject.substring_view(2));
+        }
+    }
+
+    return false;
+}
+
+static bool certificate_subject_matches_host(Certificate const& cert, StringView host)
+{
+    if (wildcard_matches(host, cert.subject.common_name()))
+        return true;
+
+    for (auto& san : cert.SAN) {
+        if (wildcard_matches(host, san))
+            return true;
+    }
+
+    return false;
+}
+
+bool Context::verify_chain(StringView host) const
 {
     if (!options.validate_certificates)
         return true;
 
-    const Vector<Certificate>* local_chain = nullptr;
+    Vector<Certificate> const* local_chain = nullptr;
     if (is_server) {
         dbgln("Unsupported: Server mode");
         TODO();
@@ -198,44 +257,134 @@ bool Context::verify_chain() const
         local_chain = &certificates;
     }
 
-    // FIXME: Actually verify the signature, instead of just checking the name.
-    HashMap<String, String> chain;
-    HashTable<String> roots;
-    // First, walk the root certs.
-    for (auto& cert : root_ceritificates) {
-        roots.set(cert.subject.subject);
-        chain.set(cert.subject.subject, cert.issuer.subject);
+    if (local_chain->is_empty()) {
+        dbgln("verify_chain: Attempting to verify an empty chain");
+        return false;
     }
 
-    // Then, walk the local certs.
-    for (auto& cert : *local_chain) {
-        auto& issuer_unique_name = cert.issuer.unit.is_empty() ? cert.issuer.subject : cert.issuer.unit;
-        chain.set(cert.subject.subject, issuer_unique_name);
-    }
+    // RFC5246 section 7.4.2: The sender's certificate MUST come first in the list. Each following certificate
+    // MUST directly certify the one preceding it. Because certificate validation requires that root keys be
+    // distributed independently, the self-signed certificate that specifies the root certificate authority MAY be
+    // omitted from the chain, under the assumption that the remote end must already possess it in order to validate
+    // it in any case.
 
-    // Then verify the chain.
-    for (auto& it : chain) {
-        if (it.key == it.value) { // Allow self-signed certificates.
-            if (!roots.contains(it.key))
-                dbgln("Self-signed warning: Certificate for {} is self-signed", it.key);
-            continue;
+    if (!host.is_empty()) {
+        auto const& first_certificate = local_chain->first();
+        auto subject_matches = certificate_subject_matches_host(first_certificate, host);
+        if (!subject_matches) {
+            dbgln("verify_chain: First certificate does not match the hostname");
+            return false;
         }
+    } else {
+        // FIXME: The host is taken from m_context.extensions.SNI, when is this empty?
+        dbgln("FIXME: verify_chain called without host");
+        return false;
+    }
 
-        auto ref = chain.get(it.value);
-        if (!ref.has_value()) {
-            dbgln("Certificate for {} is not signed by anyone we trust ({})", it.key, it.value);
+    for (size_t cert_index = 0; cert_index < local_chain->size(); ++cert_index) {
+        auto const& cert = local_chain->at(cert_index);
+
+        auto subject_string = MUST(cert.subject.to_string());
+        auto issuer_string = MUST(cert.issuer.to_string());
+
+        if (!cert.is_valid()) {
+            dbgln("verify_chain: Certificate is not valid {}", subject_string);
             return false;
         }
 
-        if (ref.value() == it.key) // Allow (but warn about) mutually recursively signed cert A <-> B.
-            dbgln("Co-dependency warning: Certificate for {} is issued by {}, which itself is issued by {}", ref.value(), it.key, ref.value());
+        auto maybe_root_certificate = root_certificates.get(issuer_string.to_deprecated_string());
+        if (maybe_root_certificate.has_value()) {
+            auto& root_certificate = *maybe_root_certificate;
+            auto verification_correct = verify_certificate_pair(cert, root_certificate);
+
+            if (!verification_correct) {
+                dbgln("verify_chain: Signature inconsistent, {} was not signed by {} (root certificate)", subject_string, issuer_string);
+                return false;
+            }
+
+            // Root certificate reached, and correctly verified, so we can stop now
+            return true;
+        }
+
+        if (subject_string == issuer_string) {
+            dbgln("verify_chain: Non-root self-signed certificate");
+            return options.allow_self_signed_certificates;
+        }
+        if ((cert_index + 1) >= local_chain->size()) {
+            dbgln("verify_chain: No trusted root certificate found before end of certificate chain");
+            dbgln("verify_chain: Last certificate in chain was signed by {}", issuer_string);
+            return false;
+        }
+
+        auto const& parent_certificate = local_chain->at(cert_index + 1);
+        if (issuer_string != MUST(parent_certificate.subject.to_string())) {
+            dbgln("verify_chain: Next certificate in the chain is not the issuer of this certificate");
+            return false;
+        }
+
+        if (!(parent_certificate.is_allowed_to_sign_certificate && parent_certificate.is_certificate_authority)) {
+            dbgln("verify_chain: {} is not marked as certificate authority", issuer_string);
+            return false;
+        }
+        if (parent_certificate.path_length_constraint.has_value() && cert_index > parent_certificate.path_length_constraint.value()) {
+            dbgln("verify_chain: Path length for certificate exceeded");
+            return false;
+        }
+
+        bool verification_correct = verify_certificate_pair(cert, parent_certificate);
+        if (!verification_correct) {
+            dbgln("verify_chain: Signature inconsistent, {} was not signed by {}", subject_string, issuer_string);
+            return false;
+        }
     }
 
-    return true;
+    // Either a root certificate is reached, or parent validation fails as the end of the local chain is reached
+    VERIFY_NOT_REACHED();
+}
+
+bool Context::verify_certificate_pair(Certificate const& subject, Certificate const& issuer) const
+{
+    Crypto::Hash::HashKind kind = Crypto::Hash::HashKind::Unknown;
+    auto identifier = subject.signature_algorithm.identifier;
+
+    if (identifier == rsa_encryption_oid)
+        kind = Crypto::Hash::HashKind::None;
+    if (identifier == rsa_md5_encryption_oid)
+        kind = Crypto::Hash::HashKind::MD5;
+    if (identifier == rsa_sha1_encryption_oid)
+        kind = Crypto::Hash::HashKind::SHA1;
+    if (identifier == rsa_sha256_encryption_oid)
+        kind = Crypto::Hash::HashKind::SHA256;
+    if (identifier == rsa_sha384_encryption_oid)
+        kind = Crypto::Hash::HashKind::SHA384;
+    if (identifier == rsa_sha512_encryption_oid)
+        kind = Crypto::Hash::HashKind::SHA512;
+
+    if (kind == Crypto::Hash::HashKind::Unknown) {
+        dbgln("verify_certificate_pair: Unknown signature algorithm, expected RSA with SHA1/256/384/512, got OID {}", identifier);
+        return false;
+    }
+
+    Crypto::PK::RSAPrivateKey dummy_private_key;
+    Crypto::PK::RSAPublicKey public_key_copy { issuer.public_key.rsa };
+    auto rsa = Crypto::PK::RSA(public_key_copy, dummy_private_key);
+    auto verification_buffer_result = ByteBuffer::create_uninitialized(subject.signature_value.size());
+    if (verification_buffer_result.is_error()) {
+        dbgln("verify_certificate_pair: Unable to allocate buffer for verification");
+        return false;
+    }
+    auto verification_buffer = verification_buffer_result.release_value();
+    auto verification_buffer_bytes = verification_buffer.bytes();
+    rsa.verify(subject.signature_value, verification_buffer_bytes);
+
+    ReadonlyBytes message = subject.tbs_asn1.bytes();
+    auto pkcs1 = Crypto::PK::EMSA_PKCS1_V1_5<Crypto::Hash::Manager>(kind);
+    auto verification = pkcs1.verify(message, verification_buffer_bytes, subject.signature_value.size() * 8);
+    return verification == Crypto::VerificationConsistency::Consistent;
 }
 
 template<typename HMACType>
-static void hmac_pseudorandom_function(Bytes output, ReadonlyBytes secret, const u8* label, size_t label_length, ReadonlyBytes seed, ReadonlyBytes seed_b)
+static void hmac_pseudorandom_function(Bytes output, ReadonlyBytes secret, u8 const* label, size_t label_length, ReadonlyBytes seed, ReadonlyBytes seed_b)
 {
     if (!secret.size()) {
         dbgln("null secret");
@@ -273,7 +422,7 @@ static void hmac_pseudorandom_function(Bytes output, ReadonlyBytes secret, const
     }
 }
 
-void TLSv12::pseudorandom_function(Bytes output, ReadonlyBytes secret, const u8* label, size_t label_length, ReadonlyBytes seed, ReadonlyBytes seed_b)
+void TLSv12::pseudorandom_function(Bytes output, ReadonlyBytes secret, u8 const* label, size_t label_length, ReadonlyBytes seed, ReadonlyBytes seed_b)
 {
     // Simplification: We only support the HMAC PRF with the hash function SHA-256 or stronger.
 
@@ -301,68 +450,95 @@ void TLSv12::pseudorandom_function(Bytes output, ReadonlyBytes secret, const u8*
     }
 }
 
-TLSv12::TLSv12(Core::Object* parent, Options options)
-    : Core::Socket(Core::Socket::Type::TCP, parent)
+TLSv12::TLSv12(StreamVariantType stream, Options options)
+    : m_stream(move(stream))
 {
     m_context.options = move(options);
     m_context.is_server = false;
     m_context.tls_buffer = {};
-#ifdef SOCK_NONBLOCK
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-#else
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    int option = 1;
-    ioctl(fd, FIONBIO, &option);
-#endif
-    if (fd < 0) {
-        set_error(errno);
-    } else {
-        set_fd(fd);
-        set_mode(Core::OpenMode::ReadWrite);
-        set_error(0);
-    }
+
+    set_root_certificates(m_context.options.root_certificates.has_value()
+            ? *m_context.options.root_certificates
+            : DefaultRootCACertificates::the().certificates());
+
+    setup_connection();
 }
 
-bool TLSv12::add_client_key(ReadonlyBytes certificate_pem_buffer, ReadonlyBytes rsa_key) // FIXME: This should not be bound to RSA
+Vector<Certificate> TLSv12::parse_pem_certificate(ReadonlyBytes certificate_pem_buffer, ReadonlyBytes rsa_key) // FIXME: This should not be bound to RSA
 {
     if (certificate_pem_buffer.is_empty() || rsa_key.is_empty()) {
-        return true;
+        return {};
     }
+
     auto decoded_certificate = Crypto::decode_pem(certificate_pem_buffer);
     if (decoded_certificate.is_empty()) {
         dbgln("Certificate not PEM");
-        return false;
+        return {};
     }
 
-    auto maybe_certificate = Certificate::parse_asn1(decoded_certificate);
-    if (!maybe_certificate.has_value()) {
+    auto maybe_certificate = Certificate::parse_certificate(decoded_certificate);
+    if (!maybe_certificate.is_error()) {
         dbgln("Invalid certificate");
-        return false;
+        return {};
     }
 
     Crypto::PK::RSA rsa(rsa_key);
-    auto certificate = maybe_certificate.value();
+    auto certificate = maybe_certificate.release_value();
     certificate.private_key = rsa.private_key();
 
-    return add_client_key(certificate);
+    return { move(certificate) };
 }
 
 Singleton<DefaultRootCACertificates> DefaultRootCACertificates::s_the;
 DefaultRootCACertificates::DefaultRootCACertificates()
 {
-    // FIXME: This might not be the best format, find a better way to represent CA certificates.
-    auto config = Core::ConfigFile::open_for_system("ca_certs");
-    auto now = Core::DateTime::now();
-    auto last_year = Core::DateTime::create(now.year() - 1);
-    auto next_year = Core::DateTime::create(now.year() + 1);
-    for (auto& entity : config->groups()) {
-        Certificate cert;
-        cert.subject.subject = entity;
-        cert.issuer.subject = config->read_entry(entity, "issuer_subject", entity);
-        cert.subject.country = config->read_entry(entity, "country");
-        cert.not_before = Crypto::ASN1::parse_generalized_time(config->read_entry(entity, "not_before", "")).value_or(last_year);
-        cert.not_after = Crypto::ASN1::parse_generalized_time(config->read_entry(entity, "not_after", "")).value_or(next_year);
-        m_ca_certificates.append(move(cert));
+    auto load_result = load_certificates();
+    if (load_result.is_error()) {
+        dbgln("Failed to load CA Certificates: {}", load_result.error());
+        return;
     }
+
+    m_ca_certificates = load_result.release_value();
+}
+
+ErrorOr<Vector<Certificate>> DefaultRootCACertificates::load_certificates()
+{
+    auto cacert_file = TRY(Core::File::open("/etc/cacert.pem"sv, Core::File::OpenMode::Read));
+    auto data = TRY(cacert_file->read_until_eof());
+
+    auto user_cert_path = TRY(String::formatted("{}/.config/certs.pem", Core::StandardPaths::home_directory()));
+    if (FileSystem::exists(user_cert_path)) {
+        auto user_cert_file = TRY(Core::File::open(user_cert_path, Core::File::OpenMode::Read));
+        TRY(data.try_append(TRY(user_cert_file->read_until_eof())));
+    }
+
+    return TRY(parse_pem_root_certificate_authorities(data));
+}
+
+ErrorOr<Vector<Certificate>> DefaultRootCACertificates::parse_pem_root_certificate_authorities(ByteBuffer& data)
+{
+    Vector<Certificate> certificates;
+
+    auto certs = TRY(Crypto::decode_pems(data));
+
+    for (auto& cert : certs) {
+        auto certificate_result = Certificate::parse_certificate(cert.bytes());
+        if (certificate_result.is_error()) {
+            // FIXME: It would be nice to have more informations about the certificate we failed to parse.
+            //        Like: Issuer, Algorithm, CN, etc
+            dbgln("Failed to load certificate: {}", certificate_result.error());
+            continue;
+        }
+        auto certificate = certificate_result.release_value();
+        if (certificate.is_certificate_authority && certificate.is_self_signed()) {
+            TRY(certificates.try_append(move(certificate)));
+        } else {
+            dbgln("Skipped '{}' because it is not a valid root CA", TRY(certificate.subject.to_string()));
+        }
+    }
+
+    dbgln("Loaded {} of {} ({:.2}%) provided CA Certificates", certificates.size(), certs.size(), (certificates.size() * 100.0) / certs.size());
+
+    return certificates;
 }
 }

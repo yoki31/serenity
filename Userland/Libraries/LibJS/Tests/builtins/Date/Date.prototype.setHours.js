@@ -1,5 +1,5 @@
 test("basic functionality", () => {
-    let d = new Date(2000, 2, 1);
+    let d = new Date(2000, 11, 15);
 
     d.setHours(2);
     expect(d.getHours()).toBe(2);
@@ -24,4 +24,10 @@ test("basic functionality", () => {
 
     d.setHours("a");
     expect(d.getHours()).toBe(NaN);
+});
+
+test("invalid date", () => {
+    let date = new Date(NaN);
+    expect(date.setHours(2)).toBeNaN();
+    expect(date.getHours()).toBeNaN();
 });

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Luke Wilde <lukew@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,16 +9,15 @@
 
 #include "AccountHolder.h"
 #include "InboxModel.h"
-#include <AK/NonnullOwnPtrVector.h>
 #include <LibGUI/Widget.h>
 #include <LibGfx/ShareableBitmap.h>
 #include <LibIMAP/Client.h>
-#include <LibWeb/OutOfProcessWebView.h>
+#include <LibWebView/OutOfProcessWebView.h>
 
 class MailWidget final : public GUI::Widget {
     C_OBJECT(MailWidget)
 public:
-    virtual ~MailWidget() override;
+    virtual ~MailWidget() override = default;
 
     bool connect_and_login();
 
@@ -42,7 +42,7 @@ private:
 
     RefPtr<GUI::TreeView> m_mailbox_list;
     RefPtr<GUI::TableView> m_individual_mailbox_view;
-    RefPtr<Web::OutOfProcessWebView> m_web_view;
+    RefPtr<WebView::OutOfProcessWebView> m_web_view;
     RefPtr<GUI::Statusbar> m_statusbar;
 
     RefPtr<GUI::Menu> m_link_context_menu;

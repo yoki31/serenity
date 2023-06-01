@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Tobias Christiansen <tobyase@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,14 +10,15 @@
 #include "../Guide.h"
 #include "Tool.h"
 #include <AK/RefPtr.h>
+#include <LibGUI/Menu.h>
 
 namespace PixelPaint {
 
 class GuideTool final : public Tool {
 public:
-    GuideTool();
+    GuideTool() = default;
 
-    virtual ~GuideTool() override;
+    virtual ~GuideTool() override = default;
 
     virtual void on_mousedown(Layer*, MouseEvent&) override;
     virtual void on_mousemove(Layer*, MouseEvent&) override;
@@ -25,11 +27,13 @@ public:
 
     virtual void on_tool_activation() override;
 
-    virtual GUI::Widget* get_properties_widget() override;
-    virtual Variant<Gfx::StandardCursor, NonnullRefPtr<Gfx::Bitmap>> cursor() override { return Gfx::StandardCursor::Crosshair; }
+    virtual ErrorOr<GUI::Widget*> get_properties_widget() override;
+    virtual Variant<Gfx::StandardCursor, NonnullRefPtr<Gfx::Bitmap const>> cursor() override { return Gfx::StandardCursor::Crosshair; }
 
 private:
-    RefPtr<Guide> closest_guide(Gfx::IntPoint const&);
+    virtual StringView tool_name() const override { return "Guide Tool"sv; }
+
+    RefPtr<Guide> closest_guide(Gfx::IntPoint);
 
     RefPtr<GUI::Widget> m_properties_widget;
 

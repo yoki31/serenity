@@ -3,7 +3,6 @@
     fixed_width: 300
     fixed_height: 80
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
         spacing: 2
         margins: [0]
@@ -58,6 +57,6 @@
 
     @GUI::Statusbar {
         name: "statusbar"
-        label_count: 2
+        segment_count: 2
     }
 }

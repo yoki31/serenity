@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <Kernel/Arch/x86/InterruptDisabler.h>
 #include <Kernel/Process.h>
 #include <Kernel/TTY/TTY.h>
 
@@ -12,46 +11,56 @@ namespace Kernel {
 
 ErrorOr<FlatPtr> Process::sys$getsid(pid_t pid)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this)
-    REQUIRE_PROMISE(proc);
-    if (pid == 0)
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::stdio));
+    if (pid == 0 || pid == this->pid())
         return sid().value();
-    auto process = Process::from_pid(pid);
-    if (!process)
+    auto peer = Process::from_pid_in_same_jail(pid);
+    if (!peer)
         return ESRCH;
-    if (sid() != process->sid())
+    auto peer_sid = peer->sid();
+    if (sid() != peer_sid)
         return EPERM;
-    return process->sid().value();
+    return peer_sid.value();
 }
 
 ErrorOr<FlatPtr> Process::sys$setsid()
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this)
-    REQUIRE_PROMISE(proc);
-    InterruptDisabler disabler;
-    bool found_process_with_same_pgid_as_my_pid = false;
-    Process::for_each_in_pgrp(pid().value(), [&](auto&) {
-        found_process_with_same_pgid_as_my_pid = true;
-        return IterationDecision::Break;
-    });
-    if (found_process_with_same_pgid_as_my_pid)
-        return EPERM;
-    // Create a new Session and a new ProcessGroup.
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::proc));
 
-    m_pg = TRY(ProcessGroup::try_create(ProcessGroupID(pid().value())));
-    m_tty = nullptr;
-    ProtectedDataMutationScope scope { *this };
-    m_protected_values.sid = pid().value();
-    return sid().value();
+    // NOTE: ProcessGroup::create_if_unused_pgid() will fail with EPERM
+    //       if a process group with the same PGID already exists.
+    auto process_group = TRY(ProcessGroup::create_if_unused_pgid(ProcessGroupID(pid().value())));
+
+    auto new_sid = SessionID(pid().value());
+    auto credentials = this->credentials();
+    auto new_credentials = TRY(Credentials::create(
+        credentials->uid(),
+        credentials->gid(),
+        credentials->euid(),
+        credentials->egid(),
+        credentials->suid(),
+        credentials->sgid(),
+        credentials->extra_gids(),
+        new_sid,
+        credentials->pgid()));
+
+    with_mutable_protected_data([&](auto& protected_data) {
+        protected_data.tty = nullptr;
+        protected_data.process_group = move(process_group);
+        protected_data.credentials = move(new_credentials);
+    });
+    return new_sid.value();
 }
 
 ErrorOr<FlatPtr> Process::sys$getpgid(pid_t pid)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this)
-    REQUIRE_PROMISE(proc);
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::stdio));
     if (pid == 0)
         return pgid().value();
-    auto process = Process::from_pid(pid);
+    auto process = Process::from_pid_in_same_jail(pid);
     if (!process)
         return ESRCH;
     return process->pgid().value();
@@ -59,8 +68,8 @@ ErrorOr<FlatPtr> Process::sys$getpgid(pid_t pid)
 
 ErrorOr<FlatPtr> Process::sys$getpgrp()
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this)
-    REQUIRE_PROMISE(stdio);
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::stdio));
     return pgid().value();
 }
 
@@ -69,24 +78,24 @@ SessionID Process::get_sid_from_pgid(ProcessGroupID pgid)
     // FIXME: This xor sys$setsid() uses the wrong locking mechanism.
 
     SessionID sid { -1 };
-    Process::for_each_in_pgrp(pgid, [&](auto& process) {
+    MUST(Process::current().for_each_in_pgrp_in_same_jail(pgid, [&](auto& process) -> ErrorOr<void> {
         sid = process.sid();
-        return IterationDecision::Break;
-    });
+        return {};
+    }));
 
     return sid;
 }
 
 ErrorOr<FlatPtr> Process::sys$setpgid(pid_t specified_pid, pid_t specified_pgid)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this)
-    REQUIRE_PROMISE(proc);
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::proc));
     ProcessID pid = specified_pid ? ProcessID(specified_pid) : this->pid();
     if (specified_pgid < 0) {
         // The value of the pgid argument is less than 0, or is not a value supported by the implementation.
         return EINVAL;
     }
-    auto process = Process::from_pid(pid);
+    auto process = Process::from_pid_in_same_jail(pid);
     if (!process)
         return ESRCH;
     if (process != this && process->ppid() != this->pid()) {
@@ -118,8 +127,47 @@ ErrorOr<FlatPtr> Process::sys$setpgid(pid_t specified_pid, pid_t specified_pgid)
         return EPERM;
     }
     // FIXME: There are more EPERM conditions to check for here..
-    process->m_pg = TRY(ProcessGroup::try_find_or_create(new_pgid));
-    return 0;
+    auto process_group = TRY(ProcessGroup::find_or_create(new_pgid));
+    return process->with_mutable_protected_data([&process, &process_group, new_pgid](auto& protected_data) -> ErrorOr<FlatPtr> {
+        auto credentials = process->credentials();
+
+        auto new_credentials = TRY(Credentials::create(
+            credentials->uid(),
+            credentials->gid(),
+            credentials->euid(),
+            credentials->egid(),
+            credentials->suid(),
+            credentials->sgid(),
+            credentials->extra_gids(),
+            credentials->sid(),
+            new_pgid));
+
+        protected_data.credentials = move(new_credentials);
+        protected_data.process_group = move(process_group);
+        return 0;
+    });
+}
+
+ErrorOr<FlatPtr> Process::sys$get_root_session_id(pid_t force_sid)
+{
+    TRY(require_promise(Pledge::stdio));
+    pid_t sid = (force_sid == -1) ? this->sid().value() : force_sid;
+    if (sid == 0)
+        return 0;
+    while (true) {
+        auto sid_process = Process::from_pid_in_same_jail(sid);
+        if (!sid_process)
+            return ESRCH;
+        auto parent_pid = sid_process->ppid().value();
+        auto parent_process = Process::from_pid_in_same_jail(parent_pid);
+        if (!parent_process)
+            return ESRCH;
+        pid_t parent_sid = parent_process->sid().value();
+        if (parent_sid == 0)
+            break;
+        sid = parent_sid;
+    }
+    return sid;
 }
 
 }

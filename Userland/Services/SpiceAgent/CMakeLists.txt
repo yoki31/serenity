@@ -5,10 +5,11 @@ serenity_component(
 
 set(SOURCES
     main.cpp
+    FileTransferOperation.cpp
+    Message.cpp
     SpiceAgent.cpp
-    ClipboardServerConnection.cpp
 )
 
 serenity_bin(SpiceAgent)
-target_link_libraries(SpiceAgent LibGfx LibCore LibIPC)
+target_link_libraries(SpiceAgent PRIVATE LibCore LibDesktop LibFileSystem LibGfx LibGUI LibMain)
 add_dependencies(SpiceAgent Clipboard)

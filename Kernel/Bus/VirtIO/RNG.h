@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/RefCounted.h>
+#include <AK/AtomicRefCounted.h>
 #include <Kernel/Bus/VirtIO/Device.h>
 #include <Kernel/Devices/CharacterDevice.h>
 #include <Kernel/Random.h>
@@ -16,14 +16,15 @@ namespace Kernel::VirtIO {
 #define REQUESTQ 0
 
 class RNG final
-    : public RefCounted<RNG>
+    : public AtomicRefCounted<RNG>
     , public VirtIO::Device {
 public:
-    static NonnullRefPtr<RNG> must_create(PCI::DeviceIdentifier const&);
+    static NonnullLockRefPtr<RNG> must_create(PCI::DeviceIdentifier const&);
     virtual StringView purpose() const override { return class_name(); }
+    virtual StringView device_name() const override { return class_name(); }
     virtual ~RNG() override = default;
 
-    virtual void initialize() override;
+    virtual ErrorOr<void> initialize_virtio_resources() override;
 
 private:
     virtual StringView class_name() const override { return "VirtIORNG"sv; }

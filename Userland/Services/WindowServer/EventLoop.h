@@ -6,19 +6,21 @@
 
 #pragma once
 
+#include "ConnectionFromClient.h"
+#include "WMConnectionFromClient.h"
 #include <AK/ByteBuffer.h>
 #include <LibCore/EventLoop.h>
-#include <LibCore/LocalServer.h>
 #include <LibCore/Notifier.h>
+#include <LibIPC/MultiServer.h>
 
 namespace WindowServer {
 
-class ClientConnection;
+class ConnectionFromClient;
 
 class EventLoop {
 public:
     EventLoop();
-    virtual ~EventLoop();
+    virtual ~EventLoop() = default;
 
     int exec() { return m_event_loop.exec(); }
 
@@ -31,8 +33,8 @@ private:
     RefPtr<Core::Notifier> m_keyboard_notifier;
     int m_mouse_fd { -1 };
     RefPtr<Core::Notifier> m_mouse_notifier;
-    RefPtr<Core::LocalServer> m_window_server;
-    RefPtr<Core::LocalServer> m_wm_server;
+    OwnPtr<IPC::MultiServer<ConnectionFromClient>> m_window_server;
+    OwnPtr<IPC::MultiServer<WMConnectionFromClient>> m_wm_server;
 };
 
 }

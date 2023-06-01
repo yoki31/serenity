@@ -46,6 +46,20 @@ describe("parsing", () => {
         expect(`const [ a, [ ...{length} ] ] = [];`).toEval();
         expect(`let [ a, [ ...{length} ] ] = [];`).toEval();
     });
+
+    test("function parameters cannot use member expressions", () => {
+        expect("function f([a.b]) {}").not.toEval();
+        expect("function f([b[0]]) {}").not.toEval();
+
+        expect("function f({c:a.b}) {}").not.toEval();
+        expect("function f({a:b[0]}) {}").not.toEval();
+
+        expect("([a.b]) => 1").not.toEval();
+        expect("([b[0]]) => 2").not.toEval();
+
+        expect("({c:a.b}) => 3").not.toEval();
+        expect("({a:b[0]}) => 4").not.toEval();
+    });
 });
 
 describe("evaluating", () => {
@@ -208,5 +222,12 @@ describe("evaluating", () => {
         let { x = "foo", a = "bar" } = o;
         expect(x).toBe("foo");
         expect(a).toBe(o.a);
+    });
+
+    test("can use big int values as number-like properties", () => {
+        let o = { "99999999999999999": 1 };
+        let { 123n: a = "foo", 99999999999999999n: b = "bar" } = o;
+        expect(a).toBe("foo");
+        expect(b).toBe(1);
     });
 });

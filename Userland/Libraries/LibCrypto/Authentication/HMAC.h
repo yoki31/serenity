@@ -7,11 +7,14 @@
 #pragma once
 
 #include <AK/ByteBuffer.h>
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <AK/Types.h>
 #include <AK/Vector.h>
+
+#ifndef KERNEL
+#    include <AK/DeprecatedString.h>
+#endif
 
 constexpr static auto IPAD = 0x36;
 constexpr static auto OPAD = 0x5c;
@@ -36,23 +39,23 @@ public:
         reset();
     }
 
-    TagType process(const u8* message, size_t length)
+    TagType process(u8 const* message, size_t length)
     {
         reset();
         update(message, length);
         return digest();
     }
 
-    void update(const u8* message, size_t length)
+    void update(u8 const* message, size_t length)
     {
         m_inner_hasher.update(message, length);
     }
 
     TagType process(ReadonlyBytes span) { return process(span.data(), span.size()); }
-    TagType process(StringView string) { return process((const u8*)string.characters_without_null_termination(), string.length()); }
+    TagType process(StringView string) { return process((u8 const*)string.characters_without_null_termination(), string.length()); }
 
     void update(ReadonlyBytes span) { return update(span.data(), span.size()); }
-    void update(StringView string) { return update((const u8*)string.characters_without_null_termination(), string.length()); }
+    void update(StringView string) { return update((u8 const*)string.characters_without_null_termination(), string.length()); }
 
     TagType digest()
     {
@@ -70,22 +73,23 @@ public:
         m_outer_hasher.update(m_key_data + m_inner_hasher.block_size(), m_outer_hasher.block_size());
     }
 
-    String class_name() const
+#ifndef KERNEL
+    DeprecatedString class_name() const
     {
         StringBuilder builder;
-        builder.append("HMAC-");
+        builder.append("HMAC-"sv);
         builder.append(m_inner_hasher.class_name());
-        return builder.build();
+        return builder.to_deprecated_string();
     }
+#endif
 
 private:
-    void derive_key(const u8* key, size_t length)
+    void derive_key(u8 const* key, size_t length)
     {
         auto block_size = m_inner_hasher.block_size();
         // Note: The block size of all the current hash functions is 512 bits.
         Vector<u8, 64> v_key;
         v_key.resize(block_size);
-        __builtin_memset(v_key.data(), 0, block_size);
         auto key_buffer = v_key.span();
         // m_key_data is zero'd, so copying the data in
         // the first few bytes leaves the rest zero, which

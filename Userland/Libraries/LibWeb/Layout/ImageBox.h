@@ -6,34 +6,35 @@
 
 #pragma once
 
-#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/Layout/ReplacedBox.h>
 
 namespace Web::Layout {
 
-class ImageBox
-    : public ReplacedBox
-    , public HTML::BrowsingContext::ViewportClient {
+class ImageBox final : public ReplacedBox {
+    JS_CELL(ImageBox, ReplacedBox);
+
 public:
-    ImageBox(DOM::Document&, DOM::Element&, NonnullRefPtr<CSS::StyleProperties>, const ImageLoader&);
+    ImageBox(DOM::Document&, DOM::Element&, NonnullRefPtr<CSS::StyleProperties>, ImageProvider const&);
     virtual ~ImageBox() override;
 
     virtual void prepare_for_replaced_layout() override;
-    virtual void paint(PaintContext&, PaintPhase) override;
 
     const DOM::Element& dom_node() const { return static_cast<const DOM::Element&>(ReplacedBox::dom_node()); }
 
     bool renders_as_alt_text() const;
 
+    virtual JS::GCPtr<Painting::Paintable> create_paintable() const override;
+
+    auto const& image_provider() const { return m_image_provider; }
+    auto& image_provider() { return m_image_provider; }
+
+    void dom_node_did_update_alt_text(Badge<HTML::HTMLImageElement>);
+
 private:
-    // ^BrowsingContext::ViewportClient
-    virtual void browsing_context_did_set_viewport_rect(Gfx::IntRect const&) final;
+    ImageProvider const& m_image_provider;
 
-    int preferred_width() const;
-    int preferred_height() const;
-
-    const ImageLoader& m_image_loader;
+    Optional<CSSPixels> m_cached_alt_text_width;
 };
 
 }

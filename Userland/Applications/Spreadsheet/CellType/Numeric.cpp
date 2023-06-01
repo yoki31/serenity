@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, the SerenityOS developers.
+ * Copyright (c) 2020-2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -13,44 +13,42 @@
 namespace Spreadsheet {
 
 NumericCell::NumericCell()
-    : CellType("Numeric")
+    : CellType("Numeric"sv)
 {
 }
 
-NumericCell::~NumericCell()
+JS::ThrowCompletionOr<DeprecatedString> NumericCell::display(Cell& cell, CellTypeMetadata const& metadata) const
 {
+    return propagate_failure(cell, [&]() -> JS::ThrowCompletionOr<DeprecatedString> {
+        auto& vm = cell.sheet().global_object().vm();
+        auto value = TRY(js_value(cell, metadata));
+        DeprecatedString string;
+        if (metadata.format.is_empty())
+            string = TRY(value.to_deprecated_string(vm));
+        else
+            string = format_double(metadata.format.characters(), TRY(value.to_double(vm)));
+
+        if (metadata.length >= 0)
+            return string.substring(0, min(string.length(), metadata.length));
+
+        return string;
+    });
 }
 
-String NumericCell::display(Cell& cell, const CellTypeMetadata& metadata) const
+JS::ThrowCompletionOr<JS::Value> NumericCell::js_value(Cell& cell, CellTypeMetadata const&) const
 {
-    ScopeGuard propagate_exception { [&cell] {
-        if (auto exc = cell.sheet().interpreter().exception()) {
-            cell.sheet().interpreter().vm().clear_exception();
-            cell.set_exception(exc);
-        }
-    } };
-    auto value = js_value(cell, metadata);
-    String string;
-    if (metadata.format.is_empty())
-        string = value.to_string_without_side_effects();
-    else
-        string = format_double(metadata.format.characters(), TRY_OR_DISCARD(value.to_double(cell.sheet().global_object())));
-
-    if (metadata.length >= 0)
-        return string.substring(0, metadata.length);
-
-    return string;
+    return propagate_failure(cell, [&]() {
+        auto& vm = cell.sheet().global_object().vm();
+        return cell.js_data().to_number(vm);
+    });
 }
 
-JS::Value NumericCell::js_value(Cell& cell, const CellTypeMetadata&) const
+DeprecatedString NumericCell::metadata_hint(MetadataName metadata) const
 {
-    ScopeGuard propagate_exception { [&cell] {
-        if (auto exc = cell.sheet().interpreter().exception()) {
-            cell.sheet().interpreter().vm().clear_exception();
-            cell.set_exception(exc);
-        }
-    } };
-    return TRY_OR_DISCARD(cell.js_data().to_number(cell.sheet().global_object()));
+    if (metadata == MetadataName::Format)
+        return "Format string as accepted by `printf', all numeric formats refer to the same value (the cell's value)";
+
+    return {};
 }
 
 }

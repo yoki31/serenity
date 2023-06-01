@@ -16,12 +16,12 @@ public:
     Stack() = default;
     ~Stack() = default;
 
-    bool push(const T& item)
+    bool push(T const& item)
     {
         if (m_stack.size() >= stack_size)
             return false;
 
-        m_stack.append(item);
+        m_stack.unchecked_append(item);
         return true;
     }
 
@@ -30,7 +30,7 @@ public:
         if (m_stack.size() >= stack_size)
             return false;
 
-        m_stack.append(move(item));
+        m_stack.unchecked_append(move(item));
         return true;
     }
 
@@ -58,9 +58,14 @@ public:
         return m_stack.last();
     }
 
-    const T& top() const
+    T const& top() const
     {
         return m_stack.last();
+    }
+
+    bool contains_slow(T const& value) const
+    {
+        return m_stack.contains_slow(value);
     }
 
 private:
@@ -69,4 +74,6 @@ private:
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::Stack;
+#endif

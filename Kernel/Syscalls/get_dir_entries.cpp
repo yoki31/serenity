@@ -11,11 +11,11 @@ namespace Kernel {
 
 ErrorOr<FlatPtr> Process::sys$get_dir_entries(int fd, Userspace<void*> user_buffer, size_t user_size)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this);
-    REQUIRE_PROMISE(stdio);
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::stdio));
     if (user_size > NumericLimits<ssize_t>::max())
         return EINVAL;
-    auto description = TRY(fds().open_file_description(fd));
+    auto description = TRY(open_file_description(fd));
     auto buffer = TRY(UserOrKernelBuffer::for_user_buffer(user_buffer, static_cast<size_t>(user_size)));
     auto count = TRY(description->get_dir_entries(buffer, user_size));
     return count;

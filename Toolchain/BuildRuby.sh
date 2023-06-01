@@ -5,9 +5,13 @@ set -e
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-ARCH=${ARCH:-"i686"}
-PREFIX_DIR="$DIR/Local/$ARCH"
-BUILD_DIR="$DIR/Build/$ARCH"
+# shellcheck source=/dev/null
+. "${DIR}/../Meta/shell_include.sh"
+
+exit_if_running_as_root "Do not run BuildRuby.sh as root, parts of your Toolchain directory will become root-owned"
+
+PREFIX_DIR="$DIR/Local/ruby"
+BUILD_DIR="$DIR/Build/ruby"
 TARBALLS_DIR="$DIR/Tarballs"
 
 # shellcheck source=/dev/null
@@ -37,14 +41,13 @@ pushd "${TARBALLS_DIR}"
     fi
 popd
 
-if [ -z "$MAKEJOBS" ]; then
-    MAKEJOBS=$(nproc)
-fi
+NPROC=$(get_number_of_processing_units)
+[ -z "$MAKEJOBS" ] && MAKEJOBS=${NPROC}
 
 mkdir -p "${PREFIX_DIR}"
-mkdir -p "${BUILD_DIR}/ruby"
+mkdir -p "${BUILD_DIR}"
 
-pushd "${BUILD_DIR}/ruby"
+pushd "${BUILD_DIR}"
     "${TARBALLS_DIR}"/ruby-"${RUBY_VERSION}"/configure --prefix="${PREFIX_DIR}"
     make -j "${MAKEJOBS}"
     make install

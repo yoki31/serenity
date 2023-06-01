@@ -4,21 +4,22 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/IDAllocator.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
 
 namespace Web::HTML {
 
-Task::Task(Source source, DOM::Document* document, Function<void()> steps)
+static IDAllocator s_unique_task_source_allocator { static_cast<int>(Task::Source::UniqueTaskSourceStart) };
+
+Task::Task(Source source, DOM::Document const* document, JS::SafeFunction<void()> steps)
     : m_source(source)
     , m_steps(move(steps))
-    , m_document(document)
+    , m_document(JS::make_handle(document))
 {
 }
 
-Task::~Task()
-{
-}
+Task::~Task() = default;
 
 void Task::execute()
 {
@@ -29,7 +30,22 @@ void Task::execute()
 bool Task::is_runnable() const
 {
     // A task is runnable if its document is either null or fully active.
-    return !m_document || m_document->is_fully_active();
+    return !m_document.ptr() || m_document->is_fully_active();
+}
+
+DOM::Document const* Task::document() const
+{
+    return m_document.ptr();
+}
+
+UniqueTaskSource::UniqueTaskSource()
+    : source(static_cast<Task::Source>(s_unique_task_source_allocator.allocate()))
+{
+}
+
+UniqueTaskSource::~UniqueTaskSource()
+{
+    s_unique_task_source_allocator.deallocate(static_cast<int>(source));
 }
 
 }

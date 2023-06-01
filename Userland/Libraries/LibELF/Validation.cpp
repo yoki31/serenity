@@ -7,14 +7,18 @@
 
 #include <AK/Assertions.h>
 #include <AK/Checked.h>
-#include <AK/String.h>
+#include <Kernel/API/serenity_limits.h>
 #include <LibC/elf.h>
 #include <LibELF/Validation.h>
-#include <limits.h>
+
+#ifndef KERNEL
+#    include <limits.h>
+#    include <pthread.h>
+#endif
 
 namespace ELF {
 
-bool validate_elf_header(const ElfW(Ehdr) & elf_header, size_t file_size, bool verbose)
+bool validate_elf_header(ElfW(Ehdr) const& elf_header, size_t file_size, bool verbose)
 {
     if (!IS_ELF(elf_header)) {
         if (verbose)
@@ -22,13 +26,8 @@ bool validate_elf_header(const ElfW(Ehdr) & elf_header, size_t file_size, bool v
         return false;
     }
 
-#if ARCH(I386)
-    auto expected_class = ELFCLASS32;
-    auto expected_bitness = 32;
-#else
     auto expected_class = ELFCLASS64;
     auto expected_bitness = 64;
-#endif
     if (expected_class != elf_header.e_ident[EI_CLASS]) {
         if (verbose)
             dbgln("File is not a {}-bit ELF file.", expected_bitness);
@@ -47,9 +46,10 @@ bool validate_elf_header(const ElfW(Ehdr) & elf_header, size_t file_size, bool v
         return false;
     }
 
-    if (ELFOSABI_SYSV != elf_header.e_ident[EI_OSABI]) {
+    // NOTE: With Clang, -fprofile-instr-generate -fcoverage-mapping sets our ELF ABI Version to 3 b/c of SHF_GNU_RETAIN
+    if (ELFOSABI_SYSV != elf_header.e_ident[EI_OSABI] && ELFOSABI_LINUX != elf_header.e_ident[EI_OSABI]) {
         if (verbose)
-            dbgln("File has unknown OS ABI ({}), expected SYSV(0)!", elf_header.e_ident[EI_OSABI]);
+            dbgln("File has unknown OS ABI ({}), expected SYSV(0) or GNU/Linux(3)!", elf_header.e_ident[EI_OSABI]);
         return false;
     }
 
@@ -59,17 +59,12 @@ bool validate_elf_header(const ElfW(Ehdr) & elf_header, size_t file_size, bool v
         return false;
     }
 
-#if ARCH(I386)
-    auto expected_machine = EM_386;
-    auto expected_machine_name = "i386";
-#else
-    auto expected_machine = EM_X86_64;
-    auto expected_machine_name = "x86-64";
-#endif
+    auto expected_machines = Array { EM_X86_64, EM_AARCH64 };
+    auto expected_machine_names = Array { "x86-64"sv, "aarch64"sv };
 
-    if (expected_machine != elf_header.e_machine) {
+    if (!expected_machines.span().contains_slow(elf_header.e_machine)) {
         if (verbose)
-            dbgln("File has unknown machine ({}), expected {} ({})!", elf_header.e_machine, expected_machine_name, expected_machine);
+            dbgln("File has unknown machine ({}), expected {} ({})!", elf_header.e_machine, expected_machine_names.span(), expected_machines.span());
         return false;
     }
 
@@ -192,7 +187,7 @@ bool validate_elf_header(const ElfW(Ehdr) & elf_header, size_t file_size, bool v
     return true;
 }
 
-bool validate_program_headers(const ElfW(Ehdr) & elf_header, size_t file_size, const u8* buffer, size_t buffer_size, String* interpreter_path, bool verbose)
+ErrorOr<bool> validate_program_headers(ElfW(Ehdr) const& elf_header, size_t file_size, ReadonlyBytes buffer, StringBuilder* interpreter_path_builder, bool verbose)
 {
     Checked<size_t> total_size_of_program_headers = elf_header.e_phnum;
     total_size_of_program_headers *= elf_header.e_phentsize;
@@ -207,19 +202,19 @@ bool validate_program_headers(const ElfW(Ehdr) & elf_header, size_t file_size, c
     }
 
     // Can we actually parse all the program headers in the given buffer?
-    if (end_of_last_program_header > buffer_size) {
+    if (end_of_last_program_header > buffer.size()) {
         if (verbose)
-            dbgln("Unable to parse program headers from buffer, buffer too small! Buffer size: {}, End of program headers {}", buffer_size, end_of_last_program_header.value());
+            dbgln("Unable to parse program headers from buffer, buffer too small! Buffer size: {}, End of program headers {}", buffer.size(), end_of_last_program_header.value());
         return false;
     }
 
-    if (file_size < buffer_size) {
+    if (file_size < buffer.size()) {
         dbgln("We somehow read more from a file than was in the file in the first place!");
         VERIFY_NOT_REACHED();
     }
 
     size_t num_program_headers = elf_header.e_phnum;
-    auto program_header_begin = (const ElfW(Phdr)*)&(buffer[elf_header.e_phoff]);
+    auto program_header_begin = (const ElfW(Phdr)*)buffer.offset(elf_header.e_phoff);
 
     for (size_t header_index = 0; header_index < num_program_headers; ++header_index) {
         auto& program_header = program_header_begin[header_index];
@@ -258,7 +253,7 @@ bool validate_program_headers(const ElfW(Ehdr) & elf_header, size_t file_size, c
                     dbgln("Integer overflow while validating PT_INTERP header");
                 return false;
             }
-            if (program_header.p_offset + program_header.p_filesz > buffer_size) {
+            if (program_header.p_offset + program_header.p_filesz > buffer.size()) {
                 if (verbose)
                     dbgln("Found PT_INTERP header ({}), but the .interp section was not within the buffer :(", header_index);
                 return false;
@@ -268,8 +263,8 @@ bool validate_program_headers(const ElfW(Ehdr) & elf_header, size_t file_size, c
                     dbgln("Found PT_INTERP header ({}), but p_filesz is invalid ({})", header_index, program_header.p_filesz);
                 return false;
             }
-            if (interpreter_path)
-                *interpreter_path = String((const char*)&buffer[program_header.p_offset], program_header.p_filesz - 1);
+            if (interpreter_path_builder)
+                TRY(interpreter_path_builder->try_append({ buffer.offset(program_header.p_offset), program_header.p_filesz - 1 }));
             break;
         case PT_LOAD:
         case PT_DYNAMIC:
@@ -298,6 +293,21 @@ bool validate_program_headers(const ElfW(Ehdr) & elf_header, size_t file_size, c
                 if (verbose)
                     dbgln("Possible shenanigans! Validating an ELF with executable stack.");
             }
+
+            if (program_header.p_memsz != 0) {
+                if (program_header.p_memsz < static_cast<unsigned>(PTHREAD_STACK_MIN) || program_header.p_memsz > static_cast<unsigned>(PTHREAD_STACK_MAX)) {
+                    if (verbose)
+                        dbgln("PT_GNU_STACK defines an unacceptable stack size.");
+                    return false;
+                }
+
+                if (program_header.p_memsz % PAGE_SIZE != 0) {
+                    if (verbose)
+                        dbgln("PT_GNU_STACK size is not page-aligned.");
+                    return false;
+                }
+            }
+
             break;
         case PT_GNU_RELRO:
             if ((program_header.p_flags & PF_X) && (program_header.p_flags & PF_W)) {

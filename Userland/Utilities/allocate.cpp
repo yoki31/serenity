@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Format.h>
 #include <AK/Optional.h>
-#include <AK/String.h>
 #include <LibCore/ElapsedTimer.h>
-#include <string.h>
+#include <LibMain/Main.h>
 #include <unistd.h>
 
 static void usage()
@@ -22,25 +22,25 @@ enum class Unit {
     MiB,
 };
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
     int count = 50;
     auto unit = Unit::MiB;
 
-    if (argc >= 2) {
-        auto number = String(argv[1]).to_uint();
+    if (arguments.argc >= 2) {
+        auto number = arguments.strings[1].to_uint();
         if (!number.has_value()) {
             usage();
         }
         count = number.value();
     }
 
-    if (argc >= 3) {
-        if (strcmp(argv[2], "B") == 0)
+    if (arguments.argc >= 3) {
+        if (arguments.strings[2] == "B")
             unit = Unit::Bytes;
-        else if (strcmp(argv[2], "KiB") == 0)
+        else if (arguments.strings[2] == "KiB")
             unit = Unit::KiB;
-        else if (strcmp(argv[2], "MiB") == 0)
+        else if (arguments.strings[2] == "MiB")
             unit = Unit::MiB;
         else
             usage();
@@ -64,7 +64,7 @@ int main(int argc, char** argv)
         outln("failed.");
         return 1;
     }
-    outln("done in {}ms", timer.elapsed());
+    outln("done in {}ms", timer.elapsed_milliseconds());
 
     auto pages = count / PAGE_SIZE;
     auto step = pages / 10;
@@ -76,7 +76,7 @@ int main(int argc, char** argv)
         ptr[i * PAGE_SIZE] = 1;
 
         if (i != 0 && (i % step) == 0) {
-            auto ms = timer2.elapsed();
+            auto ms = timer2.elapsed_milliseconds();
             if (ms == 0)
                 ms = 1;
 
@@ -87,7 +87,7 @@ int main(int argc, char** argv)
             timer2.start();
         }
     }
-    outln("done in {}ms", timer.elapsed());
+    outln("done in {}ms", timer.elapsed_milliseconds());
 
     outln("sleeping for ten seconds...");
     for (int i = 0; i < 10; i++) {
@@ -99,7 +99,7 @@ int main(int argc, char** argv)
     outln("freeing memory...");
     timer.start();
     free(ptr);
-    outln("done in {}ms", timer.elapsed());
+    outln("done in {}ms", timer.elapsed_milliseconds());
 
     return 0;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -14,11 +14,12 @@ class AtomicsObject : public Object {
     JS_OBJECT(AtomicsObject, Object);
 
 public:
-    explicit AtomicsObject(GlobalObject&);
-    virtual void initialize(GlobalObject&) override;
+    virtual ThrowCompletionOr<void> initialize(Realm&) override;
     virtual ~AtomicsObject() override = default;
 
 private:
+    explicit AtomicsObject(Realm&);
+
     JS_DECLARE_NATIVE_FUNCTION(add);
     JS_DECLARE_NATIVE_FUNCTION(and_);
     JS_DECLARE_NATIVE_FUNCTION(compare_exchange);

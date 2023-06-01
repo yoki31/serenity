@@ -6,8 +6,8 @@
 
 #include <LibCore/Account.h>
 #include <LibCore/ArgsParser.h>
-#include <LibCore/File.h>
 #include <LibCore/System.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibMain/Main.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -21,23 +21,20 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         return 1;
     }
 
-    if (setegid(0) < 0) {
-        perror("setegid");
-        return 1;
-    }
+    TRY(Core::System::setegid(0));
 
-    TRY(Core::System::pledge("stdio wpath rpath cpath fattr tty", nullptr));
+    TRY(Core::System::pledge("stdio wpath rpath cpath fattr tty"));
     TRY(Core::System::unveil("/etc", "rwc"));
 
     int uid = 0;
     int gid = 0;
     bool lock = false;
     bool unlock = false;
-    const char* new_home_directory = nullptr;
+    StringView new_home_directory;
     bool move_home = false;
-    const char* shell = nullptr;
-    const char* gecos = nullptr;
-    const char* username = nullptr;
+    StringView shell;
+    StringView gecos;
+    StringView username;
 
     auto args_parser = Core::ArgsParser();
     args_parser.set_general_help("Modify a user account");
@@ -64,8 +61,8 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     auto& target_account = account_or_error.value();
 
     if (move_home) {
-        TRY(Core::System::unveil(target_account.home_directory().characters(), "c"));
-        TRY(Core::System::unveil(new_home_directory, "wc"));
+        TRY(Core::System::unveil(target_account.home_directory(), "c"sv));
+        TRY(Core::System::unveil(new_home_directory, "wc"sv));
     }
 
     unveil(nullptr, nullptr);
@@ -101,26 +98,26 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         target_account.set_password_enabled(true);
     }
 
-    if (new_home_directory) {
+    if (!new_home_directory.is_empty()) {
         if (move_home) {
-            int rc = rename(target_account.home_directory().characters(), new_home_directory);
-            if (rc < 0) {
-                if (errno == EXDEV) {
-                    auto result = Core::File::copy_file_or_directory(
-                        new_home_directory, target_account.home_directory().characters(),
-                        Core::File::RecursionMode::Allowed,
-                        Core::File::LinkMode::Disallowed,
-                        Core::File::AddDuplicateFileMarker::No);
+            auto maybe_error = Core::System::rename(target_account.home_directory(), new_home_directory);
+            if (maybe_error.is_error()) {
+                if (maybe_error.error().code() == EXDEV) {
+                    auto result = FileSystem::copy_file_or_directory(
+                        new_home_directory, target_account.home_directory(),
+                        FileSystem::RecursionMode::Allowed,
+                        FileSystem::LinkMode::Disallowed,
+                        FileSystem::AddDuplicateFileMarker::No);
 
                     if (result.is_error()) {
                         warnln("usermod: could not move directory {} : {}", target_account.home_directory().characters(), static_cast<Error const&>(result.error()));
                         return 1;
                     }
-                    rc = unlink(target_account.home_directory().characters());
-                    if (rc < 0)
-                        warnln("usermod: unlink {} : {}", target_account.home_directory().characters(), strerror(errno));
+                    maybe_error = Core::System::unlink(target_account.home_directory());
+                    if (maybe_error.is_error())
+                        warnln("usermod: unlink {} : {}", target_account.home_directory(), maybe_error.error().code());
                 } else {
-                    warnln("usermod: could not move directory {} : {}", target_account.home_directory().characters(), strerror(errno));
+                    warnln("usermod: could not move directory {} : {}", target_account.home_directory(), maybe_error.error().code());
                 }
             }
         }
@@ -128,19 +125,17 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         target_account.set_home_directory(new_home_directory);
     }
 
-    if (shell) {
+    if (!shell.is_empty()) {
         target_account.set_shell(shell);
     }
 
-    if (gecos) {
+    if (!gecos.is_empty()) {
         target_account.set_gecos(gecos);
     }
 
-    TRY(Core::System::pledge("stdio wpath rpath cpath fattr", nullptr));
-    if (!target_account.sync()) {
-        perror("Core::Account::Sync");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio wpath rpath cpath fattr"));
+
+    TRY(target_account.sync());
 
     return 0;
 }

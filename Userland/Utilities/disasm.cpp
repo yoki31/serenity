@@ -5,34 +5,38 @@
  */
 
 #include <AK/Debug.h>
+#include <AK/Demangle.h>
 #include <AK/OwnPtr.h>
 #include <AK/QuickSort.h>
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/MappedFile.h>
+#include <LibCore/System.h>
 #include <LibELF/Image.h>
+#include <LibMain/Main.h>
 #include <LibX86/Disassembler.h>
 #include <LibX86/ELFSymbolProvider.h>
 #include <string.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments args)
 {
-    const char* path = nullptr;
+    StringView path {};
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help(
         "Disassemble an executable, and show human-readable "
         "assembly code for each function.");
     args_parser.add_positional_argument(path, "Path to i386 binary file", "path");
-    args_parser.parse(argc, argv);
+    args_parser.parse(args);
 
-    auto file_or_error = Core::MappedFile::map(path);
-    if (file_or_error.is_error()) {
-        warnln("Could not map file: {}", file_or_error.error());
-        return 1;
+    RefPtr<Core::MappedFile> file;
+    u8 const* asm_data = nullptr;
+    size_t asm_size = 0;
+    if ((TRY(Core::System::stat(path))).st_size > 0) {
+        file = TRY(Core::MappedFile::map(path));
+        asm_data = static_cast<u8 const*>(file->data());
+        asm_size = file->size();
     }
-
-    auto& file = *file_or_error.value();
 
     struct Symbol {
         size_t value;
@@ -46,28 +50,26 @@ int main(int argc, char** argv)
     };
     Vector<Symbol> symbols;
 
-    const u8* asm_data = (const u8*)file.data();
-    size_t asm_size = file.size();
     size_t file_offset = 0;
     Vector<Symbol>::Iterator current_symbol = symbols.begin();
     OwnPtr<X86::ELFSymbolProvider> symbol_provider; // nullptr for non-ELF disassembly.
     OwnPtr<ELF::Image> elf;
-    if (asm_size >= 4 && strncmp((const char*)asm_data, "\u007fELF", 4) == 0) {
+    if (asm_size >= 4 && strncmp(reinterpret_cast<char const*>(asm_data), "\u007fELF", 4) == 0) {
         elf = make<ELF::Image>(asm_data, asm_size);
         if (elf->is_valid()) {
             symbol_provider = make<X86::ELFSymbolProvider>(*elf);
-            elf->for_each_section_of_type(SHT_PROGBITS, [&](const ELF::Image::Section& section) {
+            elf->for_each_section_of_type(SHT_PROGBITS, [&](ELF::Image::Section const& section) {
                 // FIXME: Disassemble all SHT_PROGBITS sections, not just .text.
                 if (section.name() != ".text")
                     return IterationDecision::Continue;
-                asm_data = (const u8*)section.raw_data();
+                asm_data = reinterpret_cast<u8 const*>(section.raw_data());
                 asm_size = section.size();
                 file_offset = section.address();
                 return IterationDecision::Break;
             });
             symbols.ensure_capacity(elf->symbol_count() + 1);
             symbols.append({ 0, 0, StringView() }); // Sentinel.
-            elf->for_each_symbol([&](const ELF::Image::Symbol& symbol) {
+            elf->for_each_symbol([&](ELF::Image::Symbol const& symbol) {
                 symbols.append({ symbol.value(), symbol.size(), symbol.name() });
                 return IterationDecision::Continue;
             });
@@ -116,19 +118,39 @@ int main(int argc, char** argv)
             while (current_symbol + 1 < symbols.end() && !(current_symbol + 1)->contains(virtual_offset) && (current_symbol + 1)->address() <= virtual_offset) {
                 ++current_symbol;
                 if (!is_first_symbol)
-                    outln("\n({} ({:p}-{:p}))\n", current_symbol->name, current_symbol->address(), current_symbol->address_end());
+                    outln("\n({} ({:p}-{:p}))\n", demangle(current_symbol->name), current_symbol->address(), current_symbol->address_end());
             }
             while (current_symbol + 1 < symbols.end() && (current_symbol + 1)->contains(virtual_offset)) {
                 if (!is_first_symbol && !current_instruction_is_in_symbol)
                     outln();
                 ++current_symbol;
                 current_instruction_is_in_symbol = true;
-                outln("{} ({:p}-{:p}):", current_symbol->name, current_symbol->address(), current_symbol->address_end());
+                outln("{} ({:p}-{:p}):", demangle(current_symbol->name), current_symbol->address(), current_symbol->address_end());
             }
 
             is_first_symbol = false;
         }
 
-        outln("{:p}  {}", virtual_offset, insn.value().to_string(virtual_offset, symbol_provider));
+        size_t length = insn.value().length();
+        StringBuilder builder;
+        builder.appendff("{:p}  ", virtual_offset);
+        for (size_t i = 0; i < 7; i++) {
+            if (i < length)
+                builder.appendff("{:02x} ", asm_data[offset + i]);
+            else
+                builder.append("   "sv);
+        }
+        builder.append(" "sv);
+        builder.append(insn.value().to_deprecated_string(virtual_offset, symbol_provider));
+        outln("{}", builder.string_view());
+
+        for (size_t bytes_printed = 7; bytes_printed < length; bytes_printed += 7) {
+            builder.clear();
+            builder.appendff("{:p} ", virtual_offset + bytes_printed);
+            for (size_t i = bytes_printed; i < bytes_printed + 7 && i < length; i++)
+                builder.appendff(" {:02x}", asm_data[offset + i]);
+            outln("{}", builder.string_view());
+        }
     }
+    return 0;
 }

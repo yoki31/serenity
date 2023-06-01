@@ -5,33 +5,38 @@
  */
 
 #include <AK/Assertions.h>
+#include <AK/CharacterTypes.h>
+#include <AK/FloatingPointStringConversions.h>
 #include <AK/HashMap.h>
 #include <AK/Noncopyable.h>
 #include <AK/Random.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Types.h>
 #include <AK/Utf8View.h>
-#include <LibELF/AuxiliaryVector.h>
-#include <LibPthread/pthread.h>
 #include <alloca.h>
 #include <assert.h>
+#include <bits/pthread_cancel.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
 #include <sys/internals.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <syscall.h>
 #include <unistd.h>
 #include <wchar.h>
 
-static void strtons(const char* str, char** endptr)
+static void strtons(char const* str, char** endptr)
 {
     assert(endptr);
     char* ptr = const_cast<char*>(str);
@@ -46,7 +51,7 @@ enum Sign {
     Positive,
 };
 
-static Sign strtosign(const char* str, char** endptr)
+static Sign strtosign(char const* str, char** endptr)
 {
     assert(endptr);
     if (*str == '+') {
@@ -125,12 +130,12 @@ public:
 private:
     bool can_append_digit(int digit)
     {
-        const bool is_below_cutoff = positive() ? (m_num < m_cutoff) : (m_num > m_cutoff);
+        bool const is_below_cutoff = positive() ? (m_num < m_cutoff) : (m_num > m_cutoff);
 
         if (is_below_cutoff) {
             return true;
         } else {
-            return m_num == m_cutoff && digit < m_max_digit_after_cutoff;
+            return m_num == m_cutoff && digit <= m_max_digit_after_cutoff;
         }
     }
 
@@ -157,14 +162,14 @@ static bool is_either(char* str, int offset, char lower, char upper)
 }
 
 template<typename Callback>
-inline int generate_unique_filename(char* pattern, Callback callback)
+inline int generate_unique_filename(char* pattern, size_t suffix_length, Callback callback)
 {
     size_t length = strlen(pattern);
 
-    if (length < 6 || memcmp(pattern + length - 6, "XXXXXX", 6))
+    if (length < 6 + suffix_length || memcmp(pattern + length - 6 - suffix_length, "XXXXXX", 6))
         return EINVAL;
 
-    size_t start = length - 6;
+    size_t start = length - 6 - suffix_length;
 
     constexpr char random_characters[] = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -178,6 +183,166 @@ inline int generate_unique_filename(char* pattern, Callback callback)
     return EEXIST;
 }
 
+static bool is_infinity_string(char* parse_ptr, char** endptr)
+{
+    if (is_either(parse_ptr, 0, 'i', 'I')) {
+        if (is_either(parse_ptr, 1, 'n', 'N')) {
+            if (is_either(parse_ptr, 2, 'f', 'F')) {
+                parse_ptr += 3;
+                if (is_either(parse_ptr, 0, 'i', 'I')) {
+                    if (is_either(parse_ptr, 1, 'n', 'N')) {
+                        if (is_either(parse_ptr, 2, 'i', 'I')) {
+                            if (is_either(parse_ptr, 3, 't', 'T')) {
+                                if (is_either(parse_ptr, 4, 'y', 'Y')) {
+                                    parse_ptr += 5;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (endptr)
+                    *endptr = parse_ptr;
+
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool is_nan_string(char* parse_ptr, char** endptr)
+{
+    // FIXME: Actually parse (or at least skip) the (n-char-sequenceopt) part
+    if (is_either(parse_ptr, 0, 'n', 'N')) {
+        if (is_either(parse_ptr, 1, 'a', 'A')) {
+            if (is_either(parse_ptr, 2, 'n', 'N')) {
+                if (endptr)
+                    *endptr = parse_ptr + 3;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+template<FloatingPoint T>
+static T c_str_to_floating_point(char const* str, char** endptr)
+{
+    // First, they decompose the input string into three parts:
+    char* parse_ptr = const_cast<char*>(str);
+
+    // An initial, possibly empty, sequence of white-space characters (as specified by isspace())
+    strtons(parse_ptr, &parse_ptr);
+
+    // A subject sequence interpreted as a floating-point constant or representing infinity or NaN
+
+    if (*parse_ptr == '\0') {
+        if (endptr)
+            *endptr = const_cast<char*>(str);
+        return 0.;
+    }
+
+    bool is_hex = [&] {
+        // A hexfloat must start with either 0x, 0X, -0x or -0X and have something after it
+        char const* parse_head = parse_ptr;
+        if (*parse_head == '-')
+            ++parse_head;
+
+        if (*parse_head != '0')
+            return false;
+
+        ++parse_head;
+
+        if (*parse_head != 'x')
+            return false;
+
+        ++parse_head;
+
+        // We must have at least one digit but it can come after the "decimal" point.
+
+        if (is_ascii_hex_digit(*parse_head))
+            return true;
+
+        if (*parse_head != '.')
+            return false;
+
+        ++parse_head;
+
+        return is_ascii_hex_digit(*parse_head);
+    }();
+
+    AK::FloatingPointParseResults<T> double_parse_result;
+    if (is_hex) {
+        // A 0x or 0X, then a non-empty sequence of hexadecimal digits optionally containing a radix character;
+        // then an optional binary exponent part consisting of the character 'p' or the character 'P',
+        // optionally followed by a '+' or '-' character, and then followed by one or more decimal digits
+
+        double_parse_result = AK::parse_first_hexfloat_until_zero_character<T>(parse_ptr);
+    } else {
+        // A non-empty sequence of decimal digits optionally containing a radix character;
+        // then an optional exponent part consisting of the character 'e' or the character 'E',
+        // optionally followed by a '+' or '-' character, and then followed by one or more decimal digits
+        double_parse_result = AK::parse_first_floating_point_until_zero_character<T>(parse_ptr);
+    }
+
+    if (double_parse_result.error == AK::FloatingPointError::None) {
+        // The only way to get NaN (which we shouldn't) or infinities is rounding up to them so we
+        // have to set ERANGE in that case.
+        if (!__builtin_isfinite(double_parse_result.value))
+            errno = ERANGE;
+
+        if (endptr)
+            *endptr = const_cast<char*>(double_parse_result.end_ptr);
+        return double_parse_result.value;
+    }
+
+    if (double_parse_result.error == AK::FloatingPointError::RoundedDownToZero || double_parse_result.error == AK::FloatingPointError::OutOfRange) {
+        // This is a special case for strtod, where we have a double so close to zero we had to round
+        // it to zero, in which case we have to set ERANGE
+        errno = ERANGE;
+
+        if (endptr)
+            *endptr = const_cast<char*>(double_parse_result.end_ptr);
+        return double_parse_result.value;
+    }
+
+    // The only way we are here is if the input was not valid for parse_first_floating_point or not a valid hex float
+    // So the only cases left are:
+    // - One of INF or INFINITY, ignoring case
+    // - One of NAN or NAN(n-char-sequenceopt), ignoring case in the NAN part
+
+    const Sign sign = strtosign(parse_ptr, &parse_ptr);
+
+    if (is_infinity_string(parse_ptr, endptr)) {
+        // Don't set errno to ERANGE here:
+        // The caller may want to distinguish between "input is
+        // literal infinity" and "input is not literal infinity
+        // but did not fit into double".
+        if (sign != Sign::Negative)
+            return static_cast<T>(__builtin_huge_val());
+        else
+            return static_cast<T>(-__builtin_huge_val());
+    }
+
+    if (is_nan_string(parse_ptr, endptr)) {
+        errno = ERANGE;
+        // FIXME: Do we actually want to return "different" NaN bit values?
+        if (sign != Sign::Negative)
+            return static_cast<T>(__builtin_nan(""));
+        else
+            return static_cast<T>(-__builtin_nan(""));
+    }
+
+    // If no conversion could be performed, 0 shall be returned, and errno may be set to [EINVAL].
+    // FIXME: This is in the posix standard linked from strtod but not in implementations of strtod
+    //        and not in the man pages for linux strtod.
+    if (endptr)
+        *endptr = const_cast<char*>(str);
+    return 0;
+}
+
 extern "C" {
 
 void exit(int status)
@@ -189,8 +354,7 @@ void exit(int status)
 
     extern void _fini();
     _fini();
-    fflush(stdout);
-    fflush(stderr);
+    fflush(nullptr);
 
 #ifndef _DYNAMIC_LOADER
     __pthread_key_destroy_for_current_thread();
@@ -209,6 +373,13 @@ int atexit(void (*handler)())
     return __cxa_atexit(__atexit_to_cxa_atexit, (void*)handler, nullptr);
 }
 
+void _abort()
+{
+    // According to the GCC manual __builtin_trap() can call abort() so using it here might not seem safe at first. However,
+    // on all the platforms we support GCC emits an undefined instruction instead of a call.
+    __builtin_trap();
+}
+
 void abort()
 {
     // For starters, send ourselves a SIGABRT.
@@ -222,21 +393,21 @@ void abort()
     _abort();
 }
 
-static HashTable<const char*> s_malloced_environment_variables;
+static HashTable<FlatPtr> s_malloced_environment_variables;
 
-static void free_environment_variable_if_needed(const char* var)
+static void free_environment_variable_if_needed(char const* var)
 {
-    if (!s_malloced_environment_variables.contains(var))
+    if (!s_malloced_environment_variables.contains((FlatPtr)var))
         return;
+    s_malloced_environment_variables.remove((FlatPtr)var);
     free(const_cast<char*>(var));
-    s_malloced_environment_variables.remove(var);
 }
 
-char* getenv(const char* name)
+char* getenv(char const* name)
 {
     size_t vl = strlen(name);
     for (size_t i = 0; environ[i]; ++i) {
-        const char* decl = environ[i];
+        char const* decl = environ[i];
         char* eq = strchr(decl, '=');
         if (!eq)
             continue;
@@ -250,14 +421,15 @@ char* getenv(const char* name)
     return nullptr;
 }
 
-char* secure_getenv(const char* name)
+char* secure_getenv(char const* name)
 {
     if (getauxval(AT_SECURE))
         return nullptr;
     return getenv(name);
 }
 
-int unsetenv(const char* name)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/unsetenv.html
+int unsetenv(char const* name)
 {
     auto new_var_len = strlen(name);
     size_t environ_size = 0;
@@ -297,17 +469,27 @@ int clearenv()
     return 0;
 }
 
-int setenv(const char* name, const char* value, int overwrite)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/setenv.html
+int setenv(char const* name, char const* value, int overwrite)
 {
     if (!overwrite && getenv(name))
         return 0;
-    auto length = strlen(name) + strlen(value) + 2;
-    auto* var = (char*)malloc(length);
-    snprintf(var, length, "%s=%s", name, value);
-    s_malloced_environment_variables.set(var);
+    auto const total_length = strlen(name) + strlen(value) + 2;
+    auto* var = (char*)malloc(total_length);
+    snprintf(var, total_length, "%s=%s", name, value);
+    s_malloced_environment_variables.set((FlatPtr)var);
     return putenv(var);
 }
 
+// A non-evil version of putenv that will strdup the env (and free it later)
+int serenity_putenv(char const* new_var, size_t length)
+{
+    auto* var = strndup(new_var, length);
+    s_malloced_environment_variables.set((FlatPtr)var);
+    return putenv(var);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/putenv.html
 int putenv(char* new_var)
 {
     char* new_eq = strchr(new_var, '=');
@@ -358,14 +540,14 @@ int putenv(char* new_var)
     return 0;
 }
 
-static const char* __progname = NULL;
+static char const* __progname = NULL;
 
-const char* getprogname()
+char const* getprogname()
 {
     return __progname;
 }
 
-void setprogname(const char* progname)
+void setprogname(char const* progname)
 {
     for (int i = strlen(progname) - 1; i >= 0; i--) {
         if (progname[i] == '/') {
@@ -377,304 +559,33 @@ void setprogname(const char* progname)
     __progname = progname;
 }
 
-double strtod(const char* str, char** endptr)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtod.html
+double strtod(char const* str, char** endptr)
 {
-    // Parse spaces, sign, and base
-    char* parse_ptr = const_cast<char*>(str);
-    strtons(parse_ptr, &parse_ptr);
-    const Sign sign = strtosign(parse_ptr, &parse_ptr);
-
-    // Parse inf/nan, if applicable.
-    if (is_either(parse_ptr, 0, 'i', 'I')) {
-        if (is_either(parse_ptr, 1, 'n', 'N')) {
-            if (is_either(parse_ptr, 2, 'f', 'F')) {
-                parse_ptr += 3;
-                if (is_either(parse_ptr, 0, 'i', 'I')) {
-                    if (is_either(parse_ptr, 1, 'n', 'N')) {
-                        if (is_either(parse_ptr, 2, 'i', 'I')) {
-                            if (is_either(parse_ptr, 3, 't', 'T')) {
-                                if (is_either(parse_ptr, 4, 'y', 'Y')) {
-                                    parse_ptr += 5;
-                                }
-                            }
-                        }
-                    }
-                }
-                if (endptr)
-                    *endptr = parse_ptr;
-                // Don't set errno to ERANGE here:
-                // The caller may want to distinguish between "input is
-                // literal infinity" and "input is not literal infinity
-                // but did not fit into double".
-                if (sign != Sign::Negative) {
-                    return __builtin_huge_val();
-                } else {
-                    return -__builtin_huge_val();
-                }
-            }
-        }
-    }
-    if (is_either(parse_ptr, 0, 'n', 'N')) {
-        if (is_either(parse_ptr, 1, 'a', 'A')) {
-            if (is_either(parse_ptr, 2, 'n', 'N')) {
-                if (endptr)
-                    *endptr = parse_ptr + 3;
-                errno = ERANGE;
-                if (sign != Sign::Negative) {
-                    return __builtin_nan("");
-                } else {
-                    return -__builtin_nan("");
-                }
-            }
-        }
-    }
-
-    // Parse base
-    char exponent_lower;
-    char exponent_upper;
-    int base = 10;
-    if (*parse_ptr == '0') {
-        const char base_ch = *(parse_ptr + 1);
-        if (base_ch == 'x' || base_ch == 'X') {
-            base = 16;
-            parse_ptr += 2;
-        }
-    }
-
-    if (base == 10) {
-        exponent_lower = 'e';
-        exponent_upper = 'E';
-    } else {
-        exponent_lower = 'p';
-        exponent_upper = 'P';
-    }
-
-    // Parse "digits", possibly keeping track of the exponent offset.
-    // We parse the most significant digits and the position in the
-    // base-`base` representation separately. This allows us to handle
-    // numbers like `0.0000000000000000000000000000000000001234` or
-    // `1234567890123456789012345678901234567890` with ease.
-    LongLongParser digits { sign, base };
-    bool digits_usable = false;
-    bool should_continue = true;
-    bool digits_overflow = false;
-    bool after_decimal = false;
-    int exponent = 0;
-    do {
-        if (!after_decimal && *parse_ptr == '.') {
-            after_decimal = true;
-            parse_ptr += 1;
-            continue;
-        }
-
-        bool is_a_digit;
-        if (digits_overflow) {
-            is_a_digit = digits.parse_digit(*parse_ptr) != -1;
-        } else {
-            DigitConsumeDecision decision = digits.consume(*parse_ptr);
-            switch (decision) {
-            case DigitConsumeDecision::Consumed:
-                is_a_digit = true;
-                // The very first actual digit must pass here:
-                digits_usable = true;
-                break;
-            case DigitConsumeDecision::PosOverflow:
-            case DigitConsumeDecision::NegOverflow:
-                is_a_digit = true;
-                digits_overflow = true;
-                break;
-            case DigitConsumeDecision::Invalid:
-                is_a_digit = false;
-                break;
-            default:
-                VERIFY_NOT_REACHED();
-            }
-        }
-
-        if (is_a_digit) {
-            exponent -= after_decimal ? 1 : 0;
-            exponent += digits_overflow ? 1 : 0;
-        }
-
-        should_continue = is_a_digit;
-        parse_ptr += should_continue;
-    } while (should_continue);
-
-    if (!digits_usable) {
-        // No actual number value available.
-        if (endptr)
-            *endptr = const_cast<char*>(str);
-        return 0.0;
-    }
-
-    // Parse exponent.
-    // We already know the next character is not a digit in the current base,
-    // nor a valid decimal point. Check whether it's an exponent sign.
-    if (*parse_ptr == exponent_lower || *parse_ptr == exponent_upper) {
-        // Need to keep the old parse_ptr around, in case of rollback.
-        char* old_parse_ptr = parse_ptr;
-        parse_ptr += 1;
-
-        // Can't use atol or strtol here: Must accept excessive exponents,
-        // even exponents >64 bits.
-        Sign exponent_sign = strtosign(parse_ptr, &parse_ptr);
-        IntParser exponent_parser { exponent_sign, base };
-        bool exponent_usable = false;
-        bool exponent_overflow = false;
-        should_continue = true;
-        do {
-            bool is_a_digit;
-            if (exponent_overflow) {
-                is_a_digit = exponent_parser.parse_digit(*parse_ptr) != -1;
-            } else {
-                DigitConsumeDecision decision = exponent_parser.consume(*parse_ptr);
-                switch (decision) {
-                case DigitConsumeDecision::Consumed:
-                    is_a_digit = true;
-                    // The very first actual digit must pass here:
-                    exponent_usable = true;
-                    break;
-                case DigitConsumeDecision::PosOverflow:
-                case DigitConsumeDecision::NegOverflow:
-                    is_a_digit = true;
-                    exponent_overflow = true;
-                    break;
-                case DigitConsumeDecision::Invalid:
-                    is_a_digit = false;
-                    break;
-                default:
-                    VERIFY_NOT_REACHED();
-                }
-            }
-
-            should_continue = is_a_digit;
-            parse_ptr += should_continue;
-        } while (should_continue);
-
-        if (!exponent_usable) {
-            parse_ptr = old_parse_ptr;
-        } else if (exponent_overflow) {
-            // Technically this is wrong. If someone gives us 5GB of digits,
-            // and then an exponent of -5_000_000_000, the resulting exponent
-            // should be around 0.
-            // However, I think it's safe to assume that we never have to deal
-            // with that many digits anyway.
-            if (sign != Sign::Negative) {
-                exponent = INT_MIN;
-            } else {
-                exponent = INT_MAX;
-            }
-        } else {
-            // Literal exponent is usable and fits in an int.
-            // However, `exponent + exponent_parser.number()` might overflow an int.
-            // This would result in the wrong sign of the exponent!
-            long long new_exponent = static_cast<long long>(exponent) + static_cast<long long>(exponent_parser.number());
-            if (new_exponent < INT_MIN) {
-                exponent = INT_MIN;
-            } else if (new_exponent > INT_MAX) {
-                exponent = INT_MAX;
-            } else {
-                exponent = static_cast<int>(new_exponent);
-            }
-        }
-    }
-
-    // Parsing finished. now we only have to compute the result.
-    if (endptr)
-        *endptr = const_cast<char*>(parse_ptr);
-
-    // If `digits` is zero, we don't even have to look at `exponent`.
-    if (digits.number() == 0) {
-        if (sign != Sign::Negative) {
-            return 0.0;
-        } else {
-            return -0.0;
-        }
-    }
-
-    // Deal with extreme exponents.
-    // The smallest normal is 2^-1022.
-    // The smallest denormal is 2^-1074.
-    // The largest number in `digits` is 2^63 - 1.
-    // Therefore, if "base^exponent" is smaller than 2^-(1074+63), the result is 0.0 anyway.
-    // This threshold is roughly 5.3566 * 10^-343.
-    // So if the resulting exponent is -344 or lower (closer to -inf),
-    // the result is 0.0 anyway.
-    // We only need to avoid false positives, so we can ignore base 16.
-    if (exponent <= -344) {
-        errno = ERANGE;
-        // Definitely can't be represented more precisely.
-        // I lied, sometimes the result is +0.0, and sometimes -0.0.
-        if (sign != Sign::Negative) {
-            return 0.0;
-        } else {
-            return -0.0;
-        }
-    }
-    // The largest normal is 2^+1024-eps.
-    // The smallest number in `digits` is 1.
-    // Therefore, if "base^exponent" is 2^+1024, the result is INF anyway.
-    // This threshold is roughly 1.7977 * 10^-308.
-    // So if the resulting exponent is +309 or higher,
-    // the result is INF anyway.
-    // We only need to avoid false positives, so we can ignore base 16.
-    if (exponent >= 309) {
-        errno = ERANGE;
-        // Definitely can't be represented more precisely.
-        // I lied, sometimes the result is +INF, and sometimes -INF.
-        if (sign != Sign::Negative) {
-            return __builtin_huge_val();
-        } else {
-            return -__builtin_huge_val();
-        }
-    }
-
-    // TODO: If `exponent` is large, this could be made faster.
-    double value = digits.number();
-    double scale = 1;
-
-    if (exponent < 0) {
-        exponent = -exponent;
-        for (int i = 0; i < min(exponent, 300); ++i) {
-            scale *= base;
-        }
-        value /= scale;
-        for (int i = 300; i < exponent; i++) {
-            value /= base;
-        }
-        if (value == -0.0 || value == +0.0) {
-            errno = ERANGE;
-        }
-    } else if (exponent > 0) {
-        for (int i = 0; i < exponent; ++i) {
-            scale *= base;
-        }
-        value *= scale;
-        if (value == -__builtin_huge_val() || value == +__builtin_huge_val()) {
-            errno = ERANGE;
-        }
-    }
-
-    return value;
+    return c_str_to_floating_point<double>(str, endptr);
 }
 
-long double strtold(const char* str, char** endptr)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtold.html
+long double strtold(char const* str, char** endptr)
 {
     assert(sizeof(double) == sizeof(long double));
     return strtod(str, endptr);
 }
 
-float strtof(const char* str, char** endptr)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtof.html
+float strtof(char const* str, char** endptr)
 {
-    return strtod(str, endptr);
+    return c_str_to_floating_point<float>(str, endptr);
 }
 
-double atof(const char* str)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/atof.html
+double atof(char const* str)
 {
     return strtod(str, nullptr);
 }
 
-int atoi(const char* str)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/atoi.html
+int atoi(char const* str)
 {
     long value = strtol(str, nullptr, 10);
     if (value > INT_MAX) {
@@ -683,17 +594,20 @@ int atoi(const char* str)
     return value;
 }
 
-long atol(const char* str)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/atol.html
+long atol(char const* str)
 {
     return strtol(str, nullptr, 10);
 }
 
-long long atoll(const char* str)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/atoll.html
+long long atoll(char const* str)
 {
     return strtoll(str, nullptr, 10);
 }
 
 static char ptsname_buf[32];
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/ptsname.html
 char* ptsname(int fd)
 {
     if (ptsname_r(fd, ptsname_buf, sizeof(ptsname_buf)) < 0)
@@ -703,55 +617,96 @@ char* ptsname(int fd)
 
 int ptsname_r(int fd, char* buffer, size_t size)
 {
-    int rc = syscall(SC_ptsname, fd, buffer, size);
-    __RETURN_WITH_ERRNO(rc, rc, -1);
+    struct stat stat;
+    if (fstat(fd, &stat) < 0)
+        return -1;
+
+    StringBuilder devpts_path_builder;
+    devpts_path_builder.append("/dev/pts/"sv);
+
+    int master_pty_index = 0;
+    // Note: When the user opens a PTY from /dev/ptmx with posix_openpt(), the open file descriptor
+    // points to /dev/ptmx, (major number is 5 and minor number is 2), but internally
+    // in the kernel, it points to a new MasterPTY device. When we do ioctl with TIOCGPTN option
+    // on the open file descriptor, it actually asks the MasterPTY what is the assigned index
+    // of it when the PTYMultiplexer created it.
+    if (ioctl(fd, TIOCGPTN, &master_pty_index) < 0)
+        return -1;
+
+    if (master_pty_index < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    devpts_path_builder.appendff("{:d}", master_pty_index);
+    if (devpts_path_builder.length() > size) {
+        errno = ERANGE;
+        return -1;
+    }
+    memset(buffer, 0, devpts_path_builder.length() + 1);
+    auto full_devpts_path_string = devpts_path_builder.to_deprecated_string();
+    if (!full_devpts_path_string.copy_characters_to_buffer(buffer, size)) {
+        errno = ERANGE;
+        return -1;
+    }
+    return 0;
 }
 
 static unsigned long s_next_rand = 1;
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/rand.html
 int rand()
 {
     s_next_rand = s_next_rand * 1103515245 + 12345;
     return ((unsigned)(s_next_rand / ((RAND_MAX + 1) * 2)) % (RAND_MAX + 1));
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/srand.html
 void srand(unsigned seed)
 {
     s_next_rand = seed;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/abs.html
 int abs(int i)
 {
     return i < 0 ? -i : i;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/labs.html
 long int labs(long int i)
 {
     return i < 0 ? -i : i;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/llabs.html
 long long int llabs(long long int i)
 {
     return i < 0 ? -i : i;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/random.html
 long int random()
 {
     return rand();
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/srandom.html
 void srandom(unsigned seed)
 {
     srand(seed);
 }
 
-int system(const char* command)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/system.html
+int system(char const* command)
 {
+    __pthread_maybe_cancel();
+
     if (!command)
         return 1;
 
     pid_t child;
-    const char* argv[] = { "sh", "-c", command, nullptr };
+    char const* argv[] = { "sh", "-c", command, nullptr };
     if ((errno = posix_spawn(&child, "/bin/sh", nullptr, nullptr, const_cast<char**>(argv), environ)))
         return -1;
     int wstatus;
@@ -759,9 +714,10 @@ int system(const char* command)
     return WEXITSTATUS(wstatus);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mktemp.html
 char* mktemp(char* pattern)
 {
-    auto error = generate_unique_filename(pattern, [&] {
+    auto error = generate_unique_filename(pattern, 0, [&] {
         struct stat st;
         int rc = lstat(pattern, &st);
         if (rc < 0 && errno == ENOENT)
@@ -775,10 +731,18 @@ char* mktemp(char* pattern)
     return pattern;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mkstemp.html
 int mkstemp(char* pattern)
 {
+    return mkstemps(pattern, 0);
+}
+
+// https://man7.org/linux/man-pages/man3/mkstemps.3.html
+int mkstemps(char* pattern, int suffix_length)
+{
+    VERIFY(suffix_length >= 0);
     int fd = -1;
-    auto error = generate_unique_filename(pattern, [&] {
+    auto error = generate_unique_filename(pattern, static_cast<size_t>(suffix_length), [&] {
         fd = open(pattern, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR); // I'm using the flags I saw glibc using.
         if (fd >= 0)
             return IterationDecision::Break;
@@ -791,9 +755,10 @@ int mkstemp(char* pattern)
     return fd;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mkdtemp.html
 char* mkdtemp(char* pattern)
 {
-    auto error = generate_unique_filename(pattern, [&] {
+    auto error = generate_unique_filename(pattern, 0, [&] {
         if (mkdir(pattern, 0700) == 0)
             return IterationDecision::Break;
         return IterationDecision::Continue;
@@ -805,7 +770,8 @@ char* mkdtemp(char* pattern)
     return pattern;
 }
 
-void* bsearch(const void* key, const void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*))
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/bsearch.html
+void* bsearch(void const* key, void const* base, size_t nmemb, size_t size, int (*compar)(void const*, void const*))
 {
     char* start = static_cast<char*>(const_cast<void*>(base));
     while (nmemb > 0) {
@@ -823,6 +789,7 @@ void* bsearch(const void* key, const void* base, size_t nmemb, size_t size, int 
     return nullptr;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/div.html
 div_t div(int numerator, int denominator)
 {
     div_t result;
@@ -836,6 +803,7 @@ div_t div(int numerator, int denominator)
     return result;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/ldiv.html
 ldiv_t ldiv(long numerator, long denominator)
 {
     ldiv_t result;
@@ -849,6 +817,7 @@ ldiv_t ldiv(long numerator, long denominator)
     return result;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/lldiv.html
 lldiv_t lldiv(long long numerator, long long denominator)
 {
     lldiv_t result;
@@ -862,6 +831,7 @@ lldiv_t lldiv(long long numerator, long long denominator)
     return result;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mblen.html
 int mblen(char const* s, size_t n)
 {
     // POSIX: Equivalent to mbtowc(NULL, s, n), but we mustn't change the state of mbtowc.
@@ -884,13 +854,15 @@ int mblen(char const* s, size_t n)
     return ret;
 }
 
-size_t mbstowcs(wchar_t* pwcs, const char* s, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mbstowcs.html
+size_t mbstowcs(wchar_t* pwcs, char const* s, size_t n)
 {
     static mbstate_t state = {};
     return mbsrtowcs(pwcs, &s, n, &state);
 }
 
-int mbtowc(wchar_t* pwc, const char* s, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mbtowc.html
+int mbtowc(wchar_t* pwc, char const* s, size_t n)
 {
     static mbstate_t internal_state = {};
 
@@ -912,6 +884,7 @@ int mbtowc(wchar_t* pwc, const char* s, size_t n)
     return ret;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wctomb.html
 int wctomb(char* s, wchar_t wc)
 {
     static mbstate_t _internal_state = {};
@@ -923,11 +896,12 @@ int wctomb(char* s, wchar_t wc)
     return static_cast<int>(wcrtomb(s, wc, &_internal_state));
 }
 
-size_t wcstombs(char* dest, const wchar_t* src, size_t max)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstombs.html
+size_t wcstombs(char* dest, wchar_t const* src, size_t max)
 {
     char* original_dest = dest;
     while ((size_t)(dest - original_dest) < max) {
-        StringView v { (const char*)src, sizeof(wchar_t) };
+        StringView v { (char const*)src, sizeof(wchar_t) };
 
         // FIXME: dependent on locale, for now utf-8 is supported.
         Utf8View utf8 { v };
@@ -945,7 +919,8 @@ size_t wcstombs(char* dest, const wchar_t* src, size_t max)
     return max;
 }
 
-long strtol(const char* str, char** endptr, int base)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtol.html
+long strtol(char const* str, char** endptr, int base)
 {
     long long value = strtoll(str, endptr, base);
     if (value < LONG_MIN) {
@@ -958,7 +933,8 @@ long strtol(const char* str, char** endptr, int base)
     return value;
 }
 
-unsigned long strtoul(const char* str, char** endptr, int base)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtoul.html
+unsigned long strtoul(char const* str, char** endptr, int base)
 {
     unsigned long long value = strtoull(str, endptr, base);
     if (value > ULONG_MAX) {
@@ -968,7 +944,8 @@ unsigned long strtoul(const char* str, char** endptr, int base)
     return value;
 }
 
-long long strtoll(const char* str, char** endptr, int base)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtoll.html
+long long strtoll(char const* str, char** endptr, int base)
 {
     // Parse spaces and sign
     char* parse_ptr = const_cast<char*>(str);
@@ -1045,7 +1022,8 @@ long long strtoll(const char* str, char** endptr, int base)
     return digits.number();
 }
 
-unsigned long long strtoull(const char* str, char** endptr, int base)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strtoull.html
+unsigned long long strtoull(char const* str, char** endptr, int base)
 {
     // Parse spaces and sign
     char* parse_ptr = const_cast<char*>(str);
@@ -1125,21 +1103,51 @@ unsigned long long strtoull(const char* str, char** endptr, int base)
     return digits.number();
 }
 
-// Serenity's PRNG is not cryptographically secure. Do not rely on this for
-// any real crypto! These functions (for now) are for compatibility.
-// TODO: In the future, rand can be made deterministic and this not.
 uint32_t arc4random(void)
 {
     uint32_t buf;
-    syscall(SC_getrandom, &buf, sizeof(buf), 0);
+    arc4random_buf(&buf, sizeof(buf));
     return buf;
 }
 
+static pthread_mutex_t s_randomness_mutex = PTHREAD_MUTEX_INITIALIZER;
+static u8* s_randomness_buffer;
+static size_t s_randomness_index;
+
 void arc4random_buf(void* buffer, size_t buffer_size)
 {
-    // arc4random_buf should never fail, but user supplied buffers could fail.
-    // However, if the user passes a garbage buffer, that's on them.
-    syscall(SC_getrandom, buffer, buffer_size, 0);
+    pthread_mutex_lock(&s_randomness_mutex);
+
+    size_t bytes_needed = buffer_size;
+    auto* ptr = static_cast<u8*>(buffer);
+
+    while (bytes_needed > 0) {
+        if (!s_randomness_buffer || s_randomness_index >= PAGE_SIZE) {
+            if (!s_randomness_buffer) {
+                s_randomness_buffer = static_cast<u8*>(mmap(nullptr, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE | MAP_RANDOMIZED, 0, 0));
+                VERIFY(s_randomness_buffer != MAP_FAILED);
+                __pthread_fork_atfork_register_child(
+                    [] {
+                        munmap(s_randomness_buffer, PAGE_SIZE);
+                        s_randomness_buffer = nullptr;
+                        s_randomness_index = 0;
+                    });
+            }
+            syscall(SC_getrandom, s_randomness_buffer, PAGE_SIZE);
+            s_randomness_index = 0;
+        }
+
+        size_t available_bytes = PAGE_SIZE - s_randomness_index;
+        size_t bytes_to_copy = min(bytes_needed, available_bytes);
+
+        memcpy(ptr, s_randomness_buffer + s_randomness_index, bytes_to_copy);
+
+        s_randomness_index += bytes_to_copy;
+        bytes_needed -= bytes_to_copy;
+        ptr += bytes_to_copy;
+    }
+
+    pthread_mutex_unlock(&s_randomness_mutex);
 }
 
 uint32_t arc4random_uniform(uint32_t max_bounds)
@@ -1147,7 +1155,8 @@ uint32_t arc4random_uniform(uint32_t max_bounds)
     return AK::get_random_uniform(max_bounds);
 }
 
-char* realpath(const char* pathname, char* buffer)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/realpath.html
+char* realpath(char const* pathname, char* buffer)
 {
     if (!pathname) {
         errno = EFAULT;
@@ -1196,6 +1205,7 @@ char* realpath(const char* pathname, char* buffer)
     return buffer;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_openpt.html
 int posix_openpt(int flags)
 {
     if (flags & ~(O_RDWR | O_NOCTTY | O_CLOEXEC)) {
@@ -1206,17 +1216,20 @@ int posix_openpt(int flags)
     return open("/dev/ptmx", flags);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/grantpt.html
 int grantpt([[maybe_unused]] int fd)
 {
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/unlockpt.html
 int unlockpt([[maybe_unused]] int fd)
 {
     return 0;
 }
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/_Exit.html
 void _Exit(int status)
 {
     _exit(status);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  * Copyright (c) 2021, Jan de Visser <jan@de-visser.net>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -8,8 +8,8 @@
 #pragma once
 
 #include "Token.h"
+#include <AK/DeprecatedString.h>
 #include <AK/HashMap.h>
-#include <AK/String.h>
 #include <AK/StringView.h>
 
 namespace SQL::AST {
@@ -46,9 +46,9 @@ private:
     bool is_line_break() const;
     bool is_eof() const;
 
-    static HashMap<String, TokenType> s_keywords;
+    static HashMap<DeprecatedString, TokenType> s_keywords;
     static HashMap<char, TokenType> s_one_char_tokens;
-    static HashMap<String, TokenType> s_two_char_tokens;
+    static HashMap<DeprecatedString, TokenType> s_two_char_tokens;
 
     StringView m_source;
     size_t m_line_number { 1 };

@@ -16,6 +16,7 @@
 #include <Kernel/API/POSIX/unistd.h>
 #include <fd_set.h>
 #include <limits.h>
+#include <sys/cdefs.h>
 
 __BEGIN_DECLS
 
@@ -31,90 +32,102 @@ __BEGIN_DECLS
 extern char** environ;
 
 int get_process_name(char* buffer, int buffer_size);
-int set_process_name(const char* name, size_t name_length);
-void dump_backtrace();
+int set_process_name(char const* name, size_t name_length);
+void dump_backtrace(void);
 int fsync(int fd);
-void sysbeep();
-int gettid();
-int getpagesize();
-pid_t fork();
-pid_t vfork();
-int execv(const char* path, char* const argv[]);
-int execve(const char* filename, char* const argv[], char* const envp[]);
-int execvpe(const char* filename, char* const argv[], char* const envp[]);
-int execvp(const char* filename, char* const argv[]);
-int execl(const char* filename, const char* arg, ...);
-int execle(const char* filename, const char* arg, ...);
-int execlp(const char* filename, const char* arg, ...);
-void sync();
+int sysbeep(int tone);
+int gettid(void);
+int getpagesize(void);
+pid_t fork(void);
+pid_t vfork(void);
+int daemon(int nochdir, int noclose);
+int execv(char const* path, char* const argv[]);
+int execve(char const* filename, char* const argv[], char* const envp[]);
+int execvpe(char const* filename, char* const argv[], char* const envp[]);
+int execvp(char const* filename, char* const argv[]);
+int execl(char const* filename, char const* arg, ...);
+int execle(char const* filename, char const* arg, ...);
+int execlp(char const* filename, char const* arg, ...);
+void sync(void);
 __attribute__((noreturn)) void _exit(int status);
 pid_t getsid(pid_t);
-pid_t setsid();
+pid_t setsid(void);
 int setpgid(pid_t pid, pid_t pgid);
 pid_t getpgid(pid_t);
-pid_t getpgrp();
-uid_t geteuid();
-gid_t getegid();
-uid_t getuid();
-gid_t getgid();
-pid_t getpid();
-pid_t getppid();
+pid_t getpgrp(void);
+uid_t geteuid(void);
+gid_t getegid(void);
+uid_t getuid(void);
+gid_t getgid(void);
+pid_t getpid(void);
+pid_t getppid(void);
 int getresuid(uid_t*, uid_t*, uid_t*);
 int getresgid(gid_t*, gid_t*, gid_t*);
 int getgroups(int size, gid_t list[]);
-int setgroups(size_t, const gid_t*);
+int setgroups(size_t, gid_t const*);
 int seteuid(uid_t);
 int setegid(gid_t);
 int setuid(uid_t);
 int setgid(gid_t);
 int setreuid(uid_t, uid_t);
 int setresuid(uid_t, uid_t, uid_t);
+int setregid(gid_t, gid_t);
 int setresgid(gid_t, gid_t, gid_t);
 pid_t tcgetpgrp(int fd);
 int tcsetpgrp(int fd, pid_t pgid);
 ssize_t read(int fd, void* buf, size_t count);
 ssize_t pread(int fd, void* buf, size_t count, off_t);
-ssize_t write(int fd, const void* buf, size_t count);
-ssize_t pwrite(int fd, const void* buf, size_t count, off_t);
+ssize_t write(int fd, void const* buf, size_t count);
+ssize_t pwrite(int fd, void const* buf, size_t count, off_t);
 int close(int fd);
-int chdir(const char* path);
+int chdir(char const* path);
 int fchdir(int fd);
 char* getcwd(char* buffer, size_t size);
 char* getwd(char* buffer);
 unsigned int sleep(unsigned int seconds);
 int usleep(useconds_t);
 int gethostname(char*, size_t);
-int sethostname(const char*, ssize_t);
-ssize_t readlink(const char* path, char* buffer, size_t);
+int sethostname(char const*, ssize_t);
+ssize_t readlink(char const* path, char* buffer, size_t);
+ssize_t readlinkat(int dirfd, char const* path, char* buffer, size_t);
 char* ttyname(int fd);
 int ttyname_r(int fd, char* buffer, size_t);
 off_t lseek(int fd, off_t, int whence);
-int link(const char* oldpath, const char* newpath);
-int unlink(const char* pathname);
-int symlink(const char* target, const char* linkpath);
-int rmdir(const char* pathname);
+int link(char const* oldpath, char const* newpath);
+int unlink(char const* pathname);
+int unlinkat(int dirfd, char const* pathname, int flags);
+int symlink(char const* target, char const* linkpath);
+int symlinkat(char const* target, int newdirfd, char const* linkpath);
+int rmdir(char const* pathname);
 int dup(int old_fd);
 int dup2(int old_fd, int new_fd);
 int pipe(int pipefd[2]);
 int pipe2(int pipefd[2], int flags);
 unsigned int alarm(unsigned int seconds);
-int access(const char* pathname, int mode);
+int access(char const* pathname, int mode);
+int faccessat(int dirfd, char const* pathname, int mode, int flags);
 int isatty(int fd);
-int mknod(const char* pathname, mode_t, dev_t);
+int mknod(char const* pathname, mode_t, dev_t);
 long fpathconf(int fd, int name);
-long pathconf(const char* path, int name);
-char* getlogin();
-int chown(const char* pathname, uid_t, gid_t);
+long pathconf(char const* path, int name);
+char* getlogin(void);
+int lchown(char const* pathname, uid_t uid, gid_t gid);
+int chown(char const* pathname, uid_t, gid_t);
 int fchown(int fd, uid_t, gid_t);
+int fchownat(int fd, char const* pathname, uid_t uid, gid_t gid, int flags);
 int ftruncate(int fd, off_t length);
-int truncate(const char* path, off_t length);
-int mount(int source_fd, const char* target, const char* fs_type, int flags);
-int umount(const char* mountpoint);
-int pledge(const char* promises, const char* execpromises);
-int unveil(const char* path, const char* permissions);
-char* getpass(const char* prompt);
-int pause();
-int chroot(const char*);
+int truncate(char const* path, off_t length);
+int mount(int source_fd, char const* target, char const* fs_type, int flags);
+int umount(char const* mountpoint);
+int pledge(char const* promises, char const* execpromises);
+int unveil(char const* path, char const* permissions);
+char* getpass(char const* prompt);
+int pause(void);
+int chroot(char const*);
+int getdtablesize(void);
+int nice(int incr);
+int brk(void* addr);
+void* sbrk(intptr_t incr);
 
 enum {
     _PC_NAME_MAX,
@@ -124,8 +137,17 @@ enum {
     _PC_LINK_MAX
 };
 
+#define _POSIX_FSYNC 200112L
+#define _POSIX_MAPPED_FILES 200112L
+#define _POSIX_MEMORY_PROTECTION 200112L
 #define _POSIX_MONOTONIC_CLOCK 200112L
-#define _POSIX_SAVED_IDS
+#define _POSIX_RAW_SOCKETS 200112L
+#define _POSIX_REGEXP 1
+#define _POSIX_SAVED_IDS 1
+#define _POSIX_SPAWN 200112L
+#define _POSIX_THREADS 200112L
+#define _POSIX_THREAD_ATTR_STACKADDR 200112L
+#define _POSIX_THREAD_ATTR_STACKSIZE 200112L
 #define _POSIX_TIMERS 200809L
 
 /*
@@ -144,13 +166,13 @@ extern int optopt;
 // Index of the next argument to process upon a getopt*() call.
 extern int optind;
 // If set, reset the internal state kept by getopt*(). You may also want to set
-// optind to 1 in that case. Alternatively, setting optind to 0 is treated like
-// doing both of the above.
+// optind to 1 in that case.
 extern int optreset;
 // After parsing an option that accept an argument, set to point to the argument
 // value.
 extern char* optarg;
 
-int getopt(int argc, char* const* argv, const char* short_options);
+int getopt(int argc, char* const* argv, char const* short_options);
+int getsubopt(char** optionp, char* const* tokens, char** valuep);
 
 __END_DECLS

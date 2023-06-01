@@ -1,26 +1,25 @@
 /*
- * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2022, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, sin-ack <sin-ack@protonmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/MemoryStream.h>
-#include <Kernel/Debug.h>
+#include <Kernel/API/POSIX/errno.h>
 #include <Kernel/Devices/BlockDevice.h>
 #include <Kernel/FileSystem/Custody.h>
 #include <Kernel/FileSystem/FIFO.h>
-#include <Kernel/FileSystem/FileSystem.h>
 #include <Kernel/FileSystem/InodeFile.h>
 #include <Kernel/FileSystem/InodeWatcher.h>
 #include <Kernel/FileSystem/OpenFileDescription.h>
+#include <Kernel/FileSystem/VirtualFileSystem.h>
 #include <Kernel/Memory/MemoryManager.h>
 #include <Kernel/Net/Socket.h>
 #include <Kernel/Process.h>
 #include <Kernel/TTY/MasterPTY.h>
 #include <Kernel/TTY/TTY.h>
 #include <Kernel/UnixTypes.h>
-#include <LibC/errno_numbers.h>
 
 namespace Kernel {
 
@@ -29,7 +28,7 @@ ErrorOr<NonnullRefPtr<OpenFileDescription>> OpenFileDescription::try_create(Cust
     auto inode_file = TRY(InodeFile::create(custody.inode()));
     auto description = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) OpenFileDescription(move(inode_file))));
 
-    description->m_custody = custody;
+    description->m_state.with([&](auto& state) { state.custody = custody; });
     TRY(description->attach());
     return description;
 }
@@ -47,14 +46,13 @@ OpenFileDescription::OpenFileDescription(File& file)
     if (file.is_inode())
         m_inode = static_cast<InodeFile&>(file).inode();
 
-    m_is_directory = metadata().is_directory();
+    auto metadata = this->metadata();
+    m_state.with([&](auto& state) { state.is_directory = metadata.is_directory(); });
 }
 
 OpenFileDescription::~OpenFileDescription()
 {
     m_file->detach(*this);
-    if (is_fifo())
-        static_cast<FIFO*>(m_file.ptr())->detach(m_fifo_direction);
     // FIXME: Should this error path be observed somehow?
     (void)m_file->close();
     if (m_inode)
@@ -73,7 +71,7 @@ ErrorOr<void> OpenFileDescription::attach()
 
 void OpenFileDescription::set_original_custody(Badge<VirtualFileSystem>, Custody& custody)
 {
-    m_custody = custody;
+    m_state.with([&](auto& state) { state.custody = custody; });
 }
 
 Thread::FileBlocker::BlockFlags OpenFileDescription::should_unblock(Thread::FileBlocker::BlockFlags block_flags) const
@@ -87,7 +85,7 @@ Thread::FileBlocker::BlockFlags OpenFileDescription::should_unblock(Thread::File
     // TODO: Implement Thread::FileBlocker::BlockFlags::Exception
 
     if (has_any_flag(block_flags, BlockFlags::SocketFlags)) {
-        auto* sock = socket();
+        auto const* sock = socket();
         VERIFY(sock);
         if (has_flag(block_flags, BlockFlags::Accept) && sock->can_accept())
             unblock_flags |= BlockFlags::Accept;
@@ -97,54 +95,55 @@ Thread::FileBlocker::BlockFlags OpenFileDescription::should_unblock(Thread::File
     return unblock_flags;
 }
 
-ErrorOr<void> OpenFileDescription::stat(::stat& buffer)
+ErrorOr<struct stat> OpenFileDescription::stat()
 {
-    MutexLocker locker(m_lock);
     // FIXME: This is due to the Device class not overriding File::stat().
     if (m_inode)
-        return m_inode->metadata().stat(buffer);
-    return m_file->stat(buffer);
+        return m_inode->metadata().stat();
+    return m_file->stat();
 }
 
 ErrorOr<off_t> OpenFileDescription::seek(off_t offset, int whence)
 {
-    MutexLocker locker(m_lock);
     if (!m_file->is_seekable())
         return ESPIPE;
 
-    off_t new_offset;
+    auto metadata = this->metadata();
 
-    switch (whence) {
-    case SEEK_SET:
-        new_offset = offset;
-        break;
-    case SEEK_CUR:
-        if (Checked<off_t>::addition_would_overflow(m_current_offset, offset))
-            return EOVERFLOW;
-        new_offset = m_current_offset + offset;
-        break;
-    case SEEK_END:
-        if (!metadata().is_valid())
-            return EIO;
-        if (Checked<off_t>::addition_would_overflow(metadata().size, offset))
-            return EOVERFLOW;
-        new_offset = metadata().size + offset;
-        break;
-    default:
-        return EINVAL;
-    }
+    auto new_offset = TRY(m_state.with([&](auto& state) -> ErrorOr<off_t> {
+        off_t new_offset;
+        switch (whence) {
+        case SEEK_SET:
+            new_offset = offset;
+            break;
+        case SEEK_CUR:
+            if (Checked<off_t>::addition_would_overflow(state.current_offset, offset))
+                return EOVERFLOW;
+            new_offset = state.current_offset + offset;
+            break;
+        case SEEK_END:
+            if (!metadata.is_valid())
+                return EIO;
+            if (Checked<off_t>::addition_would_overflow(metadata.size, offset))
+                return EOVERFLOW;
+            new_offset = metadata.size + offset;
+            break;
+        default:
+            return EINVAL;
+        }
+        if (new_offset < 0)
+            return EINVAL;
+        state.current_offset = new_offset;
+        return new_offset;
+    }));
 
-    if (new_offset < 0)
-        return EINVAL;
     // FIXME: Return EINVAL if attempting to seek past the end of a seekable device.
-
-    m_current_offset = new_offset;
 
     m_file->did_seek(*this, new_offset);
     if (m_inode)
         m_inode->did_seek(*this, new_offset);
     evaluate_block_conditions();
-    return m_current_offset;
+    return new_offset;
 }
 
 ErrorOr<size_t> OpenFileDescription::read(UserOrKernelBuffer& buffer, u64 offset, size_t count)
@@ -163,24 +162,30 @@ ErrorOr<size_t> OpenFileDescription::write(u64 offset, UserOrKernelBuffer const&
 
 ErrorOr<size_t> OpenFileDescription::read(UserOrKernelBuffer& buffer, size_t count)
 {
-    MutexLocker locker(m_lock);
-    if (Checked<off_t>::addition_would_overflow(m_current_offset, count))
-        return EOVERFLOW;
-    auto nread = TRY(m_file->read(*this, offset(), buffer, count));
+    auto offset = TRY(m_state.with([&](auto& state) -> ErrorOr<off_t> {
+        if (Checked<off_t>::addition_would_overflow(state.current_offset, count))
+            return EOVERFLOW;
+        return state.current_offset;
+    }));
+    auto nread = TRY(m_file->read(*this, offset, buffer, count));
     if (m_file->is_seekable())
-        m_current_offset += nread;
+        m_state.with([&](auto& state) { state.current_offset = offset + nread; });
     evaluate_block_conditions();
     return nread;
 }
 
-ErrorOr<size_t> OpenFileDescription::write(const UserOrKernelBuffer& data, size_t size)
+ErrorOr<size_t> OpenFileDescription::write(UserOrKernelBuffer const& data, size_t size)
 {
-    MutexLocker locker(m_lock);
-    if (Checked<off_t>::addition_would_overflow(m_current_offset, size))
-        return EOVERFLOW;
-    auto nwritten = TRY(m_file->write(*this, offset(), data, size));
+    auto offset = TRY(m_state.with([&](auto& state) -> ErrorOr<off_t> {
+        if (Checked<off_t>::addition_would_overflow(state.current_offset, size))
+            return EOVERFLOW;
+        return state.current_offset;
+    }));
+    auto nwritten = TRY(m_file->write(*this, offset, data, size));
+
     if (m_file->is_seekable())
-        m_current_offset += nwritten;
+        m_state.with([&](auto& state) { state.current_offset = offset + nwritten; });
+
     evaluate_block_conditions();
     return nwritten;
 }
@@ -195,17 +200,8 @@ bool OpenFileDescription::can_read() const
     return m_file->can_read(*this, offset());
 }
 
-ErrorOr<NonnullOwnPtr<KBuffer>> OpenFileDescription::read_entire_file()
-{
-    // HACK ALERT: (This entire function)
-    VERIFY(m_file->is_inode());
-    VERIFY(m_inode);
-    return m_inode->read_entire(this);
-}
-
 ErrorOr<size_t> OpenFileDescription::get_dir_entries(UserOrKernelBuffer& output_buffer, size_t size)
 {
-    MutexLocker locker(m_lock, Mutex::Mode::Shared);
     if (!is_directory())
         return ENOTDIR;
 
@@ -214,43 +210,38 @@ ErrorOr<size_t> OpenFileDescription::get_dir_entries(UserOrKernelBuffer& output_
         return EIO;
 
     size_t remaining = size;
-    ErrorOr<void> error;
     u8 stack_buffer[PAGE_SIZE];
     Bytes temp_buffer(stack_buffer, sizeof(stack_buffer));
-    OutputMemoryStream stream { temp_buffer };
+    FixedMemoryStream stream { temp_buffer };
 
-    auto flush_stream_to_output_buffer = [&error, &stream, &remaining, &output_buffer]() -> bool {
-        if (error.is_error())
-            return false;
-        if (stream.size() == 0)
-            return true;
-        if (remaining < stream.size()) {
-            error = EINVAL;
-            return false;
-        }
-        if (auto result = output_buffer.write(stream.bytes()); result.is_error()) {
-            error = result.release_error();
-            return false;
-        }
-        output_buffer = output_buffer.offset(stream.size());
-        remaining -= stream.size();
-        stream.reset();
-        return true;
+    auto flush_stream_to_output_buffer = [&stream, &remaining, &temp_buffer, &output_buffer]() -> ErrorOr<void> {
+        auto buffered_size = TRY(stream.tell());
+
+        if (buffered_size == 0)
+            return {};
+
+        if (remaining < buffered_size)
+            return Error::from_errno(EINVAL);
+
+        TRY(output_buffer.write(temp_buffer.trim(buffered_size)));
+        output_buffer = output_buffer.offset(buffered_size);
+        remaining -= buffered_size;
+        TRY(stream.seek(0));
+        return {};
     };
 
-    ErrorOr<void> result = VirtualFileSystem::the().traverse_directory_inode(*m_inode, [&flush_stream_to_output_buffer, &error, &stream, this](auto& entry) -> ErrorOr<void> {
+    ErrorOr<void> result = VirtualFileSystem::the().traverse_directory_inode(*m_inode, [&flush_stream_to_output_buffer, &stream, this](auto& entry) -> ErrorOr<void> {
+        // FIXME: Double check the calculation, at least the type for the name length mismatches.
         size_t serialized_size = sizeof(ino_t) + sizeof(u8) + sizeof(size_t) + sizeof(char) * entry.name.length();
-        if (serialized_size > stream.remaining()) {
-            if (!flush_stream_to_output_buffer())
-                return error;
-        }
-        stream << (u64)entry.inode.index().value();
-        stream << m_inode->fs().internal_file_type_to_directory_entry_type(entry);
-        stream << (u32)entry.name.length();
-        stream << entry.name.bytes();
+        if (serialized_size > TRY(stream.size()) - TRY(stream.tell()))
+            TRY(flush_stream_to_output_buffer());
+
+        MUST(stream.write_value<u64>(entry.inode.index().value()));
+        MUST(stream.write_value(m_inode->fs().internal_file_type_to_directory_entry_type(entry)));
+        MUST(stream.write_value<u32>(entry.name.length()));
+        MUST(stream.write_until_depleted(entry.name.bytes()));
         return {};
     });
-    flush_stream_to_output_buffer();
 
     if (result.is_error()) {
         // We should only return EFAULT when the userspace buffer is too small,
@@ -260,8 +251,8 @@ ErrorOr<size_t> OpenFileDescription::get_dir_entries(UserOrKernelBuffer& output_
         return result.release_error();
     }
 
-    if (error.is_error())
-        return error.release_error();
+    TRY(flush_stream_to_output_buffer());
+
     return size - remaining;
 }
 
@@ -270,11 +261,11 @@ bool OpenFileDescription::is_device() const
     return m_file->is_device();
 }
 
-const Device* OpenFileDescription::device() const
+Device const* OpenFileDescription::device() const
 {
     if (!is_device())
         return nullptr;
-    return static_cast<const Device*>(m_file.ptr());
+    return static_cast<Device const*>(m_file.ptr());
 }
 
 Device* OpenFileDescription::device()
@@ -308,11 +299,11 @@ bool OpenFileDescription::is_inode_watcher() const
     return m_file->is_inode_watcher();
 }
 
-const InodeWatcher* OpenFileDescription::inode_watcher() const
+InodeWatcher const* OpenFileDescription::inode_watcher() const
 {
     if (!is_inode_watcher())
         return nullptr;
-    return static_cast<const InodeWatcher*>(m_file.ptr());
+    return static_cast<InodeWatcher const*>(m_file.ptr());
 }
 
 InodeWatcher* OpenFileDescription::inode_watcher()
@@ -327,11 +318,11 @@ bool OpenFileDescription::is_master_pty() const
     return m_file->is_master_pty();
 }
 
-const MasterPTY* OpenFileDescription::master_pty() const
+MasterPTY const* OpenFileDescription::master_pty() const
 {
     if (!is_master_pty())
         return nullptr;
-    return static_cast<const MasterPTY*>(m_file.ptr());
+    return static_cast<MasterPTY const*>(m_file.ptr());
 }
 
 MasterPTY* OpenFileDescription::master_pty()
@@ -350,15 +341,15 @@ ErrorOr<void> OpenFileDescription::close()
 
 ErrorOr<NonnullOwnPtr<KString>> OpenFileDescription::original_absolute_path() const
 {
-    if (!m_custody)
-        return ENOENT;
-    return m_custody->try_serialize_absolute_path();
+    if (auto custody = this->custody())
+        return custody->try_serialize_absolute_path();
+    return ENOENT;
 }
 
 ErrorOr<NonnullOwnPtr<KString>> OpenFileDescription::pseudo_path() const
 {
-    if (m_custody)
-        return m_custody->try_serialize_absolute_path();
+    if (auto custody = this->custody())
+        return custody->try_serialize_absolute_path();
     return m_file->pseudo_path(*this);
 }
 
@@ -369,21 +360,18 @@ InodeMetadata OpenFileDescription::metadata() const
     return {};
 }
 
-ErrorOr<Memory::Region*> OpenFileDescription::mmap(Process& process, Memory::VirtualRange const& range, u64 offset, int prot, bool shared)
+ErrorOr<NonnullLockRefPtr<Memory::VMObject>> OpenFileDescription::vmobject_for_mmap(Process& process, Memory::VirtualRange const& range, u64& offset, bool shared)
 {
-    MutexLocker locker(m_lock);
-    return m_file->mmap(process, *this, range, offset, prot, shared);
+    return m_file->vmobject_for_mmap(process, range, offset, shared);
 }
 
 ErrorOr<void> OpenFileDescription::truncate(u64 length)
 {
-    MutexLocker locker(m_lock);
     return m_file->truncate(length);
 }
 
 ErrorOr<void> OpenFileDescription::sync()
 {
-    MutexLocker locker(m_lock);
     return m_file->sync();
 }
 
@@ -411,32 +399,31 @@ Socket* OpenFileDescription::socket()
     return static_cast<Socket*>(m_file.ptr());
 }
 
-const Socket* OpenFileDescription::socket() const
+Socket const* OpenFileDescription::socket() const
 {
     if (!is_socket())
         return nullptr;
-    return static_cast<const Socket*>(m_file.ptr());
+    return static_cast<Socket const*>(m_file.ptr());
 }
 
 void OpenFileDescription::set_file_flags(u32 flags)
 {
-    MutexLocker locker(m_lock);
-    m_is_blocking = !(flags & O_NONBLOCK);
-    m_should_append = flags & O_APPEND;
-    m_direct = flags & O_DIRECT;
-    m_file_flags = flags;
+    m_state.with([&](auto& state) {
+        state.is_blocking = !(flags & O_NONBLOCK);
+        state.should_append = flags & O_APPEND;
+        state.direct = flags & O_DIRECT;
+        state.file_flags = flags;
+    });
 }
 
-ErrorOr<void> OpenFileDescription::chmod(mode_t mode)
+ErrorOr<void> OpenFileDescription::chmod(Credentials const& credentials, mode_t mode)
 {
-    MutexLocker locker(m_lock);
-    return m_file->chmod(*this, mode);
+    return m_file->chmod(credentials, *this, mode);
 }
 
-ErrorOr<void> OpenFileDescription::chown(UserID uid, GroupID gid)
+ErrorOr<void> OpenFileDescription::chown(Credentials const& credentials, UserID uid, GroupID gid)
 {
-    MutexLocker locker(m_lock);
-    return m_file->chown(*this, uid, gid);
+    return m_file->chown(credentials, *this, uid, gid);
 }
 
 FileBlockerSet& OpenFileDescription::blocker_set()
@@ -444,12 +431,12 @@ FileBlockerSet& OpenFileDescription::blocker_set()
     return m_file->blocker_set();
 }
 
-ErrorOr<void> OpenFileDescription::apply_flock(Process const& process, Userspace<flock const*> lock)
+ErrorOr<void> OpenFileDescription::apply_flock(Process const& process, Userspace<flock const*> lock, ShouldBlock should_block)
 {
     if (!m_inode)
         return EBADF;
 
-    return m_inode->apply_flock(process, *this, lock);
+    return m_inode->apply_flock(process, *this, lock, should_block);
 }
 
 ErrorOr<void> OpenFileDescription::get_flock(Userspace<flock*> lock) const
@@ -459,4 +446,92 @@ ErrorOr<void> OpenFileDescription::get_flock(Userspace<flock*> lock) const
 
     return m_inode->get_flock(*this, lock);
 }
+bool OpenFileDescription::is_readable() const
+{
+    return m_state.with([](auto& state) { return state.readable; });
+}
+
+bool OpenFileDescription::is_writable() const
+{
+    return m_state.with([](auto& state) { return state.writable; });
+}
+
+void OpenFileDescription::set_readable(bool b)
+{
+    m_state.with([&](auto& state) { state.readable = b; });
+}
+
+void OpenFileDescription::set_writable(bool b)
+{
+    m_state.with([&](auto& state) { state.writable = b; });
+}
+
+void OpenFileDescription::set_rw_mode(int options)
+{
+    m_state.with([&](auto& state) {
+        state.readable = (options & O_RDONLY) == O_RDONLY;
+        state.writable = (options & O_WRONLY) == O_WRONLY;
+    });
+}
+
+bool OpenFileDescription::is_direct() const
+{
+    return m_state.with([](auto& state) { return state.direct; });
+}
+
+bool OpenFileDescription::is_directory() const
+{
+    return m_state.with([](auto& state) { return state.is_directory; });
+}
+
+bool OpenFileDescription::is_blocking() const
+{
+    return m_state.with([](auto& state) { return state.is_blocking; });
+}
+
+void OpenFileDescription::set_blocking(bool b)
+{
+    m_state.with([&](auto& state) { state.is_blocking = b; });
+}
+
+bool OpenFileDescription::should_append() const
+{
+    return m_state.with([](auto& state) { return state.should_append; });
+}
+
+u32 OpenFileDescription::file_flags() const
+{
+    return m_state.with([](auto& state) { return state.file_flags; });
+}
+
+FIFO::Direction OpenFileDescription::fifo_direction() const
+{
+    return m_state.with([](auto& state) { return state.fifo_direction; });
+}
+
+void OpenFileDescription::set_fifo_direction(Badge<FIFO>, FIFO::Direction direction)
+{
+    m_state.with([&](auto& state) { state.fifo_direction = direction; });
+}
+
+OwnPtr<OpenFileDescriptionData>& OpenFileDescription::data()
+{
+    return m_state.with([](auto& state) -> OwnPtr<OpenFileDescriptionData>& { return state.data; });
+}
+
+off_t OpenFileDescription::offset() const
+{
+    return m_state.with([](auto& state) { return state.current_offset; });
+}
+
+RefPtr<Custody const> OpenFileDescription::custody() const
+{
+    return m_state.with([](auto& state) { return state.custody; });
+}
+
+RefPtr<Custody> OpenFileDescription::custody()
+{
+    return m_state.with([](auto& state) { return state.custody; });
+}
+
 }

@@ -6,11 +6,13 @@
 
 #pragma once
 
+#include <AK/Types.h>
+
 namespace JS {
 
-enum class FunctionKind {
+enum class FunctionKind : u8 {
+    Normal,
     Generator,
-    Regular,
     Async,
     AsyncGenerator
 };

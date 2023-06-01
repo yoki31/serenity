@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Ali Mohammad Pur <mpfard@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,7 +8,6 @@
 #pragma once
 
 #include <AK/Span.h>
-#include <AK/Vector.h>
 #include <LibCrypto/BigInt/UnsignedBigInteger.h>
 #include <LibCrypto/NumberTheory/ModularFunctions.h>
 #include <LibCrypto/PK/Code/EMSA_PSS.h>
@@ -31,8 +31,8 @@ public:
     {
     }
 
-    const Integer& modulus() const { return m_modulus; }
-    const Integer& public_exponent() const { return m_public_exponent; }
+    Integer const& modulus() const { return m_modulus; }
+    Integer const& public_exponent() const { return m_public_exponent; }
     size_t length() const { return m_length; }
     void set_length(size_t length) { m_length = length; }
 
@@ -62,9 +62,9 @@ public:
 
     RSAPrivateKey() = default;
 
-    const Integer& modulus() const { return m_modulus; }
-    const Integer& private_exponent() const { return m_private_exponent; }
-    const Integer& public_exponent() const { return m_public_exponent; }
+    Integer const& modulus() const { return m_modulus; }
+    Integer const& private_exponent() const { return m_private_exponent; }
+    Integer const& public_exponent() const { return m_public_exponent; }
     size_t length() const { return m_length; }
     void set_length(size_t length) { m_length = length; }
 
@@ -135,7 +135,7 @@ public:
     {
     }
 
-    RSA(const ByteBuffer& publicKeyPEM, const ByteBuffer& privateKeyPEM)
+    RSA(ByteBuffer const& publicKeyPEM, ByteBuffer const& privateKeyPEM)
     {
         import_public_key(publicKeyPEM);
         import_private_key(privateKeyPEM);
@@ -161,15 +161,23 @@ public:
     virtual void sign(ReadonlyBytes in, Bytes& out) override;
     virtual void verify(ReadonlyBytes in, Bytes& out) override;
 
-    virtual String class_name() const override { return "RSA"; }
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
+    {
+        return "RSA";
+    }
+#endif
 
-    virtual size_t output_size() const override { return m_public_key.length(); }
+    virtual size_t output_size() const override
+    {
+        return m_public_key.length();
+    }
 
     void import_public_key(ReadonlyBytes, bool pem = true);
     void import_private_key(ReadonlyBytes, bool pem = true);
 
-    const PrivateKeyType& private_key() const { return m_private_key; }
-    const PublicKeyType& public_key() const { return m_public_key; }
+    PrivateKeyType const& private_key() const { return m_private_key; }
+    PublicKeyType const& public_key() const { return m_public_key; }
 };
 
 template<typename HashFunction>
@@ -197,7 +205,7 @@ public:
     {
     }
 
-    ~RSA_PKCS1_EME() { }
+    ~RSA_PKCS1_EME() = default;
 
     virtual void encrypt(ReadonlyBytes in, Bytes& out) override;
     virtual void decrypt(ReadonlyBytes in, Bytes& out) override;
@@ -205,8 +213,16 @@ public:
     virtual void sign(ReadonlyBytes, Bytes&) override;
     virtual void verify(ReadonlyBytes, Bytes&) override;
 
-    virtual String class_name() const override { return "RSA_PKCS1-EME"; }
-    virtual size_t output_size() const override { return m_public_key.length(); }
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
+    {
+        return "RSA_PKCS1-EME";
+    }
+#endif
+    virtual size_t output_size() const override
+    {
+        return m_public_key.length();
+    }
 };
 }
 }

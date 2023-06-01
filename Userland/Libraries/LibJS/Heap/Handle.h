@@ -12,6 +12,7 @@
 #include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
 #include <LibJS/Forward.h>
+#include <LibJS/Runtime/Value.h>
 
 namespace JS {
 
@@ -23,14 +24,14 @@ public:
     ~HandleImpl();
 
     Cell* cell() { return m_cell; }
-    const Cell* cell() const { return m_cell; }
+    Cell const* cell() const { return m_cell; }
 
 private:
     template<class T>
     friend class Handle;
 
     explicit HandleImpl(Cell*);
-    Cell* m_cell { nullptr };
+    GCPtr<Cell> m_cell;
 
     IntrusiveListNode<HandleImpl> m_list_node;
 
@@ -45,13 +46,67 @@ public:
 
     static Handle create(T* cell)
     {
-        return Handle(adopt_ref(*new HandleImpl(cell)));
+        return Handle(adopt_ref(*new HandleImpl(const_cast<RemoveConst<T>*>(cell))));
     }
 
-    T* cell() { return static_cast<T*>(m_impl->cell()); }
-    const T* cell() const { return static_cast<const T*>(m_impl->cell()); }
+    Handle(T* cell)
+    {
+        if (cell)
+            m_impl = adopt_ref(*new HandleImpl(cell));
+    }
 
-    bool is_null() const { return m_impl.is_null(); }
+    Handle(T& cell)
+        : m_impl(adopt_ref(*new HandleImpl(&cell)))
+    {
+    }
+
+    Handle(GCPtr<T> cell)
+        : Handle(cell.ptr())
+    {
+    }
+
+    Handle(NonnullGCPtr<T> cell)
+        : Handle(*cell)
+    {
+    }
+
+    T* cell() const
+    {
+        if (!m_impl)
+            return nullptr;
+        return static_cast<T*>(m_impl->cell());
+    }
+
+    T* ptr() const
+    {
+        return cell();
+    }
+
+    bool is_null() const
+    {
+        return m_impl.is_null();
+    }
+
+    T* operator->() const
+    {
+        return cell();
+    }
+
+    T& operator*() const
+    {
+        return *cell();
+    }
+
+    bool operator!() const
+    {
+        return !cell();
+    }
+    operator bool() const
+    {
+        return cell();
+    }
+
+    operator T*() const { return cell(); }
 
 private:
     explicit Handle(NonnullRefPtr<HandleImpl> impl)
@@ -65,7 +120,67 @@ private:
 template<class T>
 inline Handle<T> make_handle(T* cell)
 {
+    if (!cell)
+        return Handle<T> {};
     return Handle<T>::create(cell);
+}
+
+template<class T>
+inline Handle<T> make_handle(T& cell)
+{
+    return Handle<T>::create(&cell);
+}
+
+template<class T>
+inline Handle<T> make_handle(GCPtr<T> cell)
+{
+    if (!cell)
+        return Handle<T> {};
+    return Handle<T>::create(cell.ptr());
+}
+
+template<class T>
+inline Handle<T> make_handle(NonnullGCPtr<T> cell)
+{
+    return Handle<T>::create(cell.ptr());
+}
+
+template<>
+class Handle<Value> {
+public:
+    Handle() = default;
+
+    static Handle create(Value value)
+    {
+        if (value.is_cell())
+            return Handle(value, &value.as_cell());
+        return Handle(value);
+    }
+
+    auto cell() { return m_handle.cell(); }
+    auto cell() const { return m_handle.cell(); }
+    auto value() const { return *m_value; }
+    bool is_null() const { return m_handle.is_null() && !m_value.has_value(); }
+
+private:
+    explicit Handle(Value value)
+        : m_value(value)
+    {
+    }
+
+    explicit Handle(Value value, Cell* cell)
+        : m_value(value)
+        , m_handle(Handle<Cell>::create(cell))
+    {
+    }
+
+    Optional<Value> m_value;
+    Handle<Cell> m_handle;
+};
+
+inline Handle<Value> make_handle(Value value)
+{
+    return Handle<Value>::create(value);
 }
 
 }

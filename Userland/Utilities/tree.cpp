@@ -1,16 +1,19 @@
 /*
  * Copyright (c) 2020, Stijn De Ridder <stijn.deridder@hotmail.com>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/DeprecatedString.h>
 #include <AK/LexicalPath.h>
 #include <AK/QuickSort.h>
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/DirIterator.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -24,10 +27,10 @@ static int max_depth = INT_MAX;
 static int g_directories_seen = 0;
 static int g_files_seen = 0;
 
-static void print_directory_tree(const String& root_path, int depth, const String& indent_string)
+static void print_directory_tree(DeprecatedString const& root_path, int depth, DeprecatedString const& indent_string)
 {
     if (depth > 0) {
-        String root_indent_string;
+        DeprecatedString root_indent_string;
         if (depth > 1) {
             root_indent_string = indent_string.substring(0, (depth - 1) * 4);
         } else {
@@ -36,7 +39,7 @@ static void print_directory_tree(const String& root_path, int depth, const Strin
         out("{}|-- ", root_indent_string);
     }
 
-    String root_dir_name = LexicalPath::basename(root_path);
+    DeprecatedString root_dir_name = LexicalPath::basename(root_path);
     out("\033[34;1m{}\033[0m\n", root_dir_name);
 
     if (depth >= max_depth) {
@@ -45,15 +48,15 @@ static void print_directory_tree(const String& root_path, int depth, const Strin
 
     Core::DirIterator di(root_path, flag_show_hidden_files ? Core::DirIterator::SkipParentAndBaseDir : Core::DirIterator::SkipDots);
     if (di.has_error()) {
-        warnln("{}: {}", root_path, di.error_string());
+        warnln("{}: {}", root_path, di.error());
         return;
     }
 
-    Vector<String> names;
+    Vector<DeprecatedString> names;
     while (di.has_next()) {
-        String name = di.next_path();
+        DeprecatedString name = di.next_path();
         if (di.has_error()) {
-            warnln("{}: {}", root_path, di.error_string());
+            warnln("{}: {}", root_path, di.error());
             continue;
         }
         names.append(name);
@@ -62,7 +65,7 @@ static void print_directory_tree(const String& root_path, int depth, const Strin
     quick_sort(names);
 
     for (size_t i = 0; i < names.size(); i++) {
-        String name = names[i];
+        DeprecatedString name = names[i];
 
         StringBuilder builder;
         builder.append(root_path);
@@ -70,7 +73,7 @@ static void print_directory_tree(const String& root_path, int depth, const Strin
             builder.append('/');
         }
         builder.append(name);
-        String full_path = builder.to_string();
+        auto full_path = builder.to_deprecated_string();
 
         struct stat st;
         int rc = lstat(full_path.characters(), &st);
@@ -83,11 +86,11 @@ static void print_directory_tree(const String& root_path, int depth, const Strin
             g_directories_seen++;
 
             bool at_last_entry = i == names.size() - 1;
-            String new_indent_string;
+            DeprecatedString new_indent_string;
             if (at_last_entry) {
-                new_indent_string = String::formatted("{}    ", indent_string);
+                new_indent_string = DeprecatedString::formatted("{}    ", indent_string);
             } else {
-                new_indent_string = String::formatted("{}|   ", indent_string);
+                new_indent_string = DeprecatedString::formatted("{}|   ", indent_string);
             }
 
             print_directory_tree(full_path.characters(), depth + 1, new_indent_string);
@@ -99,24 +102,21 @@ static void print_directory_tree(const String& root_path, int depth, const Strin
     }
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath tty", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath tty"));
 
-    Vector<const char*> directories;
+    Vector<DeprecatedString> directories;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(flag_show_hidden_files, "Show hidden files", "all", 'a');
     args_parser.add_option(flag_show_only_directories, "Show only directories", "only-directories", 'd');
     args_parser.add_option(max_depth, "Maximum depth of the tree", "maximum-depth", 'L', "level");
     args_parser.add_positional_argument(directories, "Directories to print", "directories", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if (max_depth < 1) {
-        warnln("{}: Invalid level, must be greater than 0.", argv[0]);
+        warnln("{}: Invalid level, must be greater than 0.", arguments.argv[0]);
         return 1;
     }
 
@@ -124,7 +124,7 @@ int main(int argc, char** argv)
         print_directory_tree(".", 0, "");
         puts("");
     } else {
-        for (const char* directory : directories) {
+        for (auto const& directory : directories) {
             print_directory_tree(directory, 0, "");
             puts("");
         }

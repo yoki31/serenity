@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -16,9 +16,10 @@ LoadRequest LoadRequest::create_for_url_on_page(const AK::URL& url, Page* page)
     request.set_url(url);
 
     if (page) {
-        String cookie = page->client().page_did_request_cookie(url, Cookie::Source::Http);
+        DeprecatedString cookie = page->client().page_did_request_cookie(url, Cookie::Source::Http);
         if (!cookie.is_empty())
             request.set_header("Cookie", cookie);
+        request.set_page(*page);
     }
 
     return request;

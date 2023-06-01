@@ -2,6 +2,7 @@
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, Felix Rauch <noreply@felixrau.ch>
  * Copyright (c) 2021, Mustafa Quraish <mustafa@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -21,7 +22,7 @@ class PaletteWidget final : public GUI::Frame {
     C_OBJECT(PaletteWidget);
 
 public:
-    virtual ~PaletteWidget() override;
+    virtual ~PaletteWidget() override = default;
 
     void set_primary_color(Color);
     void set_secondary_color(Color);
@@ -30,16 +31,15 @@ public:
 
     Vector<Color> colors();
 
-    static Result<Vector<Color>, String> load_palette_fd_and_close(int);
-    static Result<Vector<Color>, String> load_palette_path(String const&);
-    static Result<void, String> save_palette_fd_and_close(Vector<Color>, int);
+    static ErrorOr<Vector<Color>> load_palette_file(NonnullOwnPtr<Core::File>);
+    static ErrorOr<Vector<Color>> load_palette_path(DeprecatedString const&);
+    static ErrorOr<void> save_palette_file(Vector<Color>, NonnullOwnPtr<Core::File>);
+
     static Vector<Color> fallback_colors();
 
-    void set_image_editor(ImageEditor&);
+    void set_image_editor(ImageEditor*);
 
 private:
-    static Result<Vector<Color>, String> load_palette_file(Core::File&);
-
     explicit PaletteWidget();
 
     ImageEditor* m_editor { nullptr };

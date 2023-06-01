@@ -9,28 +9,20 @@
 #include <AK/IPv4Address.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/EventLoop.h>
+#include <LibCore/System.h>
 #include <LibCore/TCPServer.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
+#include <LibMain/Main.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio unix inet id accept", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
-
-    if (unveil(nullptr, nullptr) < 0) {
-        perror("unveil");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio unix inet id accept"));
+    TRY(Core::System::unveil(nullptr, nullptr));
 
     int port = 7;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(port, "Port to listen on", "port", 'p', "port");
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if ((u16)port != port) {
         warnln("Invalid port number: {}", port);
@@ -39,12 +31,8 @@ int main(int argc, char** argv)
 
     Core::EventLoop event_loop;
 
-    auto server = Core::TCPServer::construct();
-
-    if (!server->listen({}, port)) {
-        warnln("Listening on 0.0.0.0:{} failed", port);
-        exit(1);
-    }
+    auto server = TRY(Core::TCPServer::try_create());
+    TRY(server->listen({}, port));
 
     HashMap<int, NonnullRefPtr<Client>> clients;
     int next_id = 0;
@@ -52,15 +40,15 @@ int main(int argc, char** argv)
     server->on_ready_to_accept = [&next_id, &clients, &server] {
         int id = next_id++;
 
-        auto client_socket = server->accept();
-        if (!client_socket) {
-            perror("accept");
+        auto maybe_client_socket = server->accept();
+        if (maybe_client_socket.is_error()) {
+            warnln("accept: {}", maybe_client_socket.error());
             return;
         }
 
         outln("Client {} connected", id);
 
-        auto client = Client::create(id, move(client_socket));
+        auto client = Client::create(id, maybe_client_socket.release_value());
         client->on_exit = [&clients, id] {
             Core::deferred_invoke([&clients, id] {
                 clients.remove(id);

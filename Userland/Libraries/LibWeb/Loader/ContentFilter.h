@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/String.h>
 #include <AK/URL.h>
 #include <AK/Vector.h>
 
@@ -16,7 +17,7 @@ public:
     static ContentFilter& the();
 
     bool is_filtered(const AK::URL&) const;
-    void add_pattern(const String&);
+    ErrorOr<void> set_patterns(ReadonlySpan<String>);
 
 private:
     ContentFilter();

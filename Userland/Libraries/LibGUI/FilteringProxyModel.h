@@ -6,9 +6,10 @@
 
 #pragma once
 
+#include <AK/DeprecatedString.h>
+#include <AK/EnumBits.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/Optional.h>
-#include <AK/String.h>
 #include <LibGUI/Model.h>
 #include <LibGUI/TextBox.h>
 
@@ -17,18 +18,24 @@ namespace GUI {
 class FilteringProxyModel final : public Model
     , public ModelClient {
 public:
-    static ErrorOr<NonnullRefPtr<FilteringProxyModel>> create(Model& model)
+    enum class FilteringOptions {
+        None,
+        SortByScore = 1 << 1
+    };
+
+    static ErrorOr<NonnullRefPtr<FilteringProxyModel>> create(NonnullRefPtr<Model> model, FilteringOptions filtering_options = FilteringOptions::None)
     {
-        return adopt_nonnull_ref_or_enomem(new (nothrow) FilteringProxyModel(model));
+        return adopt_nonnull_ref_or_enomem(new (nothrow) FilteringProxyModel(move(model), filtering_options));
     }
 
     virtual ~FilteringProxyModel() override
     {
-        m_model.unregister_client(*this);
+        m_model->unregister_client(*this);
     };
 
     virtual int row_count(ModelIndex const& = ModelIndex()) const override;
     virtual int column_count(ModelIndex const& = ModelIndex()) const override;
+    virtual String column_name(int) const override;
     virtual Variant data(ModelIndex const&, ModelRole = ModelRole::Display) const override;
     virtual void invalidate() override;
     virtual ModelIndex index(int row, int column = 0, ModelIndex const& parent = ModelIndex()) const override;
@@ -43,19 +50,28 @@ protected:
     virtual void model_did_update([[maybe_unused]] unsigned flags) override { invalidate(); }
 
 private:
+    struct ModelIndexWithScore {
+        ModelIndex index;
+        int score { 0 };
+    };
+
     void filter();
-    explicit FilteringProxyModel(Model& model)
-        : m_model(model)
+    explicit FilteringProxyModel(NonnullRefPtr<Model> model, FilteringOptions filtering_options = FilteringOptions::None)
+        : m_model(move(model))
+        , m_filtering_options(filtering_options)
     {
-        m_model.register_client(*this);
+        m_model->register_client(*this);
     }
 
-    Model& m_model;
+    NonnullRefPtr<Model> m_model;
 
     // Maps row to actual model index.
-    Vector<ModelIndex> m_matching_indices;
+    Vector<ModelIndexWithScore> m_matching_indices;
 
-    String m_filter_term;
+    DeprecatedString m_filter_term;
+    FilteringOptions m_filtering_options;
 };
+
+AK_ENUM_BITWISE_OPERATORS(FilteringProxyModel::FilteringOptions);
 
 }

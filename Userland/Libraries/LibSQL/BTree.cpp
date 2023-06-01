@@ -4,20 +4,19 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/Format.h>
 #include <LibSQL/BTree.h>
 #include <LibSQL/Meta.h>
 
 namespace SQL {
 
-BTree::BTree(Serializer& serializer, NonnullRefPtr<TupleDescriptor> const& descriptor, bool unique, u32 pointer)
-    : Index(serializer, descriptor, unique, pointer)
+BTree::BTree(Serializer& serializer, NonnullRefPtr<TupleDescriptor> const& descriptor, bool unique, Block::Index block_index)
+    : Index(serializer, descriptor, unique, block_index)
     , m_root(nullptr)
 {
 }
 
-BTree::BTree(Serializer& serializer, NonnullRefPtr<TupleDescriptor> const& descriptor, u32 pointer)
-    : BTree(serializer, descriptor, true, pointer)
+BTree::BTree(Serializer& serializer, NonnullRefPtr<TupleDescriptor> const& descriptor, Block::Index block_index)
+    : BTree(serializer, descriptor, true, block_index)
 {
 }
 
@@ -36,16 +35,16 @@ BTreeIterator BTree::end()
 
 void BTree::initialize_root()
 {
-    if (pointer()) {
-        if (serializer().has_block(pointer())) {
-            serializer().get_block(pointer());
-            m_root = serializer().make_and_deserialize<TreeNode>(*this, pointer());
+    if (block_index()) {
+        if (serializer().has_block(block_index())) {
+            serializer().read_storage(block_index());
+            m_root = serializer().make_and_deserialize<TreeNode>(*this, block_index());
         } else {
-            m_root = make<TreeNode>(*this, nullptr, pointer());
+            m_root = make<TreeNode>(*this, nullptr, block_index());
         }
     } else {
-        set_pointer(new_record_pointer());
-        m_root = make<TreeNode>(*this, nullptr, pointer());
+        set_block_index(request_new_block_index());
+        m_root = make<TreeNode>(*this, nullptr, block_index());
         if (on_new_root)
             on_new_root();
     }
@@ -54,9 +53,9 @@ void BTree::initialize_root()
 
 TreeNode* BTree::new_root()
 {
-    set_pointer(new_record_pointer());
-    m_root = make<TreeNode>(*this, nullptr, m_root.leak_ptr(), pointer());
-    serializer().serialize_and_write(*m_root.ptr(), m_root->pointer());
+    set_block_index(request_new_block_index());
+    m_root = make<TreeNode>(*this, nullptr, m_root.leak_ptr(), block_index());
+    serializer().serialize_and_write(*m_root.ptr());
     if (on_new_root)
         on_new_root();
     return m_root;
@@ -66,7 +65,6 @@ bool BTree::insert(Key const& key)
 {
     if (!m_root)
         initialize_root();
-    VERIFY(m_root);
     return m_root->insert(key);
 }
 
@@ -74,7 +72,6 @@ bool BTree::update_key_pointer(Key const& key)
 {
     if (!m_root)
         initialize_root();
-    VERIFY(m_root);
     return m_root->update_key_pointer(key);
 }
 
@@ -82,7 +79,6 @@ Optional<u32> BTree::get(Key& key)
 {
     if (!m_root)
         initialize_root();
-    VERIFY(m_root);
     return m_root->get(key);
 }
 
@@ -90,7 +86,6 @@ BTreeIterator BTree::find(Key const& key)
 {
     if (!m_root)
         initialize_root();
-    VERIFY(m_root);
     for (auto node = m_root->node_for(key); node; node = node->up()) {
         for (auto ix = 0u; ix < node->size(); ix++) {
             auto match = (*node)[ix].match(key);

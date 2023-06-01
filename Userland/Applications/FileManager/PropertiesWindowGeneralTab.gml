@@ -6,7 +6,6 @@
 
     @GUI::Widget {
         fixed_height: 34
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 20
         }
@@ -23,12 +22,10 @@
         }
     }
 
-    @GUI::HorizontalSeparator {
-    }
+    @GUI::HorizontalSeparator {}
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -48,7 +45,6 @@
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -69,7 +65,6 @@
     @GUI::Widget {
         name: "link_location_widget"
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -88,28 +83,26 @@
     }
 
     @GUI::Widget {
-        fixed_height: 14
-
+        fixed_height: 28
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
 
         @GUI::Label {
             text: "Size:"
-            text_alignment: "CenterLeft"
+            text_alignment: "TopLeft"
             fixed_width: 80
         }
 
         @GUI::Label {
             name: "size"
             text: "5.9 KiB (6097 bytes)"
-            text_alignment: "CenterLeft"
+            text_alignment: "TopLeft"
         }
     }
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -129,7 +122,6 @@
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -149,7 +141,6 @@
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -169,7 +160,6 @@
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -187,12 +177,10 @@
         }
     }
 
-    @GUI::HorizontalSeparator {
-    }
+    @GUI::HorizontalSeparator {}
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -221,7 +209,6 @@
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }
@@ -250,7 +237,6 @@
 
     @GUI::Widget {
         fixed_height: 14
-
         layout: @GUI::HorizontalBoxLayout {
             spacing: 12
         }

@@ -1,37 +1,37 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2019-2023, Shannon Booth <shannon.ml.booth@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/Assertions.h>
+#include <AK/DeprecatedString.h>
+#include <AK/FloatingPointStringConversions.h>
 #include <AK/Optional.h>
-#include <AK/String.h>
 #include <AK/Vector.h>
 #include <LibGfx/Color.h>
 #include <LibGfx/SystemTheme.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
 #include <ctype.h>
-#include <stdio.h>
-#include <stdlib.h>
 
 namespace Gfx {
 
-String Color::to_string() const
+DeprecatedString Color::to_deprecated_string() const
 {
-    return String::formatted("#{:02x}{:02x}{:02x}{:02x}", red(), green(), blue(), alpha());
+    return DeprecatedString::formatted("#{:02x}{:02x}{:02x}{:02x}", red(), green(), blue(), alpha());
 }
 
-String Color::to_string_without_alpha() const
+DeprecatedString Color::to_deprecated_string_without_alpha() const
 {
-    return String::formatted("#{:02x}{:02x}{:02x}", red(), green(), blue());
+    return DeprecatedString::formatted("#{:02x}{:02x}{:02x}", red(), green(), blue());
 }
 
 static Optional<Color> parse_rgb_color(StringView string)
 {
-    VERIFY(string.starts_with("rgb(", CaseSensitivity::CaseInsensitive));
-    VERIFY(string.ends_with(")"));
+    VERIFY(string.starts_with("rgb("sv, CaseSensitivity::CaseInsensitive));
+    VERIFY(string.ends_with(')'));
 
     auto substring = string.substring_view(4, string.length() - 5);
     auto parts = substring.split_view(',');
@@ -51,8 +51,8 @@ static Optional<Color> parse_rgb_color(StringView string)
 
 static Optional<Color> parse_rgba_color(StringView string)
 {
-    VERIFY(string.starts_with("rgba(", CaseSensitivity::CaseInsensitive));
-    VERIFY(string.ends_with(")"));
+    VERIFY(string.starts_with("rgba("sv, CaseSensitivity::CaseInsensitive));
+    VERIFY(string.ends_with(')'));
 
     auto substring = string.substring_view(5, string.length() - 6);
     auto parts = substring.split_view(',');
@@ -64,7 +64,13 @@ static Optional<Color> parse_rgba_color(StringView string)
     auto g = parts[1].to_int().value_or(256);
     auto b = parts[2].to_int().value_or(256);
 
-    double alpha = strtod(parts[3].to_string().characters(), nullptr);
+    double alpha = 0;
+    auto alpha_str = parts[3].trim_whitespace();
+    char const* start = alpha_str.characters_without_null_termination();
+    auto alpha_result = parse_first_floating_point(start, start + alpha_str.length());
+    if (alpha_result.parsed_value())
+        alpha = alpha_result.value;
+
     unsigned a = alpha * 255;
 
     if (r > 255 || g > 255 || b > 255 || a > 255)
@@ -73,190 +79,194 @@ static Optional<Color> parse_rgba_color(StringView string)
     return Color(r, g, b, a);
 }
 
+Optional<Color> Color::from_named_css_color_string(StringView string)
+{
+    if (string.is_empty())
+        return {};
+
+    struct WebColor {
+        ARGB32 color;
+        StringView name;
+    };
+
+    constexpr Array web_colors {
+        // CSS Level 1
+        WebColor { 0x000000, "black"sv },
+        WebColor { 0xc0c0c0, "silver"sv },
+        WebColor { 0x808080, "gray"sv },
+        WebColor { 0xffffff, "white"sv },
+        WebColor { 0x800000, "maroon"sv },
+        WebColor { 0xff0000, "red"sv },
+        WebColor { 0x800080, "purple"sv },
+        WebColor { 0xff00ff, "fuchsia"sv },
+        WebColor { 0x008000, "green"sv },
+        WebColor { 0x00ff00, "lime"sv },
+        WebColor { 0x808000, "olive"sv },
+        WebColor { 0xffff00, "yellow"sv },
+        WebColor { 0x000080, "navy"sv },
+        WebColor { 0x0000ff, "blue"sv },
+        WebColor { 0x008080, "teal"sv },
+        WebColor { 0x00ffff, "aqua"sv },
+        // CSS Level 2 (Revision 1)
+        WebColor { 0xffa500, "orange"sv },
+        // CSS Color Module Level 3
+        WebColor { 0xf0f8ff, "aliceblue"sv },
+        WebColor { 0xfaebd7, "antiquewhite"sv },
+        WebColor { 0x7fffd4, "aquamarine"sv },
+        WebColor { 0xf0ffff, "azure"sv },
+        WebColor { 0xf5f5dc, "beige"sv },
+        WebColor { 0xffe4c4, "bisque"sv },
+        WebColor { 0xffebcd, "blanchedalmond"sv },
+        WebColor { 0x8a2be2, "blueviolet"sv },
+        WebColor { 0xa52a2a, "brown"sv },
+        WebColor { 0xdeb887, "burlywood"sv },
+        WebColor { 0x5f9ea0, "cadetblue"sv },
+        WebColor { 0x7fff00, "chartreuse"sv },
+        WebColor { 0xd2691e, "chocolate"sv },
+        WebColor { 0xff7f50, "coral"sv },
+        WebColor { 0x6495ed, "cornflowerblue"sv },
+        WebColor { 0xfff8dc, "cornsilk"sv },
+        WebColor { 0xdc143c, "crimson"sv },
+        WebColor { 0x00ffff, "cyan"sv },
+        WebColor { 0x00008b, "darkblue"sv },
+        WebColor { 0x008b8b, "darkcyan"sv },
+        WebColor { 0xb8860b, "darkgoldenrod"sv },
+        WebColor { 0xa9a9a9, "darkgray"sv },
+        WebColor { 0x006400, "darkgreen"sv },
+        WebColor { 0xa9a9a9, "darkgrey"sv },
+        WebColor { 0xbdb76b, "darkkhaki"sv },
+        WebColor { 0x8b008b, "darkmagenta"sv },
+        WebColor { 0x556b2f, "darkolivegreen"sv },
+        WebColor { 0xff8c00, "darkorange"sv },
+        WebColor { 0x9932cc, "darkorchid"sv },
+        WebColor { 0x8b0000, "darkred"sv },
+        WebColor { 0xe9967a, "darksalmon"sv },
+        WebColor { 0x8fbc8f, "darkseagreen"sv },
+        WebColor { 0x483d8b, "darkslateblue"sv },
+        WebColor { 0x2f4f4f, "darkslategray"sv },
+        WebColor { 0x2f4f4f, "darkslategrey"sv },
+        WebColor { 0x00ced1, "darkturquoise"sv },
+        WebColor { 0x9400d3, "darkviolet"sv },
+        WebColor { 0xff1493, "deeppink"sv },
+        WebColor { 0x00bfff, "deepskyblue"sv },
+        WebColor { 0x696969, "dimgray"sv },
+        WebColor { 0x696969, "dimgrey"sv },
+        WebColor { 0x1e90ff, "dodgerblue"sv },
+        WebColor { 0xb22222, "firebrick"sv },
+        WebColor { 0xfffaf0, "floralwhite"sv },
+        WebColor { 0x228b22, "forestgreen"sv },
+        WebColor { 0xdcdcdc, "gainsboro"sv },
+        WebColor { 0xf8f8ff, "ghostwhite"sv },
+        WebColor { 0xffd700, "gold"sv },
+        WebColor { 0xdaa520, "goldenrod"sv },
+        WebColor { 0xadff2f, "greenyellow"sv },
+        WebColor { 0x808080, "grey"sv },
+        WebColor { 0xf0fff0, "honeydew"sv },
+        WebColor { 0xff69b4, "hotpink"sv },
+        WebColor { 0xcd5c5c, "indianred"sv },
+        WebColor { 0x4b0082, "indigo"sv },
+        WebColor { 0xfffff0, "ivory"sv },
+        WebColor { 0xf0e68c, "khaki"sv },
+        WebColor { 0xe6e6fa, "lavender"sv },
+        WebColor { 0xfff0f5, "lavenderblush"sv },
+        WebColor { 0x7cfc00, "lawngreen"sv },
+        WebColor { 0xfffacd, "lemonchiffon"sv },
+        WebColor { 0xadd8e6, "lightblue"sv },
+        WebColor { 0xf08080, "lightcoral"sv },
+        WebColor { 0xe0ffff, "lightcyan"sv },
+        WebColor { 0xfafad2, "lightgoldenrodyellow"sv },
+        WebColor { 0xd3d3d3, "lightgray"sv },
+        WebColor { 0x90ee90, "lightgreen"sv },
+        WebColor { 0xd3d3d3, "lightgrey"sv },
+        WebColor { 0xffb6c1, "lightpink"sv },
+        WebColor { 0xffa07a, "lightsalmon"sv },
+        WebColor { 0x20b2aa, "lightseagreen"sv },
+        WebColor { 0x87cefa, "lightskyblue"sv },
+        WebColor { 0x778899, "lightslategray"sv },
+        WebColor { 0x778899, "lightslategrey"sv },
+        WebColor { 0xb0c4de, "lightsteelblue"sv },
+        WebColor { 0xffffe0, "lightyellow"sv },
+        WebColor { 0x32cd32, "limegreen"sv },
+        WebColor { 0xfaf0e6, "linen"sv },
+        WebColor { 0xff00ff, "magenta"sv },
+        WebColor { 0x66cdaa, "mediumaquamarine"sv },
+        WebColor { 0x0000cd, "mediumblue"sv },
+        WebColor { 0xba55d3, "mediumorchid"sv },
+        WebColor { 0x9370db, "mediumpurple"sv },
+        WebColor { 0x3cb371, "mediumseagreen"sv },
+        WebColor { 0x7b68ee, "mediumslateblue"sv },
+        WebColor { 0x00fa9a, "mediumspringgreen"sv },
+        WebColor { 0x48d1cc, "mediumturquoise"sv },
+        WebColor { 0xc71585, "mediumvioletred"sv },
+        WebColor { 0x191970, "midnightblue"sv },
+        WebColor { 0xf5fffa, "mintcream"sv },
+        WebColor { 0xffe4e1, "mistyrose"sv },
+        WebColor { 0xffe4b5, "moccasin"sv },
+        WebColor { 0xffdead, "navajowhite"sv },
+        WebColor { 0xfdf5e6, "oldlace"sv },
+        WebColor { 0x6b8e23, "olivedrab"sv },
+        WebColor { 0xff4500, "orangered"sv },
+        WebColor { 0xda70d6, "orchid"sv },
+        WebColor { 0xeee8aa, "palegoldenrod"sv },
+        WebColor { 0x98fb98, "palegreen"sv },
+        WebColor { 0xafeeee, "paleturquoise"sv },
+        WebColor { 0xdb7093, "palevioletred"sv },
+        WebColor { 0xffefd5, "papayawhip"sv },
+        WebColor { 0xffdab9, "peachpuff"sv },
+        WebColor { 0xcd853f, "peru"sv },
+        WebColor { 0xffc0cb, "pink"sv },
+        WebColor { 0xdda0dd, "plum"sv },
+        WebColor { 0xb0e0e6, "powderblue"sv },
+        WebColor { 0xbc8f8f, "rosybrown"sv },
+        WebColor { 0x4169e1, "royalblue"sv },
+        WebColor { 0x8b4513, "saddlebrown"sv },
+        WebColor { 0xfa8072, "salmon"sv },
+        WebColor { 0xf4a460, "sandybrown"sv },
+        WebColor { 0x2e8b57, "seagreen"sv },
+        WebColor { 0xfff5ee, "seashell"sv },
+        WebColor { 0xa0522d, "sienna"sv },
+        WebColor { 0x87ceeb, "skyblue"sv },
+        WebColor { 0x6a5acd, "slateblue"sv },
+        WebColor { 0x708090, "slategray"sv },
+        WebColor { 0x708090, "slategrey"sv },
+        WebColor { 0xfffafa, "snow"sv },
+        WebColor { 0x00ff7f, "springgreen"sv },
+        WebColor { 0x4682b4, "steelblue"sv },
+        WebColor { 0xd2b48c, "tan"sv },
+        WebColor { 0xd8bfd8, "thistle"sv },
+        WebColor { 0xff6347, "tomato"sv },
+        WebColor { 0x40e0d0, "turquoise"sv },
+        WebColor { 0xee82ee, "violet"sv },
+        WebColor { 0xf5deb3, "wheat"sv },
+        WebColor { 0xf5f5f5, "whitesmoke"sv },
+        WebColor { 0x9acd32, "yellowgreen"sv },
+        // CSS Color Module Level 4
+        WebColor { 0x663399, "rebeccapurple"sv },
+    };
+
+    for (auto const& web_color : web_colors) {
+        if (string.equals_ignoring_ascii_case(web_color.name))
+            return Color::from_rgb(web_color.color);
+    }
+
+    return {};
+}
+
 Optional<Color> Color::from_string(StringView string)
 {
     if (string.is_empty())
         return {};
 
-    struct ColorAndWebName {
-        constexpr ColorAndWebName(RGBA32 c, char const* n)
-            : color(c)
-            , name(n)
-        {
-        }
-        RGBA32 color;
-        StringView name;
-    };
+    if (string.equals_ignoring_ascii_case("transparent"sv))
+        return Color::from_argb(0x00000000);
 
-    constexpr ColorAndWebName web_colors[] = {
-        // CSS Level 1
-        { 0x000000, "black" },
-        { 0xc0c0c0, "silver" },
-        { 0x808080, "gray" },
-        { 0xffffff, "white" },
-        { 0x800000, "maroon" },
-        { 0xff0000, "red" },
-        { 0x800080, "purple" },
-        { 0xff00ff, "fuchsia" },
-        { 0x008000, "green" },
-        { 0x00ff00, "lime" },
-        { 0x808000, "olive" },
-        { 0xffff00, "yellow" },
-        { 0x000080, "navy" },
-        { 0x0000ff, "blue" },
-        { 0x008080, "teal" },
-        { 0x00ffff, "aqua" },
-        // CSS Level 2 (Revision 1)
-        { 0xffa500, "orange" },
-        // CSS Color Module Level 3
-        { 0xf0f8ff, "aliceblue" },
-        { 0xfaebd7, "antiquewhite" },
-        { 0x7fffd4, "aquamarine" },
-        { 0xf0ffff, "azure" },
-        { 0xf5f5dc, "beige" },
-        { 0xffe4c4, "bisque" },
-        { 0xffebcd, "blanchedalmond" },
-        { 0x8a2be2, "blueviolet" },
-        { 0xa52a2a, "brown" },
-        { 0xdeb887, "burlywood" },
-        { 0x5f9ea0, "cadetblue" },
-        { 0x7fff00, "chartreuse" },
-        { 0xd2691e, "chocolate" },
-        { 0xff7f50, "coral" },
-        { 0x6495ed, "cornflowerblue" },
-        { 0xfff8dc, "cornsilk" },
-        { 0xdc143c, "crimson" },
-        { 0x00ffff, "cyan" },
-        { 0x00008b, "darkblue" },
-        { 0x008b8b, "darkcyan" },
-        { 0xb8860b, "darkgoldenrod" },
-        { 0xa9a9a9, "darkgray" },
-        { 0x006400, "darkgreen" },
-        { 0xa9a9a9, "darkgrey" },
-        { 0xbdb76b, "darkkhaki" },
-        { 0x8b008b, "darkmagenta" },
-        { 0x556b2f, "darkolivegreen" },
-        { 0xff8c00, "darkorange" },
-        { 0x9932cc, "darkorchid" },
-        { 0x8b0000, "darkred" },
-        { 0xe9967a, "darksalmon" },
-        { 0x8fbc8f, "darkseagreen" },
-        { 0x483d8b, "darkslateblue" },
-        { 0x2f4f4f, "darkslategray" },
-        { 0x2f4f4f, "darkslategrey" },
-        { 0x00ced1, "darkturquoise" },
-        { 0x9400d3, "darkviolet" },
-        { 0xff1493, "deeppink" },
-        { 0x00bfff, "deepskyblue" },
-        { 0x696969, "dimgray" },
-        { 0x696969, "dimgrey" },
-        { 0x1e90ff, "dodgerblue" },
-        { 0xb22222, "firebrick" },
-        { 0xfffaf0, "floralwhite" },
-        { 0x228b22, "forestgreen" },
-        { 0xdcdcdc, "gainsboro" },
-        { 0xf8f8ff, "ghostwhite" },
-        { 0xffd700, "gold" },
-        { 0xdaa520, "goldenrod" },
-        { 0xadff2f, "greenyellow" },
-        { 0x808080, "grey" },
-        { 0xf0fff0, "honeydew" },
-        { 0xff69b4, "hotpink" },
-        { 0xcd5c5c, "indianred" },
-        { 0x4b0082, "indigo" },
-        { 0xfffff0, "ivory" },
-        { 0xf0e68c, "khaki" },
-        { 0xe6e6fa, "lavender" },
-        { 0xfff0f5, "lavenderblush" },
-        { 0x7cfc00, "lawngreen" },
-        { 0xfffacd, "lemonchiffon" },
-        { 0xadd8e6, "lightblue" },
-        { 0xf08080, "lightcoral" },
-        { 0xe0ffff, "lightcyan" },
-        { 0xfafad2, "lightgoldenrodyellow" },
-        { 0xd3d3d3, "lightgray" },
-        { 0x90ee90, "lightgreen" },
-        { 0xd3d3d3, "lightgrey" },
-        { 0xffb6c1, "lightpink" },
-        { 0xffa07a, "lightsalmon" },
-        { 0x20b2aa, "lightseagreen" },
-        { 0x87cefa, "lightskyblue" },
-        { 0x778899, "lightslategray" },
-        { 0x778899, "lightslategrey" },
-        { 0xb0c4de, "lightsteelblue" },
-        { 0xffffe0, "lightyellow" },
-        { 0x32cd32, "limegreen" },
-        { 0xfaf0e6, "linen" },
-        { 0xff00ff, "magenta" },
-        { 0x66cdaa, "mediumaquamarine" },
-        { 0x0000cd, "mediumblue" },
-        { 0xba55d3, "mediumorchid" },
-        { 0x9370db, "mediumpurple" },
-        { 0x3cb371, "mediumseagreen" },
-        { 0x7b68ee, "mediumslateblue" },
-        { 0x00fa9a, "mediumspringgreen" },
-        { 0x48d1cc, "mediumturquoise" },
-        { 0xc71585, "mediumvioletred" },
-        { 0x191970, "midnightblue" },
-        { 0xf5fffa, "mintcream" },
-        { 0xffe4e1, "mistyrose" },
-        { 0xffe4b5, "moccasin" },
-        { 0xffdead, "navajowhite" },
-        { 0xfdf5e6, "oldlace" },
-        { 0x6b8e23, "olivedrab" },
-        { 0xff4500, "orangered" },
-        { 0xda70d6, "orchid" },
-        { 0xeee8aa, "palegoldenrod" },
-        { 0x98fb98, "palegreen" },
-        { 0xafeeee, "paleturquoise" },
-        { 0xdb7093, "palevioletred" },
-        { 0xffefd5, "papayawhip" },
-        { 0xffdab9, "peachpuff" },
-        { 0xcd853f, "peru" },
-        { 0xffc0cb, "pink" },
-        { 0xdda0dd, "plum" },
-        { 0xb0e0e6, "powderblue" },
-        { 0xbc8f8f, "rosybrown" },
-        { 0x4169e1, "royalblue" },
-        { 0x8b4513, "saddlebrown" },
-        { 0xfa8072, "salmon" },
-        { 0xf4a460, "sandybrown" },
-        { 0x2e8b57, "seagreen" },
-        { 0xfff5ee, "seashell" },
-        { 0xa0522d, "sienna" },
-        { 0x87ceeb, "skyblue" },
-        { 0x6a5acd, "slateblue" },
-        { 0x708090, "slategray" },
-        { 0x708090, "slategrey" },
-        { 0xfffafa, "snow" },
-        { 0x00ff7f, "springgreen" },
-        { 0x4682b4, "steelblue" },
-        { 0xd2b48c, "tan" },
-        { 0xd8bfd8, "thistle" },
-        { 0xff6347, "tomato" },
-        { 0x40e0d0, "turquoise" },
-        { 0xee82ee, "violet" },
-        { 0xf5deb3, "wheat" },
-        { 0xf5f5f5, "whitesmoke" },
-        { 0x9acd32, "yellowgreen" },
-        // CSS Color Module Level 4
-        { 0x663399, "rebeccapurple" },
-        // (Fallback)
-        { 0x000000, nullptr }
-    };
+    if (auto const color = from_named_css_color_string(string); color.has_value())
+        return color;
 
-    if (string.equals_ignoring_case("transparent"))
-        return Color::from_rgba(0x00000000);
-
-    for (size_t i = 0; !web_colors[i].name.is_null(); ++i) {
-        if (string.equals_ignoring_case(web_colors[i].name))
-            return Color::from_rgb(web_colors[i].color);
-    }
-
-    if (string.starts_with("rgb(", CaseSensitivity::CaseInsensitive) && string.ends_with(")"))
+    if (string.starts_with("rgb("sv, CaseSensitivity::CaseInsensitive) && string.ends_with(')'))
         return parse_rgb_color(string);
 
-    if (string.starts_with("rgba(", CaseSensitivity::CaseInsensitive) && string.ends_with(")"))
+    if (string.starts_with("rgba("sv, CaseSensitivity::CaseInsensitive) && string.ends_with(')'))
         return parse_rgba_color(string);
 
     if (string[0] != '#')
@@ -337,22 +347,20 @@ Vector<Color> Color::tints(u32 steps, float max) const
 
 }
 
-bool IPC::encode(IPC::Encoder& encoder, Color const& color)
+template<>
+ErrorOr<void> IPC::encode(Encoder& encoder, Color const& color)
 {
-    encoder << color.value();
-    return true;
+    return encoder.encode(color.value());
 }
 
-bool IPC::decode(IPC::Decoder& decoder, Color& color)
+template<>
+ErrorOr<Gfx::Color> IPC::decode(Decoder& decoder)
 {
-    u32 rgba = 0;
-    if (!decoder.decode(rgba))
-        return false;
-    color = Color::from_rgba(rgba);
-    return true;
+    auto rgba = TRY(decoder.decode<u32>());
+    return Gfx::Color::from_argb(rgba);
 }
 
-ErrorOr<void> AK::Formatter<Gfx::Color>::format(FormatBuilder& builder, Gfx::Color const& value)
+ErrorOr<void> AK::Formatter<Gfx::Color>::format(FormatBuilder& builder, Gfx::Color value)
 {
-    return Formatter<StringView>::format(builder, value.to_string());
+    return Formatter<StringView>::format(builder, value.to_deprecated_string());
 }

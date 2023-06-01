@@ -6,9 +6,9 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/StringView.h>
 #include <AK/Types.h>
-#include <sys/auxv.h>
+#include <Kernel/API/POSIX/sys/auxv.h>
 
 static_assert(sizeof(auxv_t) % sizeof(FlatPtr) == 0);
 

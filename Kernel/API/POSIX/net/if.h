@@ -13,6 +13,8 @@ extern "C" {
 #include <Kernel/API/POSIX/sys/socket.h>
 #include <Kernel/API/POSIX/sys/types.h>
 
+#define IF_NAMESIZE 16
+
 enum {
     IFF_UP = 1 << 0,
     IFF_BROADCAST = 1 << 1,
@@ -77,6 +79,11 @@ struct ifreq {
 #define ifr_index ifr_ifru.ifru_index         // interface index
 #define ifr_llprio ifr_ifru.ifru_metric       // link layer priority
 #define ifr_hwaddr ifr_ifru.ifru_hwaddr       // MAC address
+};
+
+struct if_nameindex {
+    unsigned int if_index;
+    char* if_name;
 };
 
 #ifdef __cplusplus

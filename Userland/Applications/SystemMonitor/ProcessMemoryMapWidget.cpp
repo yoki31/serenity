@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -13,14 +14,18 @@
 #include <LibGUI/TableView.h>
 #include <LibGfx/Palette.h>
 
+REGISTER_WIDGET(SystemMonitor, ProcessMemoryMapWidget)
+
+namespace SystemMonitor {
+
 class PagemapPaintingDelegate final : public GUI::TableCellPaintingDelegate {
 public:
-    virtual ~PagemapPaintingDelegate() override { }
+    virtual ~PagemapPaintingDelegate() override = default;
 
-    virtual void paint(GUI::Painter& painter, const Gfx::IntRect& a_rect, const Gfx::Palette&, const GUI::ModelIndex& index) override
+    virtual void paint(GUI::Painter& painter, Gfx::IntRect const& a_rect, Gfx::Palette const&, const GUI::ModelIndex& index) override
     {
         auto rect = a_rect.shrunken(2, 2);
-        auto pagemap = index.data(GUI::ModelRole::Custom).to_string();
+        auto pagemap = index.data(GUI::ModelRole::Custom).to_deprecated_string();
 
         float scale_factor = (float)pagemap.length() / (float)rect.width();
 
@@ -37,78 +42,78 @@ public:
             else
                 VERIFY_NOT_REACHED();
 
-            painter.draw_line({ x, rect.top() }, { x, rect.bottom() }, color);
+            painter.draw_line({ x, rect.top() }, { x, rect.bottom() - 1 }, color);
         }
 
         painter.draw_rect(rect, Color::Black);
     }
 };
 
-ProcessMemoryMapWidget::ProcessMemoryMapWidget()
+ErrorOr<NonnullRefPtr<ProcessMemoryMapWidget>> ProcessMemoryMapWidget::try_create()
 {
-    set_layout<GUI::VerticalBoxLayout>();
-    layout()->set_margins(4);
-    m_table_view = add<GUI::TableView>();
+    auto widget = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) ProcessMemoryMapWidget()));
+    TRY(widget->try_set_layout<GUI::VerticalBoxLayout>(4));
+    widget->m_table_view = TRY(widget->try_add<GUI::TableView>());
+
     Vector<GUI::JsonArrayModel::FieldSpec> pid_vm_fields;
-    pid_vm_fields.empend(
-        "Address", Gfx::TextAlignment::CenterLeft,
-        [](auto& object) { return String::formatted("{:p}", object.get("address").to_u64()); },
-        [](auto& object) { return object.get("address").to_u64(); });
-    pid_vm_fields.empend("size", "Size", Gfx::TextAlignment::CenterRight);
-    pid_vm_fields.empend("amount_resident", "Resident", Gfx::TextAlignment::CenterRight);
-    pid_vm_fields.empend("amount_dirty", "Dirty", Gfx::TextAlignment::CenterRight);
-    pid_vm_fields.empend("Access", Gfx::TextAlignment::CenterLeft, [](auto& object) {
+    TRY(pid_vm_fields.try_empend(
+        "Address"_short_string, Gfx::TextAlignment::CenterLeft,
+        [](auto& object) { return DeprecatedString::formatted("{:p}", object.get_u64("address"sv).value_or(0)); },
+        [](auto& object) { return object.get_u64("address"sv).value_or(0); }));
+    TRY(pid_vm_fields.try_empend("size", "Size"_short_string, Gfx::TextAlignment::CenterRight));
+    TRY(pid_vm_fields.try_empend("amount_resident", TRY("Resident"_string), Gfx::TextAlignment::CenterRight));
+    TRY(pid_vm_fields.try_empend("amount_dirty", "Dirty"_short_string, Gfx::TextAlignment::CenterRight));
+    TRY(pid_vm_fields.try_empend("Access"_short_string, Gfx::TextAlignment::CenterLeft, [](auto& object) {
         StringBuilder builder;
-        if (object.get("readable").to_bool())
+        if (object.get_bool("readable"sv).value_or(false))
             builder.append('R');
-        if (object.get("writable").to_bool())
+        if (object.get_bool("writable"sv).value_or(false))
             builder.append('W');
-        if (object.get("executable").to_bool())
+        if (object.get_bool("executable"sv).value_or(false))
             builder.append('X');
-        if (object.get("shared").to_bool())
+        if (object.get_bool("shared"sv).value_or(false))
             builder.append('S');
-        if (object.get("syscall").to_bool())
+        if (object.get_bool("syscall"sv).value_or(false))
             builder.append('C');
-        if (object.get("stack").to_bool())
+        if (object.get_bool("stack"sv).value_or(false))
             builder.append('T');
-        return builder.to_string();
-    });
-    pid_vm_fields.empend("VMObject type", Gfx::TextAlignment::CenterLeft, [](auto& object) {
-        auto type = object.get("vmobject").to_string();
-        if (type.ends_with("VMObject"))
+        return builder.to_deprecated_string();
+    }));
+    TRY(pid_vm_fields.try_empend(TRY("VMObject type"_string), Gfx::TextAlignment::CenterLeft, [](auto& object) {
+        auto type = object.get_deprecated_string("vmobject"sv).value_or({});
+        if (type.ends_with("VMObject"sv))
             type = type.substring(0, type.length() - 8);
         return type;
-    });
-    pid_vm_fields.empend("Purgeable", Gfx::TextAlignment::CenterLeft, [](auto& object) {
-        if (object.get("volatile").to_bool())
+    }));
+    TRY(pid_vm_fields.try_empend(TRY("Purgeable"_string), Gfx::TextAlignment::CenterLeft, [](auto& object) {
+        if (object.get_bool("volatile"sv).value_or(false))
             return "Volatile";
         return "Non-volatile";
-    });
-    pid_vm_fields.empend(
-        "Page map", Gfx::TextAlignment::CenterLeft,
+    }));
+    TRY(pid_vm_fields.try_empend(
+        TRY("Page map"_string), Gfx::TextAlignment::CenterLeft,
         [](auto&) {
             return GUI::Variant();
         },
         [](auto&) {
             return GUI::Variant(0);
         },
-        [](const JsonObject& object) {
-            auto pagemap = object.get("pagemap").as_string_or({});
+        [](JsonObject const& object) {
+            auto pagemap = object.get_deprecated_string("pagemap"sv).value_or({});
             return pagemap;
-        });
-    pid_vm_fields.empend("cow_pages", "# CoW", Gfx::TextAlignment::CenterRight);
-    pid_vm_fields.empend("name", "Name", Gfx::TextAlignment::CenterLeft);
-    m_json_model = GUI::JsonArrayModel::create({}, move(pid_vm_fields));
-    m_table_view->set_model(GUI::SortingProxyModel::create(*m_json_model));
+        }));
+    TRY(pid_vm_fields.try_empend("cow_pages", "# CoW"_short_string, Gfx::TextAlignment::CenterRight));
+    TRY(pid_vm_fields.try_empend("name", "Name"_short_string, Gfx::TextAlignment::CenterLeft));
+    widget->m_json_model = GUI::JsonArrayModel::create({}, move(pid_vm_fields));
+    widget->m_table_view->set_model(TRY(GUI::SortingProxyModel::create(*widget->m_json_model)));
 
-    m_table_view->set_column_painting_delegate(7, make<PagemapPaintingDelegate>());
+    widget->m_table_view->set_column_painting_delegate(7, TRY(try_make<PagemapPaintingDelegate>()));
 
-    m_table_view->set_key_column_and_sort_order(0, GUI::SortOrder::Ascending);
-    m_timer = add<Core::Timer>(1000, [this] { refresh(); });
-}
+    widget->m_table_view->set_key_column_and_sort_order(0, GUI::SortOrder::Ascending);
+    widget->m_timer = TRY(widget->try_add<Core::Timer>(1000, [widget] { widget->refresh(); }));
+    widget->m_timer->start();
 
-ProcessMemoryMapWidget::~ProcessMemoryMapWidget()
-{
+    return widget;
 }
 
 void ProcessMemoryMapWidget::set_pid(pid_t pid)
@@ -116,11 +121,13 @@ void ProcessMemoryMapWidget::set_pid(pid_t pid)
     if (m_pid == pid)
         return;
     m_pid = pid;
-    m_json_model->set_json_path(String::formatted("/proc/{}/vm", pid));
+    m_json_model->set_json_path(DeprecatedString::formatted("/proc/{}/vm", pid));
 }
 
 void ProcessMemoryMapWidget::refresh()
 {
     if (m_pid != -1)
-        m_json_model->invalidate();
+        m_json_model->update();
+}
+
 }

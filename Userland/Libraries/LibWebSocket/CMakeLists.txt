@@ -1,10 +1,9 @@
 set(SOURCES
     ConnectionInfo.cpp
-    Impl/AbstractWebSocketImpl.cpp
-    Impl/TCPWebSocketConnectionImpl.cpp
-    Impl/TLSv12WebSocketConnectionImpl.cpp
+    Impl/WebSocketImpl.cpp
+    Impl/WebSocketImplSerenity.cpp
     WebSocket.cpp
 )
 
 serenity_lib(LibWebSocket websocket)
-target_link_libraries(LibWebSocket LibCore LibCrypto LibTLS)
+target_link_libraries(LibWebSocket PRIVATE LibCore LibCrypto LibTLS)

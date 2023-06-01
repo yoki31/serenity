@@ -64,4 +64,35 @@ describe("errors", () => {
             "Invalid time string '2021-07-06T23:42:01Z': must not contain a UTC designator"
         );
     });
+
+    test("extended year must not be negative zero", () => {
+        expect(() => {
+            Temporal.PlainTime.from("-000000-01-01T00:00:00");
+        }).toThrowWithMessage(RangeError, "Invalid time string '-000000-01-01T00:00:00'");
+        expect(() => {
+            Temporal.PlainTime.from("−000000-01-01T00:00:00"); // U+2212
+        }).toThrowWithMessage(RangeError, "Invalid time string '−000000-01-01T00:00:00'");
+    });
+
+    test("ambiguous string must contain a time designator", () => {
+        const values = [
+            // YYYY-MM or HHMM-UU
+            "2021-12",
+            // MMDD or HHMM
+            "1214",
+            "0229",
+            "1130",
+            // MM-DD or HH-UU
+            "12-14",
+            // YYYYMM or HHMMSS
+            "202112",
+        ];
+        for (const value of values) {
+            expect(() => {
+                Temporal.PlainTime.from(value);
+            }).toThrowWithMessage(RangeError, `Invalid time string '${value}'`);
+            // Doesn't throw
+            Temporal.PlainTime.from(`T${value}`);
+        }
+    });
 });

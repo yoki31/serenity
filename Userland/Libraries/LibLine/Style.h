@@ -1,21 +1,21 @@
 /*
- * Copyright (c) 2020, the SerenityOS developers.
+ * Copyright (c) 2020-2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/DeprecatedString.h>
 #include <AK/Types.h>
+#include <AK/Utf8View.h>
 #include <AK/Vector.h>
-#include <stdlib.h>
 
 namespace Line {
 
 class Style {
 public:
-    bool operator==(const Style&) const = default;
+    bool operator==(Style const&) const = default;
 
     enum class XtermColor : int {
         Default = 9,
@@ -39,7 +39,7 @@ public:
     struct ItalicTag {
     };
     struct Color {
-        bool operator==(const Color&) const = default;
+        bool operator==(Color const&) const = default;
 
         explicit Color(XtermColor color)
             : m_xterm_color(color)
@@ -71,7 +71,7 @@ public:
             : Color(r, g, b)
         {
         }
-        String to_vt_escape() const;
+        DeprecatedString to_vt_escape() const;
     };
 
     struct Foreground : public Color {
@@ -84,11 +84,11 @@ public:
         {
         }
 
-        String to_vt_escape() const;
+        DeprecatedString to_vt_escape() const;
     };
 
     struct Hyperlink {
-        bool operator==(const Hyperlink&) const = default;
+        bool operator==(Hyperlink const&) const = default;
 
         explicit Hyperlink(StringView link)
             : m_link(link)
@@ -96,14 +96,36 @@ public:
             m_has_link = true;
         }
 
-        Hyperlink() { }
+        Hyperlink() = default;
 
-        String to_vt_escape(bool starting) const;
+        DeprecatedString to_vt_escape(bool starting) const;
 
         bool is_empty() const { return !m_has_link; }
 
-        String m_link;
+        DeprecatedString m_link;
         bool m_has_link { false };
+    };
+
+    struct Mask {
+        bool operator==(Mask const& other) const
+        {
+            return other.mode == mode && other.replacement == replacement;
+        }
+
+        enum class Mode {
+            ReplaceEntireSelection,
+            ReplaceEachCodePointInSelection,
+        };
+        explicit Mask(StringView replacement, Mode mode = Mode::ReplaceEntireSelection)
+            : replacement(replacement)
+            , replacement_view(this->replacement)
+            , mode(mode)
+        {
+        }
+
+        DeprecatedString replacement;
+        mutable Utf8View replacement_view;
+        Mode mode;
     };
 
     static constexpr UnderlineTag Underline {};
@@ -113,27 +135,27 @@ public:
 
     // Prepare for the horror of templates.
     template<typename T, typename... Rest>
-    Style(const T& style_arg, Rest... rest)
+    Style(T const& style_arg, Rest... rest)
         : Style(rest...)
     {
         set(style_arg);
         m_is_empty = false;
     }
-    Style() { }
+    Style() = default;
 
     static Style reset_style()
     {
-        return { Foreground(XtermColor::Default), Background(XtermColor::Default), Hyperlink("") };
+        return { Foreground(XtermColor::Default), Background(XtermColor::Default), Hyperlink(""sv) };
     }
 
-    Style unified_with(const Style& other, bool prefer_other = true) const
+    Style unified_with(Style const& other, bool prefer_other = true) const
     {
         Style style = *this;
         style.unify_with(other, prefer_other);
         return style;
     }
 
-    void unify_with(const Style&, bool prefer_other = false);
+    void unify_with(Style const&, bool prefer_other = false);
 
     bool underline() const { return m_underline; }
     bool bold() const { return m_bold; }
@@ -141,19 +163,23 @@ public:
     Background background() const { return m_background; }
     Foreground foreground() const { return m_foreground; }
     Hyperlink hyperlink() const { return m_hyperlink; }
+    Optional<Mask> mask() const { return m_mask; }
 
-    void set(const ItalicTag&) { m_italic = true; }
-    void set(const BoldTag&) { m_bold = true; }
-    void set(const UnderlineTag&) { m_underline = true; }
-    void set(const Background& bg) { m_background = bg; }
-    void set(const Foreground& fg) { m_foreground = fg; }
-    void set(const Hyperlink& link) { m_hyperlink = link; }
-    void set(const AnchoredTag&) { m_is_anchored = true; }
+    void unset_mask() const { m_mask = {}; }
+
+    void set(ItalicTag const&) { m_italic = true; }
+    void set(BoldTag const&) { m_bold = true; }
+    void set(UnderlineTag const&) { m_underline = true; }
+    void set(Background const& bg) { m_background = bg; }
+    void set(Foreground const& fg) { m_foreground = fg; }
+    void set(Hyperlink const& link) { m_hyperlink = link; }
+    void set(AnchoredTag const&) { m_is_anchored = true; }
+    void set(Mask const& mask) { m_mask = mask; }
 
     bool is_anchored() const { return m_is_anchored; }
     bool is_empty() const { return m_is_empty; }
 
-    String to_string() const;
+    DeprecatedString to_deprecated_string() const;
 
 private:
     bool m_underline { false };
@@ -162,6 +188,7 @@ private:
     Background m_background { XtermColor::Unchanged };
     Foreground m_foreground { XtermColor::Unchanged };
     Hyperlink m_hyperlink;
+    mutable Optional<Mask> m_mask;
 
     bool m_is_anchored { false };
 

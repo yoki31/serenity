@@ -1,6 +1,6 @@
 #!/usr/bin/env -S bash ../.port_include.sh
 port=gawk
-version=5.1.0
+version=5.2.1
 useconfigure="true"
 files="https://ftpmirror.gnu.org/gnu/gawk/gawk-${version}.tar.gz gawk-${version}.tar.gz
 https://ftpmirror.gnu.org/gnu/gawk/gawk-${version}.tar.gz.sig gawk-${version}.tar.gz.sig

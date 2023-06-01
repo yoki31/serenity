@@ -127,12 +127,12 @@ NonnullRefPtr<SQL::HashIndex> setup_hash_index(SQL::Serializer& serializer)
     tuple_descriptor->append({ "schema", "table", "key_value", SQL::SQLType::Integer, SQL::Order::Ascending });
     tuple_descriptor->append({ "schema", "table", "text_value", SQL::SQLType::Text, SQL::Order::Ascending });
 
-    auto directory_pointer = serializer.heap().user_value(0);
-    if (!directory_pointer) {
-        directory_pointer = serializer.heap().new_record_pointer();
-        serializer.heap().set_user_value(0, directory_pointer);
+    auto directory_block_index = serializer.heap().user_value(0);
+    if (!directory_block_index) {
+        directory_block_index = serializer.heap().request_new_block_index();
+        serializer.heap().set_user_value(0, directory_block_index);
     }
-    auto hash_index = SQL::HashIndex::construct(serializer, tuple_descriptor, directory_pointer);
+    auto hash_index = SQL::HashIndex::construct(serializer, tuple_descriptor, directory_block_index);
     return hash_index;
 }
 
@@ -141,14 +141,15 @@ void insert_and_get_to_and_from_hash_index(int num_keys)
     ScopeGuard guard([]() { unlink("/tmp/test.db"); });
     {
         auto heap = SQL::Heap::construct("/tmp/test.db");
+        TRY_OR_FAIL(heap->open());
         SQL::Serializer serializer(heap);
         auto hash_index = setup_hash_index(serializer);
 
         for (auto ix = 0; ix < num_keys; ix++) {
             SQL::Key k(hash_index->descriptor());
             k[0] = keys[ix];
-            k[1] = String::formatted("The key value is {} and the pointer is {}", keys[ix], pointers[ix]);
-            k.set_pointer(pointers[ix]);
+            k[1] = DeprecatedString::formatted("The key value is {} and the pointer is {}", keys[ix], pointers[ix]);
+            k.set_block_index(pointers[ix]);
             hash_index->insert(k);
         }
 #ifdef LIST_HASH_INDEX
@@ -158,13 +159,14 @@ void insert_and_get_to_and_from_hash_index(int num_keys)
 
     {
         auto heap = SQL::Heap::construct("/tmp/test.db");
+        TRY_OR_FAIL(heap->open());
         SQL::Serializer serializer(heap);
         auto hash_index = setup_hash_index(serializer);
 
         for (auto ix = 0; ix < num_keys; ix++) {
             SQL::Key k(hash_index->descriptor());
             k[0] = keys[ix];
-            k[1] = String::formatted("The key value is {} and the pointer is {}", keys[ix], pointers[ix]);
+            k[1] = DeprecatedString::formatted("The key value is {} and the pointer is {}", keys[ix], pointers[ix]);
             auto pointer_opt = hash_index->get(k);
             VERIFY(pointer_opt.has_value());
             EXPECT_EQ(pointer_opt.value(), pointers[ix]);
@@ -237,14 +239,15 @@ void insert_into_and_scan_hash_index(int num_keys)
     ScopeGuard guard([]() { unlink("/tmp/test.db"); });
     {
         auto heap = SQL::Heap::construct("/tmp/test.db");
+        TRY_OR_FAIL(heap->open());
         SQL::Serializer serializer(heap);
         auto hash_index = setup_hash_index(serializer);
 
         for (auto ix = 0; ix < num_keys; ix++) {
             SQL::Key k(hash_index->descriptor());
             k[0] = keys[ix];
-            k[1] = String::formatted("The key value is {} and the pointer is {}", keys[ix], pointers[ix]);
-            k.set_pointer(pointers[ix]);
+            k[1] = DeprecatedString::formatted("The key value is {} and the pointer is {}", keys[ix], pointers[ix]);
+            k.set_block_index(pointers[ix]);
             hash_index->insert(k);
         }
 #ifdef LIST_HASH_INDEX
@@ -254,6 +257,7 @@ void insert_into_and_scan_hash_index(int num_keys)
 
     {
         auto heap = SQL::Heap::construct("/tmp/test.db");
+        TRY_OR_FAIL(heap->open());
         SQL::Serializer serializer(heap);
         auto hash_index = setup_hash_index(serializer);
         Vector<bool> found;
@@ -264,12 +268,14 @@ void insert_into_and_scan_hash_index(int num_keys)
         int count = 0;
         for (auto iter = hash_index->begin(); !iter.is_end(); iter++, count++) {
             auto key = (*iter);
-            auto key_value = (int)key[0];
+            auto key_value = key[0].to_int<i32>();
+            VERIFY(key_value.has_value());
+
             for (auto ix = 0; ix < num_keys; ix++) {
                 if (keys[ix] == key_value) {
-                    EXPECT_EQ(key.pointer(), pointers[ix]);
+                    EXPECT_EQ(key.block_index(), pointers[ix]);
                     if (found[ix])
-                        FAIL(String::formatted("Key {}, index {} already found previously", key_value, ix));
+                        FAIL(DeprecatedString::formatted("Key {}, index {} already found previously", *key_value, ix));
                     found[ix] = true;
                     break;
                 }
@@ -282,7 +288,7 @@ void insert_into_and_scan_hash_index(int num_keys)
         EXPECT_EQ(count, num_keys);
         for (auto ix = 0; ix < num_keys; ix++) {
             if (!found[ix])
-                FAIL(String::formatted("Key {}, index {} not found", keys[ix], ix));
+                FAIL(DeprecatedString::formatted("Key {}, index {} not found", keys[ix], ix));
         }
     }
 }

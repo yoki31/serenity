@@ -1,158 +1,140 @@
 /*
- * Copyright (c) 2021, Jelle Raaijmakers <jelle@gmta.nl>
+ * Copyright (c) 2021-2022, Jelle Raaijmakers <jelle@gmta.nl>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Format.h>
+#include <Kernel/Arch/Delay.h>
 #include <Kernel/Devices/Audio/AC97.h>
 #include <Kernel/Devices/DeviceManagement.h>
+#include <Kernel/IOWindow.h>
+#include <Kernel/InterruptDisabler.h>
 #include <Kernel/Memory/AnonymousVMObject.h>
-#include <LibC/sys/ioctl_numbers.h>
 
 namespace Kernel {
 
 static constexpr int buffer_descriptor_list_max_entries = 32;
 
+static constexpr u16 pcm_default_sample_rate = 44100;
+static constexpr u16 pcm_fixed_sample_rate = 48000;
+
 // Valid output range - with double-rate enabled, sample rate can go up to 96kHZ
 static constexpr u16 pcm_sample_rate_minimum = 8000;
 static constexpr u16 pcm_sample_rate_maximum = 48000;
 
-static ErrorOr<OwnPtr<Memory::Region>> allocate_physical_buffer(size_t size, StringView name)
+UNMAP_AFTER_INIT ErrorOr<NonnullRefPtr<AudioController>> AC97::create(PCI::DeviceIdentifier const& pci_device_identifier)
 {
-    auto vmobject = TRY(Memory::AnonymousVMObject::try_create_physically_contiguous_with_size(Memory::page_round_up(size)));
-    return TRY(MM.allocate_kernel_region_with_vmobject(move(vmobject), vmobject->size(), name, Memory::Region::Access::Write));
+    auto mixer_io_window = TRY(IOWindow::create_for_pci_device_bar(pci_device_identifier, PCI::HeaderType0BaseRegister::BAR0));
+    auto bus_io_window = TRY(IOWindow::create_for_pci_device_bar(pci_device_identifier, PCI::HeaderType0BaseRegister::BAR1));
+
+    auto pcm_out_channel_io_window = TRY(bus_io_window->create_from_io_window_with_offset(NativeAudioBusChannel::PCMOutChannel));
+    auto pcm_out_channel = TRY(AC97Channel::create_with_parent_pci_device(pci_device_identifier.address(), "PCMOut"sv, move(pcm_out_channel_io_window)));
+
+    return TRY(adopt_nonnull_ref_or_enomem(new (nothrow) AC97(pci_device_identifier, move(pcm_out_channel), move(mixer_io_window), move(bus_io_window))));
 }
 
-UNMAP_AFTER_INIT void AC97::detect()
+UNMAP_AFTER_INIT ErrorOr<bool> AC97::probe(PCI::DeviceIdentifier const& device_identifier)
 {
-    PCI::enumerate([&](PCI::DeviceIdentifier const& device_identifier) {
-        // Only consider PCI audio controllers
-        if (device_identifier.class_code().value() != to_underlying(PCI::ClassID::Multimedia)
-            || device_identifier.subclass_code().value() != to_underlying(PCI::Multimedia::SubclassID::AudioController))
-            return;
-
-        dbgln("AC97: found audio controller at {}", device_identifier.address());
-        auto device_or_error = DeviceManagement::try_create_device<AC97>(device_identifier);
-        if (device_or_error.is_error()) {
-            dbgln("AC97: failed to initialize device {}", device_identifier.address());
-            return;
-        }
-        DeviceManagement::the().attach_audio_device(device_or_error.release_value());
-    });
+    VERIFY(device_identifier.class_code().value() == to_underlying(PCI::ClassID::Multimedia));
+    return device_identifier.subclass_code().value() == to_underlying(PCI::Multimedia::SubclassID::AudioController);
 }
 
-UNMAP_AFTER_INIT AC97::AC97(PCI::DeviceIdentifier pci_device_identifier)
-    : PCI::Device(pci_device_identifier.address())
+UNMAP_AFTER_INIT AC97::AC97(PCI::DeviceIdentifier const& pci_device_identifier, NonnullOwnPtr<AC97Channel> pcm_out_channel, NonnullOwnPtr<IOWindow> mixer_io_window, NonnullOwnPtr<IOWindow> bus_io_window)
+    : PCI::Device(const_cast<PCI::DeviceIdentifier&>(pci_device_identifier))
     , IRQHandler(pci_device_identifier.interrupt_line().value())
-    , CharacterDevice(42, 42)
-    , m_io_mixer_base(PCI::get_BAR0(pci_address()) & ~1)
-    , m_io_bus_base(PCI::get_BAR1(pci_address()) & ~1)
-    , m_pcm_out_channel(channel("PCMOut"sv, NativeAudioBusChannel::PCMOutChannel))
+    , m_mixer_io_window(move(mixer_io_window))
+    , m_bus_io_window(move(bus_io_window))
+    , m_pcm_out_channel(move(pcm_out_channel))
 {
-    initialize();
 }
 
-UNMAP_AFTER_INIT AC97::~AC97()
-{
-}
+UNMAP_AFTER_INIT AC97::~AC97() = default;
 
 bool AC97::handle_irq(RegisterState const&)
 {
-    auto pcm_out_status_register = m_pcm_out_channel.reg(AC97Channel::Register::Status);
-    auto pcm_out_status = pcm_out_status_register.in<u16>();
+    auto pcm_out_status = m_pcm_out_channel->io_window().read16(AC97Channel::Register::Status);
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: interrupt received - status: {:#05b}", device_identifier().address(), pcm_out_status);
 
     bool is_dma_halted = (pcm_out_status & AudioStatusRegisterFlag::DMAControllerHalted) > 0;
+    bool current_equals_last_valid = (pcm_out_status & AudioStatusRegisterFlag::CurrentEqualsLastValid) > 0;
     bool is_completion_interrupt = (pcm_out_status & AudioStatusRegisterFlag::BufferCompletionInterruptStatus) > 0;
     bool is_fifo_error = (pcm_out_status & AudioStatusRegisterFlag::FIFOError) > 0;
-
-    VERIFY(is_completion_interrupt);
     VERIFY(!is_fifo_error);
+
+    // If there is no buffer completion, we're not going to do anything
+    if (!is_completion_interrupt)
+        return false;
 
     // On interrupt, we need to reset PCM interrupt flags by setting their bits
     pcm_out_status = AudioStatusRegisterFlag::LastValidBufferCompletionInterrupt
         | AudioStatusRegisterFlag::BufferCompletionInterruptStatus
         | AudioStatusRegisterFlag::FIFOError;
-    pcm_out_status_register.out(pcm_out_status);
+    m_pcm_out_channel->io_window().write16(AC97Channel::Register::Status, pcm_out_status);
 
-    // Stop the DMA engine if we're through with the buffer and no one is waiting
-    if (is_dma_halted && m_irq_queue.is_empty()) {
-        reset_pcm_out();
-    } else {
-        m_irq_queue.wake_all();
+    if (is_dma_halted) {
+        VERIFY(current_equals_last_valid);
+        m_pcm_out_channel->handle_dma_stopped();
     }
+
+    if (!m_irq_queue.is_empty())
+        m_irq_queue.wake_all();
 
     return true;
 }
 
-UNMAP_AFTER_INIT void AC97::initialize()
+UNMAP_AFTER_INIT ErrorOr<void> AC97::initialize(Badge<AudioManagement>)
 {
-    dbgln("AC97 @ {}: mixer base: {:#04x}", pci_address(), m_io_mixer_base.get());
-    dbgln("AC97 @ {}: bus base: {:#04x}", pci_address(), m_io_bus_base.get());
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: mixer base: {:#04x}", device_identifier().address(), m_mixer_io_window);
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: bus base: {:#04x}", device_identifier().address(), m_bus_io_window);
 
-    enable_pin_based_interrupts();
-    PCI::enable_bus_mastering(pci_address());
+    m_audio_channel = TRY(AudioChannel::create(*this, 0));
+
+    // Read out AC'97 codec revision and vendor
+    auto extended_audio_id = m_mixer_io_window->read16(NativeAudioMixerRegister::ExtendedAudioID);
+    m_codec_revision = static_cast<AC97Revision>(((extended_audio_id & ExtendedAudioMask::Revision) >> 10) & 0b11);
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: codec revision {:#02b}", device_identifier().address(), to_underlying(m_codec_revision));
+    if (m_codec_revision == AC97Revision::Reserved)
+        return ENOTSUP;
+
+    // Report vendor / device ID
+    u32 vendor_id = m_mixer_io_window->read16(NativeAudioMixerRegister::VendorID1) << 16 | m_mixer_io_window->read16(NativeAudioMixerRegister::VendorID2);
+    dmesgln_pci(*this, "Vendor ID: {:#8x}", vendor_id);
 
     // Bus cold reset, enable interrupts
-    auto control = m_io_bus_base.offset(NativeAudioBusRegister::GlobalControl).in<u32>();
+    enable_pin_based_interrupts();
+    PCI::enable_bus_mastering(device_identifier());
+    auto control = m_bus_io_window->read32(NativeAudioBusRegister::GlobalControl);
     control |= GlobalControlFlag::GPIInterruptEnable;
     control |= GlobalControlFlag::AC97ColdReset;
-    m_io_bus_base.offset(NativeAudioBusRegister::GlobalControl).out(control);
+    m_bus_io_window->write32(NativeAudioBusRegister::GlobalControl, control);
 
     // Reset mixer
-    m_io_mixer_base.offset(NativeAudioMixerRegister::Reset).out<u16>(1);
+    m_mixer_io_window->write16(NativeAudioMixerRegister::Reset, 1);
 
-    // Verify extended capabilities
-    auto extended_audio_id = m_io_mixer_base.offset(NativeAudioMixerRegister::ExtendedAudioID).in<u16>();
-    VERIFY((extended_audio_id & ExtendedAudioMask::VariableRatePCMAudio) > 0);
-    VERIFY((extended_audio_id & ExtendedAudioMask::Revision) >> 10 == AC97Revision::Revision23);
-
-    // Enable double rate PCM audio if supported
-    if ((extended_audio_id & ExtendedAudioMask::DoubleRatePCMAudio) > 0) {
-        auto extended_audio_status_control_register = m_io_mixer_base.offset(NativeAudioMixerRegister::ExtendedAudioStatusControl);
-        auto extended_audio_status = extended_audio_status_control_register.in<u16>();
+    // Enable variable and double rate PCM audio if supported
+    auto extended_audio_status = m_mixer_io_window->read16(NativeAudioMixerRegister::ExtendedAudioStatusControl);
+    if ((extended_audio_id & ExtendedAudioMask::VariableRatePCMAudio) > 0) {
+        extended_audio_status |= ExtendedAudioStatusControlFlag::VariableRateAudio;
+        m_variable_rate_pcm_supported = true;
+    }
+    if (!m_variable_rate_pcm_supported) {
+        extended_audio_status &= ~ExtendedAudioStatusControlFlag::DoubleRateAudio;
+    } else if ((extended_audio_id & ExtendedAudioMask::DoubleRatePCMAudio) > 0) {
         extended_audio_status |= ExtendedAudioStatusControlFlag::DoubleRateAudio;
-        extended_audio_status_control_register.out(extended_audio_status);
         m_double_rate_pcm_enabled = true;
     }
+    m_mixer_io_window->write16(NativeAudioMixerRegister::ExtendedAudioStatusControl, extended_audio_status);
 
-    MUST(set_pcm_output_sample_rate(m_sample_rate));
+    TRY(set_pcm_output_sample_rate(m_variable_rate_pcm_supported ? pcm_default_sample_rate : pcm_fixed_sample_rate));
 
     // Left and right volume of 0 means attenuation of 0 dB
     set_master_output_volume(0, 0, Muted::No);
     set_pcm_output_volume(0, 0, Muted::No);
 
-    reset_pcm_out();
+    m_pcm_out_channel->reset();
     enable_irq();
-}
-
-ErrorOr<void> AC97::ioctl(OpenFileDescription&, unsigned request, Userspace<void*> arg)
-{
-    switch (request) {
-    case SOUNDCARD_IOCTL_GET_SAMPLE_RATE: {
-        auto output = static_ptr_cast<u32*>(arg);
-        return copy_to_user(output, &m_sample_rate);
-    }
-    case SOUNDCARD_IOCTL_SET_SAMPLE_RATE: {
-        auto sample_rate = static_cast<u32>(arg.ptr());
-        if (sample_rate == m_sample_rate)
-            return {};
-        TRY(set_pcm_output_sample_rate(sample_rate));
-        return {};
-    }
-    default:
-        return EINVAL;
-    }
-}
-
-ErrorOr<size_t> AC97::read(OpenFileDescription&, u64, UserOrKernelBuffer&, size_t)
-{
-    return 0;
-}
-
-void AC97::reset_pcm_out()
-{
-    m_pcm_out_channel.reset();
-    m_buffer_descriptor_list_index = 0;
+    return {};
 }
 
 void AC97::set_master_output_volume(u8 left_channel, u8 right_channel, Muted mute)
@@ -160,21 +142,29 @@ void AC97::set_master_output_volume(u8 left_channel, u8 right_channel, Muted mut
     u16 volume_value = ((right_channel & 63) << 0)
         | ((left_channel & 63) << 8)
         | ((mute == Muted::Yes ? 1 : 0) << 15);
-    m_io_mixer_base.offset(NativeAudioMixerRegister::SetMasterOutputVolume).out(volume_value);
+    m_mixer_io_window->write16(NativeAudioMixerRegister::SetMasterOutputVolume, volume_value);
 }
 
 ErrorOr<void> AC97::set_pcm_output_sample_rate(u32 sample_rate)
 {
+    if (m_sample_rate == sample_rate)
+        return {};
+
     auto const double_rate_shift = m_double_rate_pcm_enabled ? 1 : 0;
     auto shifted_sample_rate = sample_rate >> double_rate_shift;
+    if (!m_variable_rate_pcm_supported && shifted_sample_rate != pcm_fixed_sample_rate)
+        return ENOTSUP;
     if (shifted_sample_rate < pcm_sample_rate_minimum || shifted_sample_rate > pcm_sample_rate_maximum)
         return ENOTSUP;
 
-    auto pcm_front_dac_rate_register = m_io_mixer_base.offset(NativeAudioMixerRegister::PCMFrontDACRate);
-    pcm_front_dac_rate_register.out<u16>(shifted_sample_rate);
-    m_sample_rate = static_cast<u32>(pcm_front_dac_rate_register.in<u16>()) << double_rate_shift;
+    m_mixer_io_window->write16(NativeAudioMixerRegister::PCMFrontDACRate, shifted_sample_rate);
+    m_sample_rate = static_cast<u32>(m_mixer_io_window->read16(NativeAudioMixerRegister::PCMFrontDACRate)) << double_rate_shift;
 
-    dbgln("AC97 @ {}: PCM front DAC rate set to {} Hz", pci_address(), m_sample_rate);
+    dmesgln_pci(*this, "PCM front DAC rate set to {} Hz", m_sample_rate);
+
+    // Setting the sample rate stops a running DMA engine, so restart it
+    if (m_pcm_out_channel->dma_running())
+        m_pcm_out_channel->start_dma();
 
     return {};
 }
@@ -184,25 +174,51 @@ void AC97::set_pcm_output_volume(u8 left_channel, u8 right_channel, Muted mute)
     u16 volume_value = ((right_channel & 31) << 0)
         | ((left_channel & 31) << 8)
         | ((mute == Muted::Yes ? 1 : 0) << 15);
-    m_io_mixer_base.offset(NativeAudioMixerRegister::SetPCMOutputVolume).out(volume_value);
+    m_mixer_io_window->write16(NativeAudioMixerRegister::SetPCMOutputVolume, volume_value);
 }
 
-ErrorOr<size_t> AC97::write(OpenFileDescription&, u64, UserOrKernelBuffer const& data, size_t length)
+RefPtr<AudioChannel> AC97::audio_channel(u32 index) const
 {
-    if (!m_output_buffer) {
-        m_output_buffer = TRY(allocate_physical_buffer(m_output_buffer_page_count * PAGE_SIZE, "AC97 Output buffer"sv));
-    }
+    if (index == 0)
+        return m_audio_channel;
+    return {};
+}
+
+ErrorOr<void> AC97::set_pcm_output_sample_rate(size_t channel_index, u32 samples_per_second_rate)
+{
+    if (channel_index != 0)
+        return ENODEV;
+    TRY(set_pcm_output_sample_rate(samples_per_second_rate));
+    return {};
+}
+
+ErrorOr<u32> AC97::get_pcm_output_sample_rate(size_t channel_index)
+{
+    if (channel_index != 0)
+        return Error::from_errno(ENODEV);
+    return m_sample_rate;
+}
+
+ErrorOr<size_t> AC97::write(size_t channel_index, UserOrKernelBuffer const& data, size_t length)
+{
+    if (channel_index != 0)
+        return Error::from_errno(ENODEV);
+
+    if (!m_output_buffer)
+        m_output_buffer = TRY(MM.allocate_dma_buffer_pages(m_output_buffer_page_count * PAGE_SIZE, "AC97 Output buffer"sv, Memory::Region::Access::Write));
+
     if (!m_buffer_descriptor_list) {
-        constexpr size_t buffer_descriptor_list_size = buffer_descriptor_list_max_entries * sizeof(BufferDescriptorListEntry);
-        m_buffer_descriptor_list = TRY(allocate_physical_buffer(buffer_descriptor_list_size, "AC97 Buffer Descriptor List"sv));
+        size_t buffer_descriptor_list_size = buffer_descriptor_list_max_entries * sizeof(BufferDescriptorListEntry);
+        buffer_descriptor_list_size = TRY(Memory::page_round_up(buffer_descriptor_list_size));
+        m_buffer_descriptor_list = TRY(MM.allocate_dma_buffer_pages(buffer_descriptor_list_size, "AC97 Buffer Descriptor List"sv, Memory::Region::Access::Write));
     }
 
-    auto remaining = length;
+    Checked<size_t> remaining = length;
     size_t offset = 0;
-    while (remaining > 0) {
-        TRY(write_single_buffer(data, offset, min(remaining, PAGE_SIZE)));
+    while (remaining > static_cast<size_t>(0)) {
+        TRY(write_single_buffer(data, offset, min(remaining.value(), PAGE_SIZE)));
         offset += PAGE_SIZE;
-        remaining -= PAGE_SIZE;
+        remaining.saturating_sub(PAGE_SIZE);
     }
 
     return length;
@@ -212,33 +228,36 @@ ErrorOr<void> AC97::write_single_buffer(UserOrKernelBuffer const& data, size_t o
 {
     VERIFY(length <= PAGE_SIZE);
 
-    // Block until we can write into an unused buffer
-    cli();
-    do {
-        auto pcm_out_status = m_pcm_out_channel.reg(AC97Channel::Register::Status).in<u16>();
-        auto is_dma_controller_halted = (pcm_out_status & AudioStatusRegisterFlag::DMAControllerHalted) > 0;
-        auto current_index = m_pcm_out_channel.reg(AC97Channel::Register::CurrentIndexValue).in<u8>();
-        auto last_valid_index = m_pcm_out_channel.reg(AC97Channel::Register::LastValidIndex).in<u8>();
+    {
+        // Block until we can write into an unused buffer
+        InterruptDisabler disabler;
+        do {
+            auto pcm_out_status = m_pcm_out_channel->io_window().read16(AC97Channel::Register::Status);
+            auto current_index = m_pcm_out_channel->io_window().read8(AC97Channel::Register::CurrentIndexValue);
+            int last_valid_index = m_pcm_out_channel->io_window().read8(AC97Channel::Register::LastValidIndex);
 
-        auto head_distance = static_cast<int>(last_valid_index) - current_index;
-        if (head_distance < 0)
-            head_distance += buffer_descriptor_list_max_entries;
-        if (!is_dma_controller_halted)
-            ++head_distance;
+            auto head_distance = last_valid_index - current_index;
+            if (head_distance < 0)
+                head_distance += buffer_descriptor_list_max_entries;
+            if (m_pcm_out_channel->dma_running())
+                ++head_distance;
 
-        if (head_distance < m_output_buffer_page_count)
-            break;
+            // Current index has _passed_ last valid index - move our list index up
+            if (head_distance > m_output_buffer_page_count) {
+                m_buffer_descriptor_list_index = current_index + 1;
+                break;
+            }
 
-        m_irq_queue.wait_forever("AC97"sv);
-    } while (m_pcm_out_channel.dma_running());
-    sti();
+            // There is room for our data
+            if (head_distance < m_output_buffer_page_count)
+                break;
 
+            dbgln_if(AC97_DEBUG, "AC97 @ {}: waiting on interrupt - status: {:#05b} CI: {} LVI: {}", device_identifier().address(), pcm_out_status, current_index, last_valid_index);
+            m_irq_queue.wait_forever("AC97"sv);
+        } while (m_pcm_out_channel->dma_running());
+    }
     // Copy data from userspace into one of our buffers
     TRY(data.read(m_output_buffer->vaddr_from_page_index(m_output_buffer_page_index).as_ptr(), offset, length));
-
-    if (!m_pcm_out_channel.dma_running()) {
-        reset_pcm_out();
-    }
 
     // Write the next entry to the buffer descriptor list
     u16 number_of_samples = length / sizeof(u16);
@@ -248,11 +267,10 @@ ErrorOr<void> AC97::write_single_buffer(UserOrKernelBuffer const& data, size_t o
     list_entry->control_and_length = number_of_samples | BufferDescriptorListEntryFlags::InterruptOnCompletion;
 
     auto buffer_address = static_cast<u32>(m_buffer_descriptor_list->physical_page(0)->paddr().get());
-    m_pcm_out_channel.set_last_valid_index(buffer_address, m_buffer_descriptor_list_index);
+    m_pcm_out_channel->set_last_valid_index(buffer_address, m_buffer_descriptor_list_index);
 
-    if (!m_pcm_out_channel.dma_running()) {
-        m_pcm_out_channel.start_dma();
-    }
+    if (!m_pcm_out_channel->dma_running())
+        m_pcm_out_channel->start_dma();
 
     m_output_buffer_page_index = (m_output_buffer_page_index + 1) % m_output_buffer_page_count;
     m_buffer_descriptor_list_index = (m_buffer_descriptor_list_index + 1) % buffer_descriptor_list_max_entries;
@@ -260,37 +278,57 @@ ErrorOr<void> AC97::write_single_buffer(UserOrKernelBuffer const& data, size_t o
     return {};
 }
 
+ErrorOr<NonnullOwnPtr<AC97::AC97Channel>> AC97::AC97Channel::create_with_parent_pci_device(PCI::Address pci_device_address, StringView name, NonnullOwnPtr<IOWindow> channel_io_base)
+{
+    return adopt_nonnull_own_or_enomem(new (nothrow) AC97::AC97Channel(pci_device_address, name, move(channel_io_base)));
+}
+
+void AC97::AC97Channel::handle_dma_stopped()
+{
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: channel {}: DMA engine has stopped", m_device_pci_address, name());
+    m_dma_running.with([this](auto& dma_running) {
+        // NOTE: QEMU might send spurious interrupts while we're not running, so we don't want to panic here.
+        if (!dma_running)
+            dbgln("AC97 @ {}: received DMA interrupt while it wasn't running", m_device_pci_address);
+        dma_running = false;
+    });
+}
+
 void AC97::AC97Channel::reset()
 {
-    dbgln("AC97 @ {}: channel {}: resetting", m_device.pci_address(), name());
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: channel {}: resetting", m_device_pci_address, name());
 
-    auto control_register = reg(Register::Control);
-    control_register.out(AudioControlRegisterFlag::ResetRegisters);
+    m_channel_io_window->write8(Register::Control, AudioControlRegisterFlag::ResetRegisters);
 
-    while ((control_register.in<u8>() & AudioControlRegisterFlag::ResetRegisters) > 0)
-        IO::delay(50);
+    while ((m_channel_io_window->read8(Register::Control) & AudioControlRegisterFlag::ResetRegisters) > 0)
+        microseconds_delay(50);
 
-    m_dma_running = false;
+    m_dma_running.with([](auto& dma_running) {
+        dma_running = false;
+    });
 }
 
 void AC97::AC97Channel::set_last_valid_index(u32 buffer_address, u8 last_valid_index)
 {
-    reg(Register::BufferDescriptorListBaseAddress).out(buffer_address);
-    reg(Register::LastValidIndex).out(last_valid_index);
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: channel {}: setting buffer address: {:#x} LVI: {}", m_device_pci_address, name(), buffer_address, last_valid_index);
+
+    m_channel_io_window->write32(Register::BufferDescriptorListBaseAddress, buffer_address);
+    m_channel_io_window->write8(Register::LastValidIndex, last_valid_index);
 }
 
 void AC97::AC97Channel::start_dma()
 {
-    dbgln("AC97 @ {}: channel {}: starting DMA engine", m_device.pci_address(), name());
+    dbgln_if(AC97_DEBUG, "AC97 @ {}: channel {}: starting DMA engine", m_device_pci_address, name());
 
-    auto control_register = reg(Register::Control);
-    auto control = control_register.in<u8>();
+    auto control = m_channel_io_window->read8(Register::Control);
     control |= AudioControlRegisterFlag::RunPauseBusMaster;
     control |= AudioControlRegisterFlag::FIFOErrorInterruptEnable;
     control |= AudioControlRegisterFlag::InterruptOnCompletionEnable;
-    control_register.out(control);
+    m_channel_io_window->write8(Register::Control, control);
 
-    m_dma_running = true;
+    m_dma_running.with([](auto& dma_running) {
+        dma_running = true;
+    });
 }
 
 }

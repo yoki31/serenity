@@ -13,21 +13,20 @@
 namespace Kernel {
 
 static char s_cmd_line[1024];
-static constexpr StringView s_embedded_cmd_line = "";
+static constexpr StringView s_embedded_cmd_line = ""sv;
 static CommandLine* s_the;
 
-UNMAP_AFTER_INIT void CommandLine::early_initialize(const char* cmd_line)
+UNMAP_AFTER_INIT void CommandLine::early_initialize(StringView cmd_line)
 {
-    if (!cmd_line)
-        return;
-    size_t length = strlen(cmd_line);
-    if (length >= sizeof(s_cmd_line))
-        length = sizeof(s_cmd_line) - 1;
-    memcpy(s_cmd_line, cmd_line, length);
-    s_cmd_line[length] = '\0';
+    (void)cmd_line.copy_characters_to_buffer(s_cmd_line, sizeof(s_cmd_line));
 }
 
-const CommandLine& kernel_command_line()
+bool CommandLine::was_initialized()
+{
+    return s_the != nullptr;
+}
+
+CommandLine const& kernel_command_line()
 {
     VERIFY(s_the);
     return *s_the;
@@ -36,53 +35,45 @@ const CommandLine& kernel_command_line()
 UNMAP_AFTER_INIT void CommandLine::initialize()
 {
     VERIFY(!s_the);
-    s_the = new CommandLine(s_cmd_line);
+    s_the = new CommandLine({ s_cmd_line, strlen(s_cmd_line) });
     dmesgln("Kernel Commandline: {}", kernel_command_line().string());
     // Validate the modes the user passed in.
     (void)s_the->panic_mode(Validate::Yes);
-    if (s_the->contains("boot_mode"sv)) {
-        // I know, we don't do legacy, but even though I eliminated 'boot_mode' from the codebase, there
-        // is a good chance that someone's still using it. Let's be nice and tell them where to look.
-        // TODO: Remove this in 2022.
-        PANIC("'boot_mode' is now split into panic=[halt|shutdown], fbdev=[on|off], and system_mode=[graphical|text|selftest].");
-    }
 }
 
-UNMAP_AFTER_INIT void CommandLine::build_commandline(const String& cmdline_from_bootloader)
+UNMAP_AFTER_INIT NonnullOwnPtr<KString> CommandLine::build_commandline(StringView cmdline_from_bootloader)
 {
     StringBuilder builder;
     builder.append(cmdline_from_bootloader);
     if constexpr (!s_embedded_cmd_line.is_empty()) {
-        builder.append(" ");
+        builder.append(' ');
         builder.append(s_embedded_cmd_line);
     }
-    m_string = builder.to_string();
+    return KString::must_create(builder.string_view());
 }
 
-UNMAP_AFTER_INIT void CommandLine::add_arguments(const Vector<StringView>& args)
+UNMAP_AFTER_INIT void CommandLine::add_arguments(Vector<StringView> const& args)
 {
     for (auto&& str : args) {
         if (str == ""sv) {
             continue;
         }
-
-        auto pair = str.split_view('=', false);
-        VERIFY(pair.size() == 2 || pair.size() == 1);
-
-        if (pair.size() == 1) {
-            m_params.set(move(pair[0]), ""sv);
-        } else {
-            m_params.set(move(pair[0]), move(pair[1]));
-        }
+        // Some boot loaders may include complex key-value pairs where the value is a composite entry,
+        // we handle this by only checking for the first equals sign in each command line parameter.
+        auto key = str.find_first_split_view('=');
+        if (key.length() == str.length())
+            m_params.set(key, ""sv);
+        else
+            m_params.set(key, str.substring_view(key.length() + 1));
     }
 }
 
-UNMAP_AFTER_INIT CommandLine::CommandLine(const String& cmdline_from_bootloader)
+UNMAP_AFTER_INIT CommandLine::CommandLine(StringView cmdline_from_bootloader)
+    : m_string(build_commandline(cmdline_from_bootloader))
 {
     s_the = this;
-    build_commandline(cmdline_from_bootloader);
-    const auto& args = m_string.split_view(' ');
-    m_params.ensure_capacity(args.size());
+    auto const& args = m_string->view().split_view(' ');
+    MUST(m_params.try_ensure_capacity(args.size()));
     add_arguments(args);
 }
 
@@ -108,7 +99,50 @@ UNMAP_AFTER_INIT bool CommandLine::is_ide_enabled() const
 
 UNMAP_AFTER_INIT bool CommandLine::is_smp_enabled() const
 {
+    // Note: We can't enable SMP mode without enabling the IOAPIC.
+    if (!is_ioapic_enabled())
+        return false;
     return lookup("smp"sv).value_or("off"sv) == "on"sv;
+}
+
+UNMAP_AFTER_INIT bool CommandLine::is_smp_enabled_without_ioapic_enabled() const
+{
+    auto smp_enabled = lookup("smp"sv).value_or("off"sv) == "on"sv;
+    return smp_enabled && !is_ioapic_enabled();
+}
+
+UNMAP_AFTER_INIT bool CommandLine::is_ioapic_enabled() const
+{
+    auto value = lookup("enable_ioapic"sv).value_or("on"sv);
+    if (value == "on"sv)
+        return true;
+    if (value == "off"sv)
+        return false;
+    PANIC("Unknown enable_ioapic setting: {}", value);
+}
+
+UNMAP_AFTER_INIT bool CommandLine::is_early_boot_console_disabled() const
+{
+    auto value = lookup("early_boot_console"sv).value_or("on"sv);
+    if (value == "on"sv)
+        return false;
+    if (value == "off"sv)
+        return true;
+    PANIC("Unknown early_boot_console setting: {}", value);
+}
+
+UNMAP_AFTER_INIT I8042PresenceMode CommandLine::i8042_presence_mode() const
+{
+    auto value = lookup("i8042_presence_mode"sv).value_or("auto"sv);
+    if (value == "auto"sv)
+        return I8042PresenceMode::Automatic;
+    if (value == "none"sv)
+        return I8042PresenceMode::None;
+    if (value == "force"sv)
+        return I8042PresenceMode::Force;
+    if (value == "aggressive-test"sv)
+        return I8042PresenceMode::AggressiveTest;
+    PANIC("Unknown i8042_presence_mode setting: {}", value);
 }
 
 UNMAP_AFTER_INIT bool CommandLine::is_vmmouse_enabled() const
@@ -118,17 +152,36 @@ UNMAP_AFTER_INIT bool CommandLine::is_vmmouse_enabled() const
 
 UNMAP_AFTER_INIT PCIAccessLevel CommandLine::pci_access_level() const
 {
-    auto value = lookup("pci_ecam"sv).value_or("on"sv);
-    if (value == "on"sv)
+    auto value = lookup("pci"sv).value_or("ecam"sv);
+    if (value == "ecam"sv)
         return PCIAccessLevel::MemoryAddressing;
-    if (value == "off"sv)
+#if ARCH(X86_64)
+    if (value == "io"sv)
         return PCIAccessLevel::IOAddressing;
+#endif
+    if (value == "none"sv)
+        return PCIAccessLevel::None;
     PANIC("Unknown PCI ECAM setting: {}", value);
+}
+
+UNMAP_AFTER_INIT bool CommandLine::is_pci_disabled() const
+{
+    return lookup("pci"sv).value_or("ecam"sv) == "none"sv;
 }
 
 UNMAP_AFTER_INIT bool CommandLine::is_legacy_time_enabled() const
 {
     return lookup("time"sv).value_or("modern"sv) == "legacy"sv;
+}
+
+bool CommandLine::is_pc_speaker_enabled() const
+{
+    auto value = lookup("pcspeaker"sv).value_or("off"sv);
+    if (value == "on"sv)
+        return true;
+    if (value == "off"sv)
+        return false;
+    PANIC("Unknown pcspeaker setting: {}", value);
 }
 
 UNMAP_AFTER_INIT bool CommandLine::is_force_pio() const
@@ -138,7 +191,12 @@ UNMAP_AFTER_INIT bool CommandLine::is_force_pio() const
 
 UNMAP_AFTER_INIT StringView CommandLine::root_device() const
 {
-    return lookup("root"sv).value_or("/dev/hda"sv);
+    return lookup("root"sv).value_or("lun0:0:0"sv);
+}
+
+bool CommandLine::is_nvme_polling_enabled() const
+{
+    return contains("nvme_poll"sv);
 }
 
 UNMAP_AFTER_INIT AcpiFeatureLevel CommandLine::acpi_feature_level() const
@@ -168,11 +226,6 @@ UNMAP_AFTER_INIT bool CommandLine::is_physical_networking_disabled() const
     return contains("disable_physical_networking"sv);
 }
 
-UNMAP_AFTER_INIT bool CommandLine::disable_ps2_controller() const
-{
-    return contains("disable_ps2_controller"sv);
-}
-
 UNMAP_AFTER_INIT bool CommandLine::disable_physical_storage() const
 {
     return contains("disable_physical_storage"sv);
@@ -195,10 +248,11 @@ UNMAP_AFTER_INIT bool CommandLine::disable_virtio() const
 
 UNMAP_AFTER_INIT AHCIResetMode CommandLine::ahci_reset_mode() const
 {
-    const auto ahci_reset_mode = lookup("ahci_reset_mode"sv).value_or("controllers"sv);
+    auto const ahci_reset_mode = lookup("ahci_reset_mode"sv).value_or("controllers"sv);
     if (ahci_reset_mode == "controllers"sv) {
         return AHCIResetMode::ControllerOnly;
-    } else if (ahci_reset_mode == "aggressive"sv) {
+    }
+    if (ahci_reset_mode == "aggressive"sv) {
         return AHCIResetMode::Aggressive;
     }
     PANIC("Unknown AHCIResetMode: {}", ahci_reset_mode);
@@ -211,10 +265,11 @@ StringView CommandLine::system_mode() const
 
 PanicMode CommandLine::panic_mode(Validate should_validate) const
 {
-    const auto panic_mode = lookup("panic"sv).value_or("halt"sv);
+    auto const panic_mode = lookup("panic"sv).value_or("halt"sv);
     if (panic_mode == "halt"sv) {
         return PanicMode::Halt;
-    } else if (panic_mode == "shutdown"sv) {
+    }
+    if (panic_mode == "shutdown"sv) {
         return PanicMode::Shutdown;
     }
 
@@ -224,9 +279,16 @@ PanicMode CommandLine::panic_mode(Validate should_validate) const
     return PanicMode::Halt;
 }
 
-UNMAP_AFTER_INIT bool CommandLine::are_framebuffer_devices_enabled() const
+UNMAP_AFTER_INIT CommandLine::GraphicsSubsystemMode CommandLine::graphics_subsystem_mode() const
 {
-    return lookup("fbdev"sv).value_or("on"sv) == "on"sv;
+    auto const graphics_subsystem_mode_value = lookup("graphics_subsystem_mode"sv).value_or("on"sv);
+    if (graphics_subsystem_mode_value == "on"sv)
+        return GraphicsSubsystemMode::Enabled;
+    if (graphics_subsystem_mode_value == "limited"sv)
+        return GraphicsSubsystemMode::Limited;
+    if (graphics_subsystem_mode_value == "off"sv)
+        return GraphicsSubsystemMode::Disabled;
+    PANIC("Invalid graphics_subsystem_mode value: {}", graphics_subsystem_mode_value);
 }
 
 StringView CommandLine::userspace_init() const
@@ -234,21 +296,21 @@ StringView CommandLine::userspace_init() const
     return lookup("init"sv).value_or("/bin/SystemServer"sv);
 }
 
-NonnullOwnPtrVector<KString> CommandLine::userspace_init_args() const
+Vector<NonnullOwnPtr<KString>> CommandLine::userspace_init_args() const
 {
-    NonnullOwnPtrVector<KString> args;
+    Vector<NonnullOwnPtr<KString>> args;
 
     auto init_args = lookup("init_args"sv).value_or(""sv).split_view(';');
     if (!init_args.is_empty())
-        args.prepend(KString::must_create(userspace_init()));
+        MUST(args.try_prepend(MUST(KString::try_create(userspace_init()))));
     for (auto& init_arg : init_args)
-        args.append(KString::must_create(init_arg));
+        args.append(MUST(KString::try_create(init_arg)));
     return args;
 }
 
 UNMAP_AFTER_INIT size_t CommandLine::switch_to_tty() const
 {
-    const auto default_tty = lookup("switch_to_tty"sv).value_or("1"sv);
+    auto const default_tty = lookup("switch_to_tty"sv).value_or("1"sv);
     auto switch_tty_number = default_tty.to_uint();
     if (switch_tty_number.has_value() && switch_tty_number.value() >= 1) {
         return switch_tty_number.value() - 1;

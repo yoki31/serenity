@@ -6,10 +6,13 @@
 
 #pragma once
 
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <LibCrypto/Cipher/Mode/Mode.h>
+
+#ifndef KERNEL
+#    include <AK/DeprecatedString.h>
+#endif
 
 namespace Crypto {
 namespace Cipher {
@@ -96,20 +99,25 @@ public:
     // FIXME: Add back the default intent parameter once clang-11 is the default in GitHub Actions.
     //        Once added back, remove the parameter where it's constructed in get_random_bytes in Kernel/Random.h.
     template<typename KeyType, typename... Args>
-    explicit constexpr CTR(const KeyType& user_key, size_t key_bits, Intent, Args... args)
+    explicit constexpr CTR(KeyType const& user_key, size_t key_bits, Intent, Args... args)
         : Mode<T>(user_key, key_bits, Intent::Encryption, args...)
     {
     }
 
-    virtual String class_name() const override
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
     {
         StringBuilder builder;
         builder.append(this->cipher().class_name());
-        builder.append("_CTR");
-        return builder.build();
+        builder.append("_CTR"sv);
+        return builder.to_deprecated_string();
     }
+#endif
 
-    virtual size_t IV_length() const override { return IVSizeInBits / 8; }
+    virtual size_t IV_length() const override
+    {
+        return IVSizeInBits / 8;
+    }
 
     virtual void encrypt(ReadonlyBytes in, Bytes& out, ReadonlyBytes ivec = {}, Bytes* ivec_out = nullptr) override
     {
@@ -118,7 +126,7 @@ public:
         this->encrypt_or_stream(&in, out, ivec, ivec_out);
     }
 
-    void key_stream(Bytes& out, const Bytes& ivec = {}, Bytes* ivec_out = nullptr)
+    void key_stream(Bytes& out, Bytes const& ivec = {}, Bytes* ivec_out = nullptr)
     {
         this->encrypt_or_stream(nullptr, out, ivec, ivec_out);
     }
@@ -136,7 +144,7 @@ private:
 protected:
     constexpr static IncrementFunctionType increment {};
 
-    void encrypt_or_stream(const ReadonlyBytes* in, Bytes& out, ReadonlyBytes ivec, Bytes* ivec_out = nullptr)
+    void encrypt_or_stream(ReadonlyBytes const* in, Bytes& out, ReadonlyBytes ivec, Bytes* ivec_out = nullptr)
     {
         size_t length;
         if (in) {

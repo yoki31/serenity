@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/DeprecatedString.h>
 
 struct KeyPosition {
     u32 scancode;
@@ -16,10 +16,15 @@ struct KeyPosition {
     int height;
     bool enabled;
     int map_index;
-    String name;
+    DeprecatedString name;
 };
 
 #define KEY_COUNT 63
+
+#if defined(AK_COMPILER_CLANG)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wc99-designator"
+#endif
 
 struct KeyPosition keys[KEY_COUNT] = {
     // clang-format off
@@ -93,3 +98,7 @@ struct KeyPosition keys[KEY_COUNT] = {
     [62] = {0xE01D, 689, 208,  74,  50, false,  0, "right ctrl"}
     // clang-format on
 };
+
+#if defined(AK_COMPILER_CLANG)
+#    pragma clang diagnostic pop
+#endif

@@ -1,7 +1,6 @@
 @GUI::Widget {
     name: "main"
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
         spacing: 2
     }
@@ -15,25 +14,41 @@
     }
 
     @GUI::HorizontalSplitter {
+        opportunistic_resizee: "First"
+
         @HexEditor::HexEditor {
             name: "editor"
         }
 
-        @GUI::Widget {
-            name: "search_results_container"
+        @GUI::VerticalSplitter {
+            name: "side_panel_container"
             visible: false
 
-            layout: @GUI::VerticalBoxLayout {
+            @GUI::Widget {
+                name: "search_results_container"
+                visible: false
+                layout: @GUI::VerticalBoxLayout {}
+
+                @GUI::TableView {
+                    name: "search_results"
+                }
             }
 
-            @GUI::TableView {
-                name: "search_results"
+            @GUI::Widget {
+                name: "value_inspector_container"
+                visible: false
+                layout: @GUI::VerticalBoxLayout {}
+
+                @GUI::TableView {
+                    name: "value_inspector"
+                    activates_on_selection: true
+                }
             }
         }
     }
 
     @GUI::Statusbar {
         name: "statusbar"
-        label_count: 5
+        segment_count: 5
     }
 }

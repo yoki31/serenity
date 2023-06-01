@@ -7,8 +7,8 @@
 #pragma once
 
 #include <AK/Array.h>
+#include <AK/BuiltinWrappers.h>
 #include <AK/Optional.h>
-#include <AK/Platform.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Types.h>
 
@@ -48,36 +48,36 @@ public:
             return 0;
 
         size_t count;
-        const u8* first = &m_data[start / 8];
-        const u8* last = &m_data[(start + len) / 8];
+        u8 const* first = &m_data[start / 8];
+        u8 const* last = &m_data[(start + len) / 8];
         u8 byte = *first;
         byte &= bitmask_first_byte[start % 8];
         if (first == last) {
             byte &= bitmask_last_byte[(start + len) % 8];
-            count = __builtin_popcount(byte);
+            count = popcount(byte);
         } else {
-            count = __builtin_popcount(byte);
+            count = popcount(byte);
             // Don't access *last if it's out of bounds
             if (last < &m_data[size_in_bytes()]) {
                 byte = *last;
                 byte &= bitmask_last_byte[(start + len) % 8];
-                count += __builtin_popcount(byte);
+                count += popcount(byte);
             }
             if (++first < last) {
-                const u32* ptr32 = (const u32*)(((FlatPtr)first + sizeof(u32) - 1) & ~(sizeof(u32) - 1));
-                if ((const u8*)ptr32 > last)
-                    ptr32 = (const u32*)last;
-                while (first < (const u8*)ptr32) {
-                    count += __builtin_popcount(*first);
+                size_t const* ptr_large = reinterpret_cast<size_t const*>((reinterpret_cast<FlatPtr>(first) + sizeof(size_t) - 1) & ~(sizeof(size_t) - 1));
+                if (reinterpret_cast<u8 const*>(ptr_large) > last)
+                    ptr_large = reinterpret_cast<size_t const*>(last);
+                while (first < reinterpret_cast<u8 const*>(ptr_large)) {
+                    count += popcount(*first);
                     first++;
                 }
-                const u32* last32 = (const u32*)((FlatPtr)last & ~(sizeof(u32) - 1));
-                while (ptr32 < last32) {
-                    count += __builtin_popcountl(*ptr32);
-                    ptr32++;
+                size_t const* last_large = reinterpret_cast<size_t const*>(reinterpret_cast<FlatPtr>(last) & ~(sizeof(size_t) - 1));
+                while (ptr_large < last_large) {
+                    count += popcount(*ptr_large);
+                    ptr_large++;
                 }
-                for (first = (const u8*)ptr32; first < last; first++)
-                    count += __builtin_popcount(*first);
+                for (first = reinterpret_cast<u8 const*>(ptr_large); first < last; first++)
+                    count += popcount(*first);
             }
         }
 
@@ -88,46 +88,46 @@ public:
 
     [[nodiscard]] bool is_null() const { return m_data == nullptr; }
 
-    [[nodiscard]] const u8* data() const { return m_data; }
+    [[nodiscard]] u8 const* data() const { return m_data; }
 
     template<bool VALUE>
     Optional<size_t> find_one_anywhere(size_t hint = 0) const
     {
         VERIFY(hint < m_size);
-        const u8* end = &m_data[m_size / 8];
+        u8 const* end = &m_data[m_size / 8];
 
         for (;;) {
             // We will use hint as what it is: a hint. Because we try to
             // scan over entire 32 bit words, we may start searching before
             // the hint!
-            const u32* ptr32 = (const u32*)((FlatPtr)&m_data[hint / 8] & ~(sizeof(u32) - 1));
-            if ((const u8*)ptr32 < &m_data[0]) {
-                ptr32++;
+            size_t const* ptr_large = reinterpret_cast<size_t const*>(reinterpret_cast<FlatPtr>(&m_data[hint / 8]) & ~(sizeof(size_t) - 1));
+            if (reinterpret_cast<u8 const*>(ptr_large) < &m_data[0]) {
+                ptr_large++;
 
                 // m_data isn't aligned, check first bytes
-                size_t start_ptr32 = (const u8*)ptr32 - &m_data[0];
+                size_t start_ptr_large = reinterpret_cast<u8 const*>(ptr_large) - &m_data[0];
                 size_t i = 0;
                 u8 byte = VALUE ? 0x00 : 0xff;
-                while (i < start_ptr32 && m_data[i] == byte)
+                while (i < start_ptr_large && m_data[i] == byte)
                     i++;
-                if (i < start_ptr32) {
+                if (i < start_ptr_large) {
                     byte = m_data[i];
                     if constexpr (!VALUE)
                         byte = ~byte;
                     VERIFY(byte != 0);
-                    return i * 8 + __builtin_ffs(byte) - 1;
+                    return i * 8 + bit_scan_forward(byte) - 1;
                 }
             }
 
-            u32 val32 = VALUE ? 0x0 : 0xffffffff;
-            const u32* end32 = (const u32*)((FlatPtr)end & ~(sizeof(u32) - 1));
-            while (ptr32 < end32 && *ptr32 == val32)
-                ptr32++;
+            size_t val_large = VALUE ? 0x0 : NumericLimits<size_t>::max();
+            size_t const* end_large = reinterpret_cast<size_t const*>(reinterpret_cast<FlatPtr>(end) & ~(sizeof(size_t) - 1));
+            while (ptr_large < end_large && *ptr_large == val_large)
+                ptr_large++;
 
-            if (ptr32 == end32) {
+            if (ptr_large == end_large) {
                 // We didn't find anything, check the remaining few bytes (if any)
                 u8 byte = VALUE ? 0x00 : 0xff;
-                size_t i = (const u8*)ptr32 - &m_data[0];
+                size_t i = reinterpret_cast<u8 const*>(ptr_large) - &m_data[0];
                 size_t byte_count = m_size / 8;
                 VERIFY(i <= byte_count);
                 while (i < byte_count && m_data[i] == byte)
@@ -137,7 +137,7 @@ public:
                         return {}; // We already checked from the beginning
 
                     // Try scanning before the hint
-                    end = (const u8*)((FlatPtr)&m_data[hint / 8] & ~(sizeof(u32) - 1));
+                    end = reinterpret_cast<u8 const*>(reinterpret_cast<FlatPtr>(&m_data[hint / 8]) & ~(sizeof(size_t) - 1));
                     hint = 0;
                     continue;
                 }
@@ -145,16 +145,16 @@ public:
                 if constexpr (!VALUE)
                     byte = ~byte;
                 VERIFY(byte != 0);
-                return i * 8 + __builtin_ffs(byte) - 1;
+                return i * 8 + bit_scan_forward(byte) - 1;
             }
 
             // NOTE: We don't really care about byte ordering. We found *one*
             // free bit, just calculate the position and return it
-            val32 = *ptr32;
+            val_large = *ptr_large;
             if constexpr (!VALUE)
-                val32 = ~val32;
-            VERIFY(val32 != 0);
-            return ((const u8*)ptr32 - &m_data[0]) * 8 + __builtin_ffsl(val32) - 1;
+                val_large = ~val_large;
+            VERIFY(val_large != 0);
+            return (reinterpret_cast<u8 const*>(ptr_large) - &m_data[0]) * 8 + bit_scan_forward(val_large) - 1;
         }
     }
 
@@ -184,7 +184,7 @@ public:
         if constexpr (!VALUE)
             byte = ~byte;
         VERIFY(byte != 0);
-        return i * 8 + __builtin_ffs(byte) - 1;
+        return i * 8 + bit_scan_forward(byte) - 1;
     }
 
     Optional<size_t> find_first_set() const { return find_first<true>(); }
@@ -205,18 +205,20 @@ public:
             return {};
         }
 
-        u32* bitmap32 = (u32*)m_data;
+        size_t bit_size = 8 * sizeof(size_t);
+
+        size_t* bitmap = reinterpret_cast<size_t*>(m_data);
 
         // Calculating the start offset.
-        size_t start_bucket_index = from / 32;
-        size_t start_bucket_bit = from % 32;
+        size_t start_bucket_index = from / bit_size;
+        size_t start_bucket_bit = from % bit_size;
 
         size_t* start_of_free_chunks = &from;
         size_t free_chunks = 0;
 
-        for (size_t bucket_index = start_bucket_index; bucket_index < m_size / 32; ++bucket_index) {
-            if (bitmap32[bucket_index] == 0xffffffff) {
-                // Skip over completely full bucket of size 32.
+        for (size_t bucket_index = start_bucket_index; bucket_index < m_size / bit_size; ++bucket_index) {
+            if (bitmap[bucket_index] == NumericLimits<size_t>::max()) {
+                // Skip over completely full bucket of size bit_size.
                 if (free_chunks >= min_length) {
                     return min(free_chunks, max_length);
                 }
@@ -224,12 +226,12 @@ public:
                 start_bucket_bit = 0;
                 continue;
             }
-            if (bitmap32[bucket_index] == 0x0) {
-                // Skip over completely empty bucket of size 32.
+            if (bitmap[bucket_index] == 0x0) {
+                // Skip over completely empty bucket of size bit_size.
                 if (free_chunks == 0) {
-                    *start_of_free_chunks = bucket_index * 32;
+                    *start_of_free_chunks = bucket_index * bit_size;
                 }
-                free_chunks += 32;
+                free_chunks += bit_size;
                 if (free_chunks >= max_length) {
                     return max_length;
                 }
@@ -237,26 +239,26 @@ public:
                 continue;
             }
 
-            u32 bucket = bitmap32[bucket_index];
+            size_t bucket = bitmap[bucket_index];
             u8 viewed_bits = start_bucket_bit;
             u32 trailing_zeroes = 0;
 
             bucket >>= viewed_bits;
             start_bucket_bit = 0;
 
-            while (viewed_bits < 32) {
+            while (viewed_bits < bit_size) {
                 if (bucket == 0) {
                     if (free_chunks == 0) {
-                        *start_of_free_chunks = bucket_index * 32 + viewed_bits;
+                        *start_of_free_chunks = bucket_index * bit_size + viewed_bits;
                     }
-                    free_chunks += 32 - viewed_bits;
-                    viewed_bits = 32;
+                    free_chunks += bit_size - viewed_bits;
+                    viewed_bits = bit_size;
                 } else {
-                    trailing_zeroes = count_trailing_zeroes_32(bucket);
+                    trailing_zeroes = count_trailing_zeroes(bucket);
                     bucket >>= trailing_zeroes;
 
                     if (free_chunks == 0) {
-                        *start_of_free_chunks = bucket_index * 32 + viewed_bits;
+                        *start_of_free_chunks = bucket_index * bit_size + viewed_bits;
                     }
                     free_chunks += trailing_zeroes;
                     viewed_bits += trailing_zeroes;
@@ -266,7 +268,7 @@ public:
                     }
 
                     // Deleting trailing ones.
-                    u32 trailing_ones = count_trailing_zeroes_32(~bucket);
+                    u32 trailing_ones = count_trailing_zeroes(~bucket);
                     bucket >>= trailing_ones;
                     viewed_bits += trailing_ones;
                     free_chunks = 0;
@@ -275,8 +277,8 @@ public:
         }
 
         if (free_chunks < min_length) {
-            size_t first_trailing_bit = (m_size / 32) * 32;
-            size_t trailing_bits = size() % 32;
+            size_t first_trailing_bit = (m_size / bit_size) * bit_size;
+            size_t trailing_bits = size() % bit_size;
             for (size_t i = 0; i < trailing_bits; ++i) {
                 if (!get(first_trailing_bit + i)) {
                     if (free_chunks == 0)
@@ -367,4 +369,6 @@ protected:
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::BitmapView;
+#endif

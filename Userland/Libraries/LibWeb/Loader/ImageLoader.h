@@ -7,8 +7,8 @@
 #pragma once
 
 #include <AK/Function.h>
-#include <LibCore/Timer.h>
 #include <LibWeb/Loader/ImageResource.h>
+#include <LibWeb/Platform/Timer.h>
 
 namespace Web {
 
@@ -16,9 +16,11 @@ class ImageLoader : public ImageResourceClient {
 public:
     ImageLoader(DOM::Element& owner_element);
 
+    void adopt_object_resource(Badge<HTML::HTMLObjectElement>, Resource&);
+
     void load(const AK::URL&);
 
-    const Gfx::Bitmap* bitmap(size_t index) const;
+    Gfx::Bitmap const* bitmap(size_t index) const;
     size_t current_frame_index() const { return m_current_frame_index; }
 
     bool has_image() const;
@@ -35,6 +37,8 @@ public:
     Function<void()> on_animate;
 
 private:
+    void load_without_resetting_redirect_counter(AK::URL const&);
+
     // ^ImageResourceClient
     virtual void resource_did_load() override;
     virtual void resource_did_fail() override;
@@ -49,14 +53,15 @@ private:
         Failed,
     };
 
-    DOM::Element& m_owner_element;
+    JS::NonnullGCPtr<DOM::Element> m_owner_element;
 
     mutable bool m_visible_in_viewport { false };
 
     size_t m_current_frame_index { 0 };
     size_t m_loops_completed { 0 };
     LoadingState m_loading_state { LoadingState::Loading };
-    NonnullRefPtr<Core::Timer> m_timer;
+    NonnullRefPtr<Platform::Timer> m_timer;
+    size_t m_redirects_count { 0 };
 };
 
 }

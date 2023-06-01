@@ -8,7 +8,6 @@
 #include <AK/Array.h>
 #include <AK/NumericLimits.h>
 #include <AK/ScopeGuard.h>
-#include <AK/String.h>
 #include <stdlib.h>
 
 Game::Game(size_t grid_size, size_t target_tile, bool evil_ai)
@@ -141,7 +140,7 @@ static bool is_complete(Game::Board const& board, size_t target)
     return false;
 }
 
-static bool has_no_neighbors(Span<u32 const> const& row)
+static bool has_no_neighbors(ReadonlySpan<u32> const& row)
 {
     if (row.size() < 2)
         return true;

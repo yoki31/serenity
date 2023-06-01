@@ -1,33 +1,62 @@
-# Patches for Python 3.9 on SerenityOS
+# Patches for python3 on SerenityOS
 
-## `define-have-sigset-t.patch`
+## `0001-Enforce-UTF-8-as-the-locale-encoding.patch`
 
-Ensures `HAVE_SIGSET_T` is defined, as we *do* have `sigset_t` but it's not detected properly due to some related functions being missing.
+Enforce UTF-8 as the locale encoding
 
-## `include-sys-uio.patch`
+By defining `_Py_FORCE_UTF8_LOCALE` as some other platforms already do,
+we can enforce UTF-8 as the encoding.
 
-Ensures `struct iovec` is defined, required by the socket module.
+## `0002-Tweak-configure-and-configure.ac.patch`
 
-## `define-py-force-utf8-locale.patch`
+Tweak configure and configure.ac
 
-Enforce UTF-8 as encoding by defining `_Py_FORCE_UTF8_LOCALE`.
+As usual, make the `configure` script recognize Serenity. Also set
+`MACHDEP` (which is used for `sys.platform`) to a version-less
+`serenityos`, even when not cross-compiling.
 
-## `fix-autoconf.patch`
+## `0003-Include-sys-uio.h-in-socketmodule.c.patch`
 
-As usual, make the `configure` script recognize Serenity. Also set `MACHDEP` (which is used for `sys.platform`) to a version-less `serenityos`, even when not cross-compiling.
+Include `sys/uio.h` in `socketmodule.c`
 
-## `http-client.patch`
+This is to ensure that `struct iovec` is defined, which is required by
+the `socket` module.
 
-Allows HTTPConnection to work without the TCP_NODELAY socket option, as this is not supported by Serenity.
+## `0004-Tweak-setup.py.patch`
 
-## `tweak-setup-py.patch`
+Tweak `setup.py`
 
-Make some tweaks to Python's `setup.py` files:
+Make some tweaks to Python's `setup.py`:
 
-- Add `/usr/local/lib` / `/usr/local/include` to the system lib / include dirs, relative to the sysroot when crosscompiling. These are by default only included when not crosscompiling for some reason.
-- Add `/usr/local/include/ncurses` to the curses include paths so it can build the `_curses` module. This is by default included for a bunch of extensions, but not `_curses`.
-- Add `/usr/local/includes/uuid` to the uuid include paths so it can build the `_uuid` module. This is by default included for a bunch of extensions, but not `_uuid`.
+- Add `/usr/local/lib` and `/usr/local/include` to the system lib and
+  include dirs respectively, relative to the sysroot when
+  crosscompiling. These are by default only included when not
+  crosscompiling for some reason.
+- Add `/usr/local/include/ncurses` to the curses include paths so it can
+  build the `_curses` module. This is by default included for a bunch of
+  extensions, but not `_curses`.
 
-## `xmlrcp_client.patch`
+## `0005-Tweak-setup.py-sysroot-detection.patch`
 
-Fix xmlrpc.client module so it can be imported. It otherwise a call to strftime raises a ValueError that the code is not prepared to handle.
+Tweak `setup.py` sysroot detection
+
+When crosscompiling, the Python installer expects the C compiler to
+be invoked with a `--sysroot` command line option, which then is used
+to find additional subdirectories containing headers and libraries.
+
+Because there is no such option present, this is a workaround to use
+the environment variable `SERENITY_INSTALL_ROOT` as a fake `--sysroot`
+in the detection code.
+
+## `0006-Workaround-for-unsupported-socket-option.patch`
+
+Workaround for unsupported socket option
+
+This is a workaround for ignoring the result of `setsockopt` call when
+given `TCP_NODELAY` as an argument. This TCP socket option is used in
+many applications (like pip and requests) for optimization purposes.
+For now, it can be safely ignored until it's supported in the kernel.
+
+## `0007-Set-name-of-shared-libpython.patch`
+
+Set name of shared libpython

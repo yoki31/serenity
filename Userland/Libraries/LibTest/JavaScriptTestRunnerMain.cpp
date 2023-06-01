@@ -7,6 +7,7 @@
  */
 
 #include <LibCore/ArgsParser.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibTest/JavaScriptTestRunner.h>
 #include <signal.h>
 #include <stdio.h>
@@ -19,16 +20,14 @@ namespace JS {
 
 RefPtr<::JS::VM> g_vm;
 bool g_collect_on_every_allocation = false;
-#ifdef JS_TRACK_ZOMBIE_CELLS
-bool g_zombify_dead_cells = false;
-#endif
 bool g_run_bytecode = false;
-String g_currently_running_test;
-HashMap<String, FunctionWithLength> s_exposed_global_functions;
+DeprecatedString g_currently_running_test;
+HashMap<DeprecatedString, FunctionWithLength> s_exposed_global_functions;
 Function<void()> g_main_hook;
-HashMap<bool*, Tuple<String, String, char>> g_extra_args;
-IntermediateRunFileResult (*g_run_file)(const String&, JS::Interpreter&) = nullptr;
-String g_test_root;
+Function<NonnullOwnPtr<JS::Interpreter>()> g_create_interpreter_hook;
+HashMap<bool*, Tuple<DeprecatedString, DeprecatedString, char>> g_extra_args;
+IntermediateRunFileResult (*g_run_file)(DeprecatedString const&, JS::Interpreter&, JS::ExecutionContext&) = nullptr;
+DeprecatedString g_test_root;
 int g_test_argc;
 char** g_test_argv;
 
@@ -57,6 +56,11 @@ static void handle_sigabrt(int)
 
 int main(int argc, char** argv)
 {
+    Vector<StringView> arguments;
+    arguments.ensure_capacity(argc);
+    for (auto i = 0; i < argc; ++i)
+        arguments.append({ argv[i], strlen(argv[i]) });
+
     g_test_argc = argc;
     g_test_argv = argv;
     auto program_name = LexicalPath::basename(argv[0]);
@@ -83,24 +87,25 @@ int main(int argc, char** argv)
 
     bool print_times = false;
     bool print_progress =
-#ifdef __serenity__
+#ifdef AK_OS_SERENITY
         true; // Use OSC 9 to print progress
 #else
         false;
 #endif
     bool print_json = false;
-    const char* specified_test_root = nullptr;
-    String common_path;
-    String test_glob;
+    bool per_file = false;
+    StringView specified_test_root;
+    DeprecatedString common_path;
+    DeprecatedString test_glob;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(print_times, "Show duration of each test", "show-time", 't');
     args_parser.add_option(Core::ArgsParser::Option {
-        .requires_argument = true,
+        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
         .help_string = "Show progress with OSC 9 (true, false)",
         .long_name = "show-progress",
         .short_name = 'p',
-        .accept_value = [&](auto* str) {
+        .accept_value = [&](StringView str) {
             if ("true"sv == str)
                 print_progress = true;
             else if ("false"sv == str)
@@ -111,10 +116,8 @@ int main(int argc, char** argv)
         },
     });
     args_parser.add_option(print_json, "Show results as JSON", "json", 'j');
+    args_parser.add_option(per_file, "Show detailed per-file results as JSON (implies -j)", "per-file", 0);
     args_parser.add_option(g_collect_on_every_allocation, "Collect garbage after every allocation", "collect-often", 'g');
-#ifdef JS_TRACK_ZOMBIE_CELLS
-    args_parser.add_option(g_zombify_dead_cells, "Zombify dead cells (to catch missing GC marks)", "zombify-dead-cells", 'z');
-#endif
     args_parser.add_option(g_run_bytecode, "Use the bytecode interpreter", "run-bytecode", 'b');
     args_parser.add_option(JS::Bytecode::g_dump_bytecode, "Dump the bytecode", "dump-bytecode", 'd');
     args_parser.add_option(test_glob, "Only run tests matching the given glob", "filter", 'f', "glob");
@@ -122,9 +125,12 @@ int main(int argc, char** argv)
         args_parser.add_option(*entry.key, entry.value.get<0>().characters(), entry.value.get<1>().characters(), entry.value.get<2>());
     args_parser.add_positional_argument(specified_test_root, "Tests root directory", "path", Core::ArgsParser::Required::No);
     args_parser.add_positional_argument(common_path, "Path to tests-common.js", "common-path", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
-    test_glob = String::formatted("*{}*", test_glob);
+    if (per_file)
+        print_json = true;
+
+    test_glob = DeprecatedString::formatted("*{}*", test_glob);
 
     if (getenv("DISABLE_DBG_OUTPUT")) {
         AK::set_debug_enabled(false);
@@ -135,43 +141,54 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    String test_root;
+    DeprecatedString test_root;
 
-    if (specified_test_root) {
-        test_root = String { specified_test_root };
+    if (!specified_test_root.is_empty()) {
+        test_root = DeprecatedString { specified_test_root };
     } else {
-#ifdef __serenity__
-        test_root = LexicalPath::join("/home/anon", String::formatted("{}-tests", program_name.split_view('-').last())).string();
+#ifdef AK_OS_SERENITY
+        test_root = LexicalPath::join("/home/anon/Tests"sv, DeprecatedString::formatted("{}-tests", program_name.split_view('-').last())).string();
 #else
         char* serenity_source_dir = getenv("SERENITY_SOURCE_DIR");
         if (!serenity_source_dir) {
             warnln("No test root given, {} requires the SERENITY_SOURCE_DIR environment variable to be set", g_program_name);
             return 1;
         }
-        test_root = String::formatted("{}/{}", serenity_source_dir, g_test_root_fragment);
-        common_path = String::formatted("{}/Userland/Libraries/LibJS/Tests/test-common.js", serenity_source_dir);
+        test_root = DeprecatedString::formatted("{}/{}", serenity_source_dir, g_test_root_fragment);
+        common_path = DeprecatedString::formatted("{}/Userland/Libraries/LibJS/Tests/test-common.js", serenity_source_dir);
 #endif
     }
-    if (!Core::File::is_directory(test_root)) {
+    if (!FileSystem::is_directory(test_root)) {
         warnln("Test root is not a directory: {}", test_root);
         return 1;
     }
 
     if (common_path.is_empty()) {
-#ifdef __serenity__
-        common_path = "/home/anon/js-tests/test-common.js";
+#ifdef AK_OS_SERENITY
+        common_path = "/home/anon/Tests/js-tests/test-common.js";
 #else
         char* serenity_source_dir = getenv("SERENITY_SOURCE_DIR");
         if (!serenity_source_dir) {
             warnln("No test root given, {} requires the SERENITY_SOURCE_DIR environment variable to be set", g_program_name);
             return 1;
         }
-        common_path = String::formatted("{}/Userland/Libraries/LibJS/Tests/test-common.js", serenity_source_dir);
+        common_path = DeprecatedString::formatted("{}/Userland/Libraries/LibJS/Tests/test-common.js", serenity_source_dir);
 #endif
     }
 
-    test_root = Core::File::real_path_for(test_root);
-    common_path = Core::File::real_path_for(common_path);
+    auto test_root_or_error = FileSystem::real_path(test_root);
+    if (test_root_or_error.is_error()) {
+        warnln("Failed to resolve test root: {}", test_root_or_error.error());
+        return 1;
+    }
+    test_root = test_root_or_error.release_value().to_deprecated_string();
+
+    auto common_path_or_error = FileSystem::real_path(common_path);
+    if (common_path_or_error.is_error()) {
+        warnln("Failed to resolve common path: {}", common_path_or_error.error());
+        return 1;
+    }
+    common_path = common_path_or_error.release_value().to_deprecated_string();
 
     if (chdir(test_root.characters()) < 0) {
         auto saved_errno = errno;
@@ -182,10 +199,12 @@ int main(int argc, char** argv)
     if (g_main_hook)
         g_main_hook();
 
-    if (!g_vm)
-        g_vm = JS::VM::create();
+    if (!g_vm) {
+        g_vm = MUST(JS::VM::create());
+        g_vm->enable_default_host_import_module_dynamically_hook();
+    }
 
-    Test::JS::TestRunner test_runner(test_root, common_path, print_times, print_progress, print_json);
+    Test::JS::TestRunner test_runner(test_root, common_path, print_times, print_progress, print_json, per_file);
     test_runner.run(test_glob);
 
     g_vm = nullptr;

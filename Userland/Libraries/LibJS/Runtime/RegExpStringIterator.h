@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -16,9 +16,8 @@ class RegExpStringIterator final : public Object {
     JS_OBJECT(RegExpStringIterator, Object);
 
 public:
-    static RegExpStringIterator* create(GlobalObject&, Object& regexp_object, Utf16String string, bool global, bool unicode);
+    static NonnullGCPtr<RegExpStringIterator> create(Realm&, Object& regexp_object, Utf16String string, bool global, bool unicode);
 
-    explicit RegExpStringIterator(Object& prototype, Object& regexp_object, Utf16String string, bool global, bool unicode);
     virtual ~RegExpStringIterator() override = default;
 
     Object& regexp_object() { return m_regexp_object; }
@@ -30,9 +29,11 @@ public:
     void set_done() { m_done = true; }
 
 private:
+    explicit RegExpStringIterator(Object& prototype, Object& regexp_object, Utf16String string, bool global, bool unicode);
+
     virtual void visit_edges(Cell::Visitor&) override;
 
-    Object& m_regexp_object;
+    NonnullGCPtr<Object> m_regexp_object;
     Utf16String m_string;
     bool m_global { false };
     bool m_unicode { false };

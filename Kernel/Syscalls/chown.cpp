@@ -4,27 +4,31 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/RefPtr.h>
+#include <Kernel/FileSystem/Custody.h>
 #include <Kernel/FileSystem/OpenFileDescription.h>
+#include <Kernel/FileSystem/VirtualFileSystem.h>
 #include <Kernel/Process.h>
 
 namespace Kernel {
 
 ErrorOr<FlatPtr> Process::sys$fchown(int fd, UserID uid, GroupID gid)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this);
-    REQUIRE_PROMISE(chown);
-    auto description = TRY(fds().open_file_description(fd));
-    TRY(description->chown(uid, gid));
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::chown));
+    auto description = TRY(open_file_description(fd));
+    TRY(description->chown(credentials(), uid, gid));
     return 0;
 }
 
-ErrorOr<FlatPtr> Process::sys$chown(Userspace<const Syscall::SC_chown_params*> user_params)
+ErrorOr<FlatPtr> Process::sys$chown(Userspace<Syscall::SC_chown_params const*> user_params)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this);
-    REQUIRE_PROMISE(chown);
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::chown));
     auto params = TRY(copy_typed_from_user(user_params));
     auto path = TRY(get_syscall_path_argument(params.path));
-    TRY(VirtualFileSystem::the().chown(path->view(), params.uid, params.gid, current_directory()));
+    auto base = TRY(custody_for_dirfd(params.dirfd));
+    TRY(VirtualFileSystem::the().chown(credentials(), path->view(), params.uid, params.gid, *base, params.follow_symlinks ? 0 : O_NOFOLLOW_NOERROR));
     return 0;
 }
 

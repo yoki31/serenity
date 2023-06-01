@@ -3,8 +3,9 @@
 ### Fedora
 
 ```console
-sudo dnf install binutils-devel curl cmake mpfr-devel libmpc-devel gmp-devel e2fsprogs ninja-build patch ccache rsync @"C Development Tools and Libraries" @Virtualization
+sudo dnf install texinfo binutils-devel curl cmake mpfr-devel libmpc-devel gmp-devel e2fsprogs ninja-build patch ccache rsync @"C Development Tools and Libraries" @Virtualization
 ```
+Optional: `fuse2fs` for [building images without root](https://github.com/SerenityOS/serenity/pull/11224).
 
 ## openSUSE
 
@@ -26,46 +27,11 @@ apt-get install curl cmake libmpc-devel gmp-devel e2fsprogs libmpfr-devel ninja-
 
 ## NixOS
 
-You can use a `nix-shell` script like the following to set up the correct environment:
+You can use the `nix-shell` script [`Toolchain/serenity.nix`](../Toolchain/serenity.nix) to set up the environment:
 
-myshell.nix:
-
+```console
+nix-shell Toolchain/serenity.nix
 ```
-with import <nixpkgs> {};
-
-stdenv.mkDerivation {
-  name = "cpp-env";
-  nativeBuildInputs = [
-    gcc10
-    curl
-    cmake
-    mpfr
-    ninja
-    gmp
-    libmpc
-    e2fsprogs
-    patch
-    ccache
-    rsync
-    unzip
-
-    # Example Build-time Additional Dependencies
-    pkgconfig
-  ];
-  buildInputs = [
-    # Example Run-time Additional Dependencies
-    openssl
-    x11
-    qemu
-    # glibc
-  ];
-  hardeningDisable = [ "format" "fortify" ];
-}
-```
-
-Then use this script: `nix-shell myshell.nix`.
-
-Once you're in nix-shell, you should be able to follow the build directions.
 
 ## Alpine Linux
 
@@ -75,6 +41,9 @@ First, make sure you have enabled the `community` repository in `/etc/apk/reposi
 # the basics, if you have not already done so
 apk add bash curl git util-linux sudo
 
+# GNU coreutils for GNU's version of `du`
+apk add coreutils
+
 # rough equivalent of build-essential
 apk add build-base
 
@@ -82,18 +51,18 @@ apk add build-base
 apk add qemu qemu-system-i386 qemu-img qemu-ui-gtk
 
 # build tools (samurai is a drop-in replacement for ninja)
-apk add cmake e2fsprogs grub-bios samurai mpc1-dev mpfr-dev gmp-dev ccache rsync
+apk add cmake e2fsprogs grub-bios samurai mpc1-dev mpfr-dev gmp-dev ccache rsync texinfo
 ```
 
 ## OpenBSD prerequisites
 
 ```console
-doas pkg_add bash cmake g++ gcc git gmake gmp ninja ccache rsync coreutils qemu sudo
+doas pkg_add bash cmake g++ gcc git gmake gmp ninja ccache rsync coreutils qemu sudo e2fsprogs
 ```
 
 ## FreeBSD prerequisites
 
 ```console
-pkg install bash cmake coreutils e2fsprogs fusefs-ext2 gcc git gmake ninja sudo gmp mpc mpfr ccache rsync
+pkg install qemu bash cmake coreutils e2fsprogs fusefs-ext2 gcc11 git gmake ninja sudo gmp mpc mpfr ccache rsync
 ```
-
+Optional: `fusefs-ext2` for [building images without root](https://github.com/SerenityOS/serenity/pull/11224).

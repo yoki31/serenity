@@ -5,23 +5,26 @@
  */
 
 #include "Client.h"
+#include <AK/DeprecatedString.h>
 #include <AK/HashMap.h>
-#include <AK/String.h>
 #include <AK/Types.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/EventLoop.h>
+#include <LibCore/Socket.h>
 #include <LibCore/TCPServer.h>
+#include <LibFileSystem/FileSystem.h>
+#include <LibMain/Main.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-static void run_command(int ptm_fd, String command)
+static void run_command(int ptm_fd, DeprecatedString command)
 {
     pid_t pid = fork();
     if (pid == 0) {
-        const char* tty_name = ptsname(ptm_fd);
+        char const* tty_name = ptsname(ptm_fd);
         if (!tty_name) {
             perror("ptsname");
             exit(1);
@@ -65,12 +68,12 @@ static void run_command(int ptm_fd, String command)
             perror("ioctl(TIOCSCTTY)");
             exit(1);
         }
-        const char* args[4] = { "/bin/Shell", nullptr, nullptr, nullptr };
+        char const* args[4] = { "/bin/Shell", nullptr, nullptr, nullptr };
         if (!command.is_empty()) {
             args[1] = "-c";
             args[2] = command.characters();
         }
-        const char* envs[] = { "TERM=xterm", "PATH=/usr/local/bin:/usr/bin:/bin", nullptr };
+        char const* envs[] = { "TERM=xterm", "PATH=" DEFAULT_PATH, nullptr };
         rc = execve("/bin/Shell", const_cast<char**>(args), const_cast<char**>(envs));
         if (rc < 0) {
             perror("execve");
@@ -80,15 +83,15 @@ static void run_command(int ptm_fd, String command)
     }
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
     int port = 23;
-    const char* command = "";
+    StringView command = ""sv;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(port, "Port to listen on", nullptr, 'p', "port");
     args_parser.add_option(command, "Program to run on connection", nullptr, 'c', "command");
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if ((u16)port != port) {
         warnln("Invalid port number: {}", port);
@@ -96,12 +99,8 @@ int main(int argc, char** argv)
     }
 
     Core::EventLoop event_loop;
-    auto server = Core::TCPServer::construct();
-
-    if (!server->listen({}, port)) {
-        warnln("Listening on 0.0.0.0:{} failed", port);
-        exit(1);
-    }
+    auto server = TRY(Core::TCPServer::try_create());
+    TRY(server->listen({}, port));
 
     HashMap<int, NonnullRefPtr<Client>> clients;
     int next_id = 0;
@@ -109,11 +108,12 @@ int main(int argc, char** argv)
     server->on_ready_to_accept = [&next_id, &clients, &server, command] {
         int id = next_id++;
 
-        auto client_socket = server->accept();
-        if (!client_socket) {
-            perror("accept");
+        auto maybe_client_socket = server->accept();
+        if (maybe_client_socket.is_error()) {
+            warnln("accept: {}", maybe_client_socket.error());
             return;
         }
+        auto client_socket = maybe_client_socket.release_value();
 
         int ptm_fd = posix_openpt(O_RDWR);
         if (ptm_fd < 0) {
@@ -134,18 +134,18 @@ int main(int argc, char** argv)
 
         run_command(ptm_fd, command);
 
-        auto client = Client::create(id, move(client_socket), ptm_fd);
+        auto maybe_client = Client::create(id, move(client_socket), ptm_fd);
+        if (maybe_client.is_error()) {
+            warnln("Failed to create the client: {}", maybe_client.error());
+            return;
+        }
+
+        auto client = maybe_client.release_value();
         client->on_exit = [&clients, id] {
             Core::deferred_invoke([&clients, id] { clients.remove(id); });
         };
         clients.set(id, client);
     };
 
-    int rc = event_loop.exec();
-    if (rc != 0) {
-        fprintf(stderr, "event loop exited badly; rc=%d", rc);
-        exit(1);
-    }
-
-    return 0;
+    return event_loop.exec();
 }

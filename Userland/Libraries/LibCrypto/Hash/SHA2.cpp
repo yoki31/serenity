@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Ali Mohammad Pur <mpfard@serenityos.org>
+ * Copyright (c) 2023, Jelle Raaijmakers <jelle@gmta.nl>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,8 +8,7 @@
 #include <AK/Types.h>
 #include <LibCrypto/Hash/SHA2.h>
 
-namespace Crypto {
-namespace Hash {
+namespace Crypto::Hash {
 constexpr static auto ROTRIGHT(u32 a, size_t b) { return (a >> b) | (a << (32 - b)); }
 constexpr static auto CH(u32 x, u32 y, u32 z) { return (x & y) ^ (z & ~x); }
 constexpr static auto MAJ(u32 x, u32 y, u32 z) { return (x & y) ^ (x & z) ^ (y & z); }
@@ -25,7 +25,7 @@ constexpr static auto EP1(u64 x) { return ROTRIGHT(x, 14) ^ ROTRIGHT(x, 18) ^ RO
 constexpr static auto SIGN0(u64 x) { return ROTRIGHT(x, 1) ^ ROTRIGHT(x, 8) ^ (x >> 7); }
 constexpr static auto SIGN1(u64 x) { return ROTRIGHT(x, 19) ^ ROTRIGHT(x, 61) ^ (x >> 6); }
 
-inline void SHA256::transform(const u8* data)
+inline void SHA256::transform(u8 const* data)
 {
     u32 m[64];
 
@@ -43,7 +43,7 @@ inline void SHA256::transform(const u8* data)
          e = m_state[4], f = m_state[5],
          g = m_state[6], h = m_state[7];
 
-    for (size_t i = 0; i < Rounds; ++i) {
+    for (i = 0; i < Rounds; ++i) {
         auto temp0 = h + EP1(e) + CH(e, f, g) + SHA256Constants::RoundConstants[i] + m[i];
         auto temp1 = EP0(a) + MAJ(a, b, c);
         h = g;
@@ -66,16 +66,28 @@ inline void SHA256::transform(const u8* data)
     m_state[7] += h;
 }
 
-void SHA256::update(const u8* message, size_t length)
+template<size_t BlockSize, typename Callback>
+void update_buffer(u8* buffer, u8 const* input, size_t length, size_t& data_length, Callback callback)
 {
-    for (size_t i = 0; i < length; ++i) {
-        if (m_data_length == BlockSize) {
-            transform(m_data_buffer);
-            m_bit_length += 512;
-            m_data_length = 0;
+    while (length > 0) {
+        size_t copy_bytes = AK::min(length, BlockSize - data_length);
+        __builtin_memcpy(buffer + data_length, input, copy_bytes);
+        input += copy_bytes;
+        length -= copy_bytes;
+        data_length += copy_bytes;
+        if (data_length == BlockSize) {
+            callback();
+            data_length = 0;
         }
-        m_data_buffer[m_data_length++] = message[i];
     }
+}
+
+void SHA256::update(u8 const* message, size_t length)
+{
+    update_buffer<BlockSize>(m_data_buffer, message, length, m_data_length, [&]() {
+        transform(m_data_buffer);
+        m_bit_length += BlockSize * 8;
+    });
 }
 
 SHA256::DigestType SHA256::digest()
@@ -90,18 +102,10 @@ SHA256::DigestType SHA256::peek()
     DigestType digest;
     size_t i = m_data_length;
 
-    if (BlockSize == m_data_length) {
-        transform(m_data_buffer);
-        m_bit_length += BlockSize * 8;
-        m_data_length = 0;
-        i = 0;
-    }
-
-    if (m_data_length < FinalBlockDataSize) {
+    if (i < FinalBlockDataSize) {
         m_data_buffer[i++] = 0x80;
         while (i < FinalBlockDataSize)
             m_data_buffer[i++] = 0x00;
-
     } else {
         // First, complete a block with some padding.
         m_data_buffer[i++] = 0x80;
@@ -128,8 +132,8 @@ SHA256::DigestType SHA256::peek()
 
     // SHA uses big-endian and we assume little-endian
     // FIXME: looks like a thing for AK::NetworkOrdered,
-    //        but he doesn't support shifting operations
-    for (size_t i = 0; i < 4; ++i) {
+    //        but that doesn't support shifting operations
+    for (i = 0; i < 4; ++i) {
         digest.data[i + 0] = (m_state[0] >> (24 - i * 8)) & 0x000000ff;
         digest.data[i + 4] = (m_state[1] >> (24 - i * 8)) & 0x000000ff;
         digest.data[i + 8] = (m_state[2] >> (24 - i * 8)) & 0x000000ff;
@@ -142,7 +146,7 @@ SHA256::DigestType SHA256::peek()
     return digest;
 }
 
-inline void SHA384::transform(const u8* data)
+inline void SHA384::transform(u8 const* data)
 {
     u64 m[80];
 
@@ -160,7 +164,7 @@ inline void SHA384::transform(const u8* data)
          e = m_state[4], f = m_state[5],
          g = m_state[6], h = m_state[7];
 
-    for (size_t i = 0; i < Rounds; ++i) {
+    for (i = 0; i < Rounds; ++i) {
         // Note : SHA384 uses the SHA512 constants.
         auto temp0 = h + EP1(e) + CH(e, f, g) + SHA512Constants::RoundConstants[i] + m[i];
         auto temp1 = EP0(a) + MAJ(a, b, c);
@@ -184,16 +188,12 @@ inline void SHA384::transform(const u8* data)
     m_state[7] += h;
 }
 
-void SHA384::update(const u8* message, size_t length)
+void SHA384::update(u8 const* message, size_t length)
 {
-    for (size_t i = 0; i < length; ++i) {
-        if (m_data_length == BlockSize) {
-            transform(m_data_buffer);
-            m_bit_length += 1024;
-            m_data_length = 0;
-        }
-        m_data_buffer[m_data_length++] = message[i];
-    }
+    update_buffer<BlockSize>(m_data_buffer, message, length, m_data_length, [&]() {
+        transform(m_data_buffer);
+        m_bit_length += BlockSize * 8;
+    });
 }
 
 SHA384::DigestType SHA384::digest()
@@ -208,18 +208,10 @@ SHA384::DigestType SHA384::peek()
     DigestType digest;
     size_t i = m_data_length;
 
-    if (BlockSize == m_data_length) {
-        transform(m_data_buffer);
-        m_bit_length += BlockSize * 8;
-        m_data_length = 0;
-        i = 0;
-    }
-
-    if (m_data_length < FinalBlockDataSize) {
+    if (i < FinalBlockDataSize) {
         m_data_buffer[i++] = 0x80;
         while (i < FinalBlockDataSize)
             m_data_buffer[i++] = 0x00;
-
     } else {
         // First, complete a block with some padding.
         m_data_buffer[i++] = 0x80;
@@ -241,13 +233,22 @@ SHA384::DigestType SHA384::peek()
     m_data_buffer[BlockSize - 6] = m_bit_length >> 40;
     m_data_buffer[BlockSize - 7] = m_bit_length >> 48;
     m_data_buffer[BlockSize - 8] = m_bit_length >> 56;
+    // FIXME: Theoretically we should keep track of the number of bits as a u128, now we can only hash up to 2 EiB.
+    m_data_buffer[BlockSize - 9] = 0;
+    m_data_buffer[BlockSize - 10] = 0;
+    m_data_buffer[BlockSize - 11] = 0;
+    m_data_buffer[BlockSize - 12] = 0;
+    m_data_buffer[BlockSize - 13] = 0;
+    m_data_buffer[BlockSize - 14] = 0;
+    m_data_buffer[BlockSize - 15] = 0;
+    m_data_buffer[BlockSize - 16] = 0;
 
     transform(m_data_buffer);
 
     // SHA uses big-endian and we assume little-endian
     // FIXME: looks like a thing for AK::NetworkOrdered,
-    //        but he doesn't support shifting operations
-    for (size_t i = 0; i < 8; ++i) {
+    //        but that doesn't support shifting operations
+    for (i = 0; i < 8; ++i) {
         digest.data[i + 0] = (m_state[0] >> (56 - i * 8)) & 0x000000ff;
         digest.data[i + 8] = (m_state[1] >> (56 - i * 8)) & 0x000000ff;
         digest.data[i + 16] = (m_state[2] >> (56 - i * 8)) & 0x000000ff;
@@ -258,7 +259,7 @@ SHA384::DigestType SHA384::peek()
     return digest;
 }
 
-inline void SHA512::transform(const u8* data)
+inline void SHA512::transform(u8 const* data)
 {
     u64 m[80];
 
@@ -276,7 +277,7 @@ inline void SHA512::transform(const u8* data)
          e = m_state[4], f = m_state[5],
          g = m_state[6], h = m_state[7];
 
-    for (size_t i = 0; i < Rounds; ++i) {
+    for (i = 0; i < Rounds; ++i) {
         auto temp0 = h + EP1(e) + CH(e, f, g) + SHA512Constants::RoundConstants[i] + m[i];
         auto temp1 = EP0(a) + MAJ(a, b, c);
         h = g;
@@ -299,16 +300,12 @@ inline void SHA512::transform(const u8* data)
     m_state[7] += h;
 }
 
-void SHA512::update(const u8* message, size_t length)
+void SHA512::update(u8 const* message, size_t length)
 {
-    for (size_t i = 0; i < length; ++i) {
-        if (m_data_length == BlockSize) {
-            transform(m_data_buffer);
-            m_bit_length += 1024;
-            m_data_length = 0;
-        }
-        m_data_buffer[m_data_length++] = message[i];
-    }
+    update_buffer<BlockSize>(m_data_buffer, message, length, m_data_length, [&]() {
+        transform(m_data_buffer);
+        m_bit_length += BlockSize * 8;
+    });
 }
 
 SHA512::DigestType SHA512::digest()
@@ -323,18 +320,10 @@ SHA512::DigestType SHA512::peek()
     DigestType digest;
     size_t i = m_data_length;
 
-    if (BlockSize == m_data_length) {
-        transform(m_data_buffer);
-        m_bit_length += BlockSize * 8;
-        m_data_length = 0;
-        i = 0;
-    }
-
-    if (m_data_length < FinalBlockDataSize) {
+    if (i < FinalBlockDataSize) {
         m_data_buffer[i++] = 0x80;
         while (i < FinalBlockDataSize)
             m_data_buffer[i++] = 0x00;
-
     } else {
         // First, complete a block with some padding.
         m_data_buffer[i++] = 0x80;
@@ -356,13 +345,22 @@ SHA512::DigestType SHA512::peek()
     m_data_buffer[BlockSize - 6] = m_bit_length >> 40;
     m_data_buffer[BlockSize - 7] = m_bit_length >> 48;
     m_data_buffer[BlockSize - 8] = m_bit_length >> 56;
+    // FIXME: Theoretically we should keep track of the number of bits as a u128, now we can only hash up to 2 EiB.
+    m_data_buffer[BlockSize - 9] = 0;
+    m_data_buffer[BlockSize - 10] = 0;
+    m_data_buffer[BlockSize - 11] = 0;
+    m_data_buffer[BlockSize - 12] = 0;
+    m_data_buffer[BlockSize - 13] = 0;
+    m_data_buffer[BlockSize - 14] = 0;
+    m_data_buffer[BlockSize - 15] = 0;
+    m_data_buffer[BlockSize - 16] = 0;
 
     transform(m_data_buffer);
 
     // SHA uses big-endian and we assume little-endian
     // FIXME: looks like a thing for AK::NetworkOrdered,
-    //        but he doesn't support shifting operations
-    for (size_t i = 0; i < 8; ++i) {
+    //        but that doesn't support shifting operations
+    for (i = 0; i < 8; ++i) {
         digest.data[i + 0] = (m_state[0] >> (56 - i * 8)) & 0x000000ff;
         digest.data[i + 8] = (m_state[1] >> (56 - i * 8)) & 0x000000ff;
         digest.data[i + 16] = (m_state[2] >> (56 - i * 8)) & 0x000000ff;
@@ -373,6 +371,5 @@ SHA512::DigestType SHA512::peek()
         digest.data[i + 56] = (m_state[7] >> (56 - i * 8)) & 0x000000ff;
     }
     return digest;
-}
 }
 }

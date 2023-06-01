@@ -21,14 +21,14 @@ static bool flag_print_uid = false;
 static bool flag_print_gid = false;
 static bool flag_print_name = false;
 static bool flag_print_gid_all = false;
-static String user_str;
+static DeprecatedString user_str;
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
     TRY(Core::System::unveil("/etc/passwd", "r"));
     TRY(Core::System::unveil("/etc/group", "r"));
     TRY(Core::System::unveil(nullptr, nullptr));
-    TRY(Core::System::pledge("stdio rpath", nullptr));
+    TRY(Core::System::pledge("stdio rpath"));
 
     Core::ArgsParser args_parser;
     args_parser.add_option(flag_print_uid, "Print UID", nullptr, 'u');
@@ -53,9 +53,9 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         if (auto user_id = user_str.to_uint(); user_id.has_value())
             account = TRY(Core::Account::from_uid(user_id.value(), Core::Account::Read::PasswdOnly));
         else
-            account = TRY(Core::Account::from_name(user_str.characters(), Core::Account::Read::PasswdOnly));
+            account = TRY(Core::Account::from_name(user_str, Core::Account::Read::PasswdOnly));
     } else {
-        account = Core::Account::self(Core::Account::Read::PasswdOnly);
+        account = TRY(Core::Account::self(Core::Account::Read::PasswdOnly));
     }
 
     return print_id_objects(account.value());

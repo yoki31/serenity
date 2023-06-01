@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2023, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,17 +8,25 @@
 #pragma once
 
 #include <AK/Concepts.h>
+#include <AK/DeprecatedString.h>
 #include <AK/Forward.h>
 #include <AK/NumericLimits.h>
 #include <AK/StdLibExtras.h>
 #include <AK/String.h>
+#include <AK/Try.h>
+#include <AK/TypeList.h>
+#include <AK/Variant.h>
+#include <LibCore/SharedCircularQueue.h>
+#include <LibCore/Socket.h>
+#include <LibIPC/Concepts.h>
+#include <LibIPC/File.h>
 #include <LibIPC/Forward.h>
 #include <LibIPC/Message.h>
 
 namespace IPC {
 
 template<typename T>
-inline bool decode(Decoder&, T&)
+inline ErrorOr<T> decode(Decoder&)
 {
     static_assert(DependentFalse<T>, "Base IPC::decoder() instantiated");
     VERIFY_NOT_REACHED();
@@ -25,101 +34,161 @@ inline bool decode(Decoder&, T&)
 
 class Decoder {
 public:
-    Decoder(InputMemoryStream& stream, int sockfd)
+    Decoder(Stream& stream, Core::LocalSocket& socket)
         : m_stream(stream)
-        , m_sockfd(sockfd)
+        , m_socket(socket)
     {
-    }
-
-    bool decode(bool&);
-    bool decode(u8&);
-    bool decode(u16&);
-    bool decode(u32&);
-    bool decode(u64&);
-    bool decode(i8&);
-    bool decode(i16&);
-    bool decode(i32&);
-    bool decode(i64&);
-    bool decode(float&);
-    bool decode(double&);
-    bool decode(String&);
-    bool decode(ByteBuffer&);
-    bool decode(URL&);
-    bool decode(Dictionary&);
-    bool decode(File&);
-    template<typename K, typename V>
-    bool decode(HashMap<K, V>& hashmap)
-    {
-        u32 size;
-        if (!decode(size) || size > NumericLimits<i32>::max())
-            return false;
-
-        for (size_t i = 0; i < size; ++i) {
-            K key;
-            if (!decode(key))
-                return false;
-
-            V value;
-            if (!decode(value))
-                return false;
-
-            hashmap.set(move(key), move(value));
-        }
-        return true;
-    }
-
-    template<Enum T>
-    bool decode(T& enum_value)
-    {
-        UnderlyingType<T> inner_value;
-        if (!decode(inner_value))
-            return false;
-
-        enum_value = T(inner_value);
-        return true;
     }
 
     template<typename T>
-    bool decode(T& value)
-    {
-        return IPC::decode(*this, value);
-    }
+    ErrorOr<T> decode();
 
     template<typename T>
-    bool decode(Vector<T>& vector)
+    ErrorOr<void> decode_into(T& value)
     {
-        u64 size;
-        if (!decode(size) || size > NumericLimits<i32>::max())
-            return false;
-        for (size_t i = 0; i < size; ++i) {
-            T value;
-            if (!decode(value))
-                return false;
-            vector.append(move(value));
-        }
-        return true;
+        value = TRY(m_stream.read_value<T>());
+        return {};
     }
 
-    template<typename T>
-    bool decode(Optional<T>& optional)
+    ErrorOr<void> decode_into(Bytes bytes)
     {
-        bool has_value;
-        if (!decode(has_value))
-            return false;
-        if (!has_value) {
-            optional = {};
-            return true;
-        }
-        T value;
-        if (!decode(value))
-            return false;
-        optional = move(value);
-        return true;
+        TRY(m_stream.read_until_filled(bytes));
+        return {};
     }
+
+    ErrorOr<size_t> decode_size();
+
+    Stream& stream() { return m_stream; }
+    Core::LocalSocket& socket() { return m_socket; }
 
 private:
-    InputMemoryStream& m_stream;
-    int m_sockfd { -1 };
+    Stream& m_stream;
+    Core::LocalSocket& m_socket;
 };
+
+template<Arithmetic T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    T value { 0 };
+    TRY(decoder.decode_into(value));
+    return value;
+}
+
+template<Enum T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    auto value = TRY(decoder.decode<UnderlyingType<T>>());
+    return static_cast<T>(value);
+}
+
+template<>
+ErrorOr<String> decode(Decoder&);
+
+template<>
+ErrorOr<DeprecatedString> decode(Decoder&);
+
+template<>
+ErrorOr<ByteBuffer> decode(Decoder&);
+
+template<>
+ErrorOr<JsonValue> decode(Decoder&);
+
+template<>
+ErrorOr<Duration> decode(Decoder&);
+
+template<>
+ErrorOr<UnixDateTime> decode(Decoder&);
+
+template<>
+ErrorOr<URL> decode(Decoder&);
+
+template<>
+ErrorOr<File> decode(Decoder&);
+
+template<>
+ErrorOr<Empty> decode(Decoder&);
+
+template<Concepts::Vector T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    T vector;
+
+    auto size = TRY(decoder.decode_size());
+    TRY(vector.try_ensure_capacity(size));
+
+    for (size_t i = 0; i < size; ++i) {
+        auto value = TRY(decoder.decode<typename T::ValueType>());
+        vector.template unchecked_append(move(value));
+    }
+
+    return vector;
+}
+
+template<Concepts::HashMap T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    T hashmap;
+
+    auto size = TRY(decoder.decode_size());
+    TRY(hashmap.try_ensure_capacity(size));
+
+    for (size_t i = 0; i < size; ++i) {
+        auto key = TRY(decoder.decode<typename T::KeyType>());
+        auto value = TRY(decoder.decode<typename T::ValueType>());
+        TRY(hashmap.try_set(move(key), move(value)));
+    }
+
+    return hashmap;
+}
+
+template<Concepts::SharedSingleProducerCircularQueue T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    auto anon_file = TRY(decoder.decode<IPC::File>());
+    return T::create(anon_file.take_fd());
+}
+
+template<Concepts::Optional T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    if (auto has_value = TRY(decoder.decode<bool>()); !has_value)
+        return T {};
+    return T { TRY(decoder.decode<typename T::ValueType>()) };
+}
+
+namespace Detail {
+
+template<Concepts::Variant T, size_t Index = 0>
+ErrorOr<T> decode_variant(Decoder& decoder, size_t index)
+{
+    using ElementList = TypeList<T>;
+
+    if constexpr (Index < ElementList::size) {
+        if (index == Index) {
+            using ElementType = typename ElementList::template Type<Index>;
+            return T { TRY(decoder.decode<ElementType>()) };
+        }
+
+        return decode_variant<T, Index + 1>(decoder, index);
+    } else {
+        VERIFY_NOT_REACHED();
+    }
+}
+
+}
+
+template<Concepts::Variant T>
+ErrorOr<T> decode(Decoder& decoder)
+{
+    auto index = TRY(decoder.decode<typename T::IndexType>());
+    return Detail::decode_variant<T>(decoder, index);
+}
+
+// This must be last so that it knows about the above specializations.
+template<typename T>
+ErrorOr<T> Decoder::decode()
+{
+    return IPC::decode<T>(*this);
+}
 
 }

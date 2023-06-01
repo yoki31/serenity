@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -22,9 +22,10 @@ class IndexDef;
 class Key;
 class KeyPartDef;
 class Relation;
+class Result;
+class ResultSet;
 class Row;
 class SchemaDef;
-class SQLResult;
 class Serializer;
 class TableDef;
 class TreeNode;

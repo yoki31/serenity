@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, Alex Major
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,23 +8,24 @@
 #include <LibCore/ArgsParser.h>
 #include <LibCore/DirIterator.h>
 #include <LibCore/File.h>
+#include <LibMain/Main.h>
 
 static bool s_set_variable = false;
 
-static String get_variable(StringView name)
+static DeprecatedString get_variable(StringView name)
 {
-    auto path = String::formatted("/proc/sys/{}", name);
-    auto file = Core::File::construct(path);
-    if (!file->open(Core::OpenMode::ReadOnly)) {
-        warnln("Failed to open {}: {}", path, file->error_string());
+    auto path = DeprecatedString::formatted("/sys/kernel/variables/{}", name);
+    auto file = Core::File::open(path, Core::File::OpenMode::Read);
+    if (file.is_error()) {
+        warnln("Failed to open {}: {}", path, file.error());
         return {};
     }
-    auto buffer = file->read_all();
-    if (file->error() < 0) {
-        warnln("Failed to read {}: {}", path, file->error_string());
+    auto buffer = file.value()->read_until_eof();
+    if (buffer.is_error()) {
+        warnln("Failed to read {}: {}", path, buffer.error());
         return {};
     }
-    return { (char const*)buffer.data(), buffer.size(), Chomp };
+    return { (char const*)buffer.value().data(), buffer.value().size(), Chomp };
 }
 
 static bool read_variable(StringView name)
@@ -40,21 +42,21 @@ static bool write_variable(StringView name, StringView value)
     auto old_value = get_variable(name);
     if (old_value.is_null())
         return false;
-    auto path = String::formatted("/proc/sys/{}", name);
-    auto file = Core::File::construct(path);
-    if (!file->open(Core::OpenMode::WriteOnly)) {
-        warnln("Failed to open {}: {}", path, file->error_string());
+    auto path = DeprecatedString::formatted("/sys/kernel/variables/{}", name);
+    auto file = Core::File::open(path, Core::File::OpenMode::Write);
+    if (file.is_error()) {
+        warnln("Failed to open {}: {}", path, file.error());
         return false;
     }
-    if (!file->write(value)) {
-        warnln("Failed to write {}: {}", path, file->error_string());
+    if (auto result = file.value()->write_until_depleted(value.bytes()); result.is_error()) {
+        warnln("Failed to write {}: {}", path, result.error());
         return false;
     }
     outln("{}: {} -> {}", name, old_value, value);
     return true;
 }
 
-static int handle_variables(Vector<String> const& variables)
+static int handle_variables(Vector<StringView> const& variables)
 {
     bool success = false;
     for (auto const& variable : variables) {
@@ -78,9 +80,9 @@ static int handle_variables(Vector<String> const& variables)
 
 static int handle_show_all()
 {
-    Core::DirIterator di("/proc/sys", Core::DirIterator::SkipDots);
+    Core::DirIterator di("/sys/kernel/variables", Core::DirIterator::SkipDots);
     if (di.has_error()) {
-        outln("DirIterator: {}", di.error_string());
+        outln("DirIterator: {}", di.error());
         return 1;
     }
 
@@ -92,20 +94,20 @@ static int handle_show_all()
     return success ? 0 : 1;
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
     bool show_all = false;
-    Vector<String> variables;
+    Vector<StringView> variables;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("Show or modify system-internal values. This requires root, and can crash your system.");
     args_parser.add_option(show_all, "Show all variables", "all", 'a');
     args_parser.add_option(s_set_variable, "Set variables", "write", 'w');
     args_parser.add_positional_argument(variables, "variable[=value]", "variables", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if (!show_all && variables.is_empty()) {
-        args_parser.print_usage(stdout, argv[0]);
+        args_parser.print_usage(stdout, arguments.strings[0]);
         return 1;
     }
 

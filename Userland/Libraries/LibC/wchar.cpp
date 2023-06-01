@@ -1,14 +1,17 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, Tim Schumacher <timschumi@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/Assertions.h>
 #include <AK/Format.h>
+#include <AK/ScopeGuard.h>
 #include <AK/UnicodeUtils.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 #include <wchar.h>
 
 static unsigned int mbstate_expected_bytes(mbstate_t* state)
@@ -45,7 +48,8 @@ static unsigned int mbstate_expected_bytes(mbstate_t* state)
 
 extern "C" {
 
-size_t wcslen(const wchar_t* str)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcslen.html
+size_t wcslen(wchar_t const* str)
 {
     size_t len = 0;
     while (*(str++))
@@ -53,7 +57,8 @@ size_t wcslen(const wchar_t* str)
     return len;
 }
 
-wchar_t* wcscpy(wchar_t* dest, const wchar_t* src)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcscpy.html
+wchar_t* wcscpy(wchar_t* dest, wchar_t const* src)
 {
     wchar_t* original_dest = dest;
     while ((*dest++ = *src++) != '\0')
@@ -61,7 +66,22 @@ wchar_t* wcscpy(wchar_t* dest, const wchar_t* src)
     return original_dest;
 }
 
-wchar_t* wcsncpy(wchar_t* dest, const wchar_t* src, size_t num)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsdup.html
+wchar_t* wcsdup(wchar_t const* str)
+{
+    size_t length = wcslen(str);
+    wchar_t* new_str = (wchar_t*)malloc(sizeof(wchar_t) * (length + 1));
+
+    if (!new_str) {
+        errno = ENOMEM;
+        return nullptr;
+    }
+
+    return wcscpy(new_str, str);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsncpy.html
+wchar_t* wcsncpy(wchar_t* dest, wchar_t const* src, size_t num)
 {
     wchar_t* original_dest = dest;
     while (((*dest++ = *src++) != '\0') && ((size_t)(dest - original_dest) < num))
@@ -69,7 +89,7 @@ wchar_t* wcsncpy(wchar_t* dest, const wchar_t* src, size_t num)
     return original_dest;
 }
 
-size_t wcslcpy(wchar_t* dest, const wchar_t* src, size_t n)
+size_t wcslcpy(wchar_t* dest, wchar_t const* src, size_t n)
 {
     size_t i;
     for (i = 0; i + 1 < n && src[i] != L'\0'; ++i)
@@ -81,28 +101,31 @@ size_t wcslcpy(wchar_t* dest, const wchar_t* src, size_t n)
     return i;
 }
 
-int wcscmp(const wchar_t* s1, const wchar_t* s2)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcscmp.html
+int wcscmp(wchar_t const* s1, wchar_t const* s2)
 {
     while (*s1 == *s2++)
         if (*s1++ == 0)
             return 0;
-    return *(const wchar_t*)s1 - *(const wchar_t*)--s2;
+    return *(wchar_t const*)s1 - *(wchar_t const*)--s2;
 }
 
-int wcsncmp(const wchar_t* s1, const wchar_t* s2, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsncmp.html
+int wcsncmp(wchar_t const* s1, wchar_t const* s2, size_t n)
 {
     if (!n)
         return 0;
     do {
         if (*s1 != *s2++)
-            return *(const wchar_t*)s1 - *(const wchar_t*)--s2;
+            return *(wchar_t const*)s1 - *(wchar_t const*)--s2;
         if (*s1++ == 0)
             break;
     } while (--n);
     return 0;
 }
 
-wchar_t* wcschr(const wchar_t* str, int c)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcschr.html
+wchar_t* wcschr(wchar_t const* str, int c)
 {
     wchar_t ch = c;
     for (;; ++str) {
@@ -113,7 +136,8 @@ wchar_t* wcschr(const wchar_t* str, int c)
     }
 }
 
-wchar_t* wcsrchr(const wchar_t* str, wchar_t wc)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsrchr.html
+wchar_t* wcsrchr(wchar_t const* str, wchar_t wc)
 {
     wchar_t* last = nullptr;
     wchar_t c;
@@ -124,7 +148,8 @@ wchar_t* wcsrchr(const wchar_t* str, wchar_t wc)
     return last;
 }
 
-wchar_t* wcscat(wchar_t* dest, const wchar_t* src)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcscat.html
+wchar_t* wcscat(wchar_t* dest, wchar_t const* src)
 {
     size_t dest_length = wcslen(dest);
     size_t i;
@@ -134,7 +159,8 @@ wchar_t* wcscat(wchar_t* dest, const wchar_t* src)
     return dest;
 }
 
-wchar_t* wcsncat(wchar_t* dest, const wchar_t* src, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsncat.html
+wchar_t* wcsncat(wchar_t* dest, wchar_t const* src, size_t n)
 {
     size_t dest_length = wcslen(dest);
     size_t i;
@@ -144,7 +170,8 @@ wchar_t* wcsncat(wchar_t* dest, const wchar_t* src, size_t n)
     return dest;
 }
 
-wchar_t* wcstok(wchar_t* str, const wchar_t* delim, wchar_t** ptr)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstok.html
+wchar_t* wcstok(wchar_t* str, wchar_t const* delim, wchar_t** ptr)
 {
     wchar_t* used_str = str;
     if (!used_str) {
@@ -189,18 +216,21 @@ wchar_t* wcstok(wchar_t* str, const wchar_t* delim, wchar_t** ptr)
     return &used_str[token_start];
 }
 
-long wcstol(const wchar_t*, wchar_t**, int)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstol.html
+long wcstol(wchar_t const*, wchar_t**, int)
 {
     dbgln("FIXME: Implement wcstol()");
     TODO();
 }
 
-long long wcstoll(const wchar_t*, wchar_t**, int)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstoll.html
+long long wcstoll(wchar_t const*, wchar_t**, int)
 {
     dbgln("FIXME: Implement wcstoll()");
     TODO();
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/btowc.html
 wint_t btowc(int c)
 {
     if (c == EOF) {
@@ -215,7 +245,8 @@ wint_t btowc(int c)
     return c;
 }
 
-size_t mbrtowc(wchar_t* pwc, const char* s, size_t n, mbstate_t* state)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mbrtowc.html
+size_t mbrtowc(wchar_t* pwc, char const* s, size_t n, mbstate_t* state)
 {
     static mbstate_t _anonymous_state = {};
 
@@ -300,7 +331,8 @@ size_t mbrtowc(wchar_t* pwc, const char* s, size_t n, mbstate_t* state)
     return consumed_bytes;
 }
 
-size_t mbrlen(const char* s, size_t n, mbstate_t* ps)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mbrlen.html
+size_t mbrlen(char const* s, size_t n, mbstate_t* ps)
 {
     static mbstate_t anonymous_state = {};
 
@@ -310,6 +342,7 @@ size_t mbrlen(const char* s, size_t n, mbstate_t* ps)
     return mbrtowc(nullptr, s, n, ps);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcrtomb.html
 size_t wcrtomb(char* s, wchar_t wc, mbstate_t*)
 {
     if (s == nullptr)
@@ -328,19 +361,22 @@ size_t wcrtomb(char* s, wchar_t wc, mbstate_t*)
     }
 }
 
-int wcscoll(const wchar_t* ws1, const wchar_t* ws2)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcscoll.html
+int wcscoll(wchar_t const* ws1, wchar_t const* ws2)
 {
     // TODO: Actually implement a sensible sort order for this,
     // because right now we are doing what LC_COLLATE=C would do.
     return wcscmp(ws1, ws2);
 }
 
-size_t wcsxfrm(wchar_t* dest, const wchar_t* src, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsxfrm.html
+size_t wcsxfrm(wchar_t* dest, wchar_t const* src, size_t n)
 {
     // TODO: This needs to be changed when wcscoll is not just doing wcscmp
     return wcslcpy(dest, src, n);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wctob.html
 int wctob(wint_t c)
 {
     if (c > 0x7f)
@@ -349,7 +385,8 @@ int wctob(wint_t c)
     return static_cast<unsigned char>(c);
 }
 
-int mbsinit(const mbstate_t* state)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mbsinit.html
+int mbsinit(mbstate_t const* state)
 {
     if (!state) {
         return 1;
@@ -362,9 +399,10 @@ int mbsinit(const mbstate_t* state)
     return 1;
 }
 
-wchar_t* wcspbrk(const wchar_t* wcs, const wchar_t* accept)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcspbrk.html
+wchar_t* wcspbrk(wchar_t const* wcs, wchar_t const* accept)
 {
-    for (const wchar_t* cur = accept; *cur; cur++) {
+    for (wchar_t const* cur = accept; *cur; cur++) {
         wchar_t* res = wcschr(wcs, *cur);
         if (res)
             return res;
@@ -373,7 +411,8 @@ wchar_t* wcspbrk(const wchar_t* wcs, const wchar_t* accept)
     return nullptr;
 }
 
-wchar_t* wcsstr(const wchar_t* haystack, const wchar_t* needle)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsstr.html
+wchar_t* wcsstr(wchar_t const* haystack, wchar_t const* needle)
 {
     size_t nlen = wcslen(needle);
 
@@ -393,7 +432,8 @@ wchar_t* wcsstr(const wchar_t* haystack, const wchar_t* needle)
     return nullptr;
 }
 
-wchar_t* wmemchr(const wchar_t* s, wchar_t c, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wmemchr.html
+wchar_t* wmemchr(wchar_t const* s, wchar_t c, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
         if (s[i] == c)
@@ -403,7 +443,8 @@ wchar_t* wmemchr(const wchar_t* s, wchar_t c, size_t n)
     return nullptr;
 }
 
-wchar_t* wmemcpy(wchar_t* dest, const wchar_t* src, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wmemcpy.html
+wchar_t* wmemcpy(wchar_t* dest, wchar_t const* src, size_t n)
 {
     for (size_t i = 0; i < n; i++)
         dest[i] = src[i];
@@ -411,6 +452,7 @@ wchar_t* wmemcpy(wchar_t* dest, const wchar_t* src, size_t n)
     return dest;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wmemset.html
 wchar_t* wmemset(wchar_t* wcs, wchar_t wc, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
@@ -420,7 +462,8 @@ wchar_t* wmemset(wchar_t* wcs, wchar_t wc, size_t n)
     return wcs;
 }
 
-wchar_t* wmemmove(wchar_t* dest, const wchar_t* src, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wmemmove.html
+wchar_t* wmemmove(wchar_t* dest, wchar_t const* src, size_t n)
 {
     if (dest > src) {
         for (size_t i = 1; i <= n; i++) {
@@ -435,42 +478,42 @@ wchar_t* wmemmove(wchar_t* dest, const wchar_t* src, size_t n)
     return dest;
 }
 
-unsigned long wcstoul(const wchar_t*, wchar_t**, int)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstoul.html
+unsigned long wcstoul(wchar_t const*, wchar_t**, int)
 {
     dbgln("TODO: Implement wcstoul()");
     TODO();
 }
 
-unsigned long long wcstoull(const wchar_t*, wchar_t**, int)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstoull.html
+unsigned long long wcstoull(wchar_t const*, wchar_t**, int)
 {
     dbgln("TODO: Implement wcstoull()");
     TODO();
 }
 
-float wcstof(const wchar_t*, wchar_t**)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstof.html
+float wcstof(wchar_t const*, wchar_t**)
 {
     dbgln("TODO: Implement wcstof()");
     TODO();
 }
 
-double wcstod(const wchar_t*, wchar_t**)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstod.html
+double wcstod(wchar_t const*, wchar_t**)
 {
     dbgln("TODO: Implement wcstod()");
     TODO();
 }
 
-long double wcstold(const wchar_t*, wchar_t**)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcstold.html
+long double wcstold(wchar_t const*, wchar_t**)
 {
     dbgln("TODO: Implement wcstold()");
     TODO();
 }
 
-int swprintf(wchar_t*, size_t, const wchar_t*, ...)
-{
-    dbgln("TODO: Implement swprintf()");
-    TODO();
-}
-
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcwidth.html
 int wcwidth(wchar_t wc)
 {
     if (wc == L'\0')
@@ -488,7 +531,25 @@ int wcwidth(wchar_t wc)
     return 1;
 }
 
-size_t wcsnrtombs(char* dest, const wchar_t** src, size_t nwc, size_t len, mbstate_t* ps)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcswidth.html
+int wcswidth(wchar_t const* pwcs, size_t n)
+{
+    int len = 0;
+
+    for (size_t i = 0; i < n && pwcs[i]; i++) {
+        int char_len = wcwidth(pwcs[i]);
+
+        if (char_len == -1)
+            return -1;
+
+        len += char_len;
+    }
+
+    return len;
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsnrtombs.html
+size_t wcsnrtombs(char* dest, wchar_t const** src, size_t nwc, size_t len, mbstate_t* ps)
 {
     static mbstate_t _anonymous_state = {};
 
@@ -534,7 +595,8 @@ size_t wcsnrtombs(char* dest, const wchar_t** src, size_t nwc, size_t len, mbsta
     return written;
 }
 
-size_t mbsnrtowcs(wchar_t* dst, const char** src, size_t nms, size_t len, mbstate_t* ps)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mbsnrtowcs.html
+size_t mbsnrtowcs(wchar_t* dst, char const** src, size_t nms, size_t len, mbstate_t* ps)
 {
     static mbstate_t _anonymous_state = {};
 
@@ -582,7 +644,8 @@ size_t mbsnrtowcs(wchar_t* dst, const char** src, size_t nms, size_t len, mbstat
     return written;
 }
 
-int wmemcmp(const wchar_t* s1, const wchar_t* s2, size_t n)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wmemcmp.html
+int wmemcmp(wchar_t const* s1, wchar_t const* s2, size_t n)
 {
     while (n-- > 0) {
         if (*s1++ != *s2++)
@@ -591,7 +654,8 @@ int wmemcmp(const wchar_t* s1, const wchar_t* s2, size_t n)
     return 0;
 }
 
-size_t wcsrtombs(char* dest, const wchar_t** src, size_t len, mbstate_t* ps)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsrtombs.html
+size_t wcsrtombs(char* dest, wchar_t const** src, size_t len, mbstate_t* ps)
 {
     static mbstate_t anonymous_state = {};
 
@@ -602,7 +666,8 @@ size_t wcsrtombs(char* dest, const wchar_t** src, size_t len, mbstate_t* ps)
     return wcsnrtombs(dest, src, SIZE_MAX, len, ps);
 }
 
-size_t mbsrtowcs(wchar_t* dst, const char** src, size_t len, mbstate_t* ps)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mbsrtowcs.html
+size_t mbsrtowcs(wchar_t* dst, char const** src, size_t len, mbstate_t* ps)
 {
     static mbstate_t anonymous_state = {};
 
@@ -611,5 +676,69 @@ size_t mbsrtowcs(wchar_t* dst, const char** src, size_t len, mbstate_t* ps)
 
     // SIZE_MAX is as close as we are going to get to "unlimited".
     return mbsnrtowcs(dst, src, SIZE_MAX, len, ps);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcscspn.html
+size_t wcscspn(wchar_t const* wcs, wchar_t const* reject)
+{
+    for (auto const* wc_pointer = wcs;;) {
+        auto c = *wc_pointer++;
+        wchar_t rc;
+        auto const* reject_copy = reject;
+        do {
+            if ((rc = *reject_copy++) == c)
+                return wc_pointer - 1 - wcs;
+        } while (rc != 0);
+    }
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsspn.html
+size_t wcsspn(wchar_t const* wcs, wchar_t const* accept)
+{
+    for (auto const* wc_pointer = wcs;;) {
+        auto c = *wc_pointer++;
+        wchar_t rc;
+        auto const* accept_copy = accept;
+        do {
+            if ((rc = *accept_copy++) != c)
+                return wc_pointer - 1 - wcs;
+        } while (rc != 0);
+    }
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/wcsftime.html
+size_t wcsftime(wchar_t* destination, size_t maxsize, wchar_t const* format, const struct tm* tm)
+{
+    // FIXME: Add actual wide char support for this.
+    char* ascii_format = static_cast<char*>(malloc(wcslen(format) + 1));
+    char* ascii_destination = static_cast<char*>(malloc(maxsize));
+
+    VERIFY(ascii_format && ascii_destination);
+
+    // These are copied by value because we will change the pointers without rolling them back.
+    ScopeGuard free_ascii = [ascii_format, ascii_destination] {
+        free(ascii_format);
+        free(ascii_destination);
+    };
+
+    char* ascii_format_copy = ascii_format;
+    do {
+        VERIFY(*format <= 0x7f);
+        *ascii_format_copy++ = static_cast<char>(*format);
+    } while (*format++ != L'\0');
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+    size_t ret = strftime(ascii_destination, maxsize, ascii_format, tm);
+#pragma GCC diagnostic pop
+
+    if (ret == 0)
+        return 0;
+
+    do {
+        *destination++ = *ascii_destination;
+    } while (*ascii_destination++ != '\0');
+
+    return ret;
 }
 }

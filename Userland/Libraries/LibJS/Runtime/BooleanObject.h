@@ -9,21 +9,22 @@
 #include <LibJS/Runtime/Object.h>
 
 namespace JS {
+
 class BooleanObject : public Object {
     JS_OBJECT(BooleanObject, Object);
 
 public:
-    static BooleanObject* create(GlobalObject&, bool);
+    static NonnullGCPtr<BooleanObject> create(Realm&, bool);
 
+    virtual ~BooleanObject() override = default;
+
+    bool boolean() const { return m_value; }
+
+protected:
     BooleanObject(bool, Object& prototype);
-    virtual ~BooleanObject() override;
-
-    virtual Value value_of() const override
-    {
-        return Value(m_value);
-    }
 
 private:
     bool m_value { false };
 };
+
 }

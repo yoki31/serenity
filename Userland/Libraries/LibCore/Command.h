@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
 #include <AK/LexicalPath.h>
 #include <AK/Optional.h>
 #include <AK/String.h>
@@ -13,8 +14,13 @@
 
 namespace Core {
 
-// If the executed command fails, the returned String will be in the null state.
-String command(const String& program, const Vector<String>& arguments, Optional<LexicalPath> chdir);
-String command(const String& command_string, Optional<LexicalPath> chdir);
+struct CommandResult {
+    int exit_code { 0 };
+    ByteBuffer output;
+    ByteBuffer error;
+};
+
+ErrorOr<CommandResult> command(DeprecatedString const& program, Vector<DeprecatedString> const& arguments, Optional<LexicalPath> chdir);
+ErrorOr<CommandResult> command(DeprecatedString const& command_string, Optional<LexicalPath> chdir);
 
 }

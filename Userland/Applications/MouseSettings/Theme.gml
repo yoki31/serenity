@@ -1,21 +1,18 @@
 @GUI::Frame {
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
-        margins: [10]
+        margins: [8]
     }
 
     @GUI::GroupBox {
-        title: "Available Cursor Themes"
-
+        title: "Available cursor themes"
         layout: @GUI::VerticalBoxLayout {
             margins: [6]
             spacing: 4
         }
 
         @GUI::Widget {
-            shrink_to_fit: true
-
+            preferred_height: "fit"
             layout: @GUI::HorizontalBoxLayout {
                 spacing: 8
             }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -15,11 +15,12 @@ class DisplayNamesPrototype final : public PrototypeObject<DisplayNamesPrototype
     JS_PROTOTYPE_OBJECT(DisplayNamesPrototype, DisplayNames, Intl.DisplayNames);
 
 public:
-    explicit DisplayNamesPrototype(GlobalObject&);
-    virtual void initialize(GlobalObject&) override;
+    virtual ThrowCompletionOr<void> initialize(Realm&) override;
     virtual ~DisplayNamesPrototype() override = default;
 
 private:
+    explicit DisplayNamesPrototype(Realm&);
+
     JS_DECLARE_NATIVE_FUNCTION(of);
     JS_DECLARE_NATIVE_FUNCTION(resolved_options);
 };

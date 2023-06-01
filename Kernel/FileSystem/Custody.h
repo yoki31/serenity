@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2022, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,33 +8,26 @@
 
 #include <AK/Error.h>
 #include <AK/IntrusiveList.h>
-#include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
-#include <AK/String.h>
 #include <Kernel/Forward.h>
-#include <Kernel/Heap/SlabAllocator.h>
 #include <Kernel/KString.h>
+#include <Kernel/Library/ListedRefCounted.h>
+#include <Kernel/Locking/SpinlockProtected.h>
 
 namespace Kernel {
 
-// FIXME: Custody needs some locking.
-
-class Custody : public RefCountedBase {
-    MAKE_SLAB_ALLOCATED(Custody)
+class Custody final : public ListedRefCounted<Custody, LockType::Spinlock> {
 public:
-    bool unref() const;
-
     static ErrorOr<NonnullRefPtr<Custody>> try_create(Custody* parent, StringView name, Inode&, int mount_flags);
 
     ~Custody();
 
-    Custody* parent() { return m_parent.ptr(); }
-    Custody const* parent() const { return m_parent.ptr(); }
+    RefPtr<Custody> parent() { return m_parent; }
+    RefPtr<Custody const> parent() const { return m_parent; }
     Inode& inode() { return *m_inode; }
     Inode const& inode() const { return *m_inode; }
     StringView name() const { return m_name->view(); }
     ErrorOr<NonnullOwnPtr<KString>> try_serialize_absolute_path() const;
-    String absolute_path() const;
 
     int mount_flags() const { return m_mount_flags; }
     bool is_readonly() const;
@@ -44,13 +37,14 @@ private:
 
     RefPtr<Custody> m_parent;
     NonnullOwnPtr<KString> m_name;
-    NonnullRefPtr<Inode> m_inode;
+    NonnullRefPtr<Inode> const m_inode;
     int m_mount_flags { 0 };
 
     mutable IntrusiveListNode<Custody> m_all_custodies_list_node;
 
 public:
     using AllCustodiesList = IntrusiveList<&Custody::m_all_custodies_list_node>;
+    static SpinlockProtected<Custody::AllCustodiesList, LockRank::None>& all_instances();
 };
 
 }

@@ -10,7 +10,7 @@
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/SinglyLinkedList.h>
-#include <AK/WeakPtr.h>
+#include <Kernel/Library/LockWeakPtr.h>
 #include <Kernel/Locking/MutexProtected.h>
 #include <Kernel/Net/IPv4Socket.h>
 
@@ -18,9 +18,12 @@ namespace Kernel {
 
 class TCPSocket final : public IPv4Socket {
 public:
-    static void for_each(Function<void(const TCPSocket&)>);
+    static void for_each(Function<void(TCPSocket const&)>);
+    static ErrorOr<void> try_for_each(Function<ErrorOr<void>(TCPSocket const&)>);
     static ErrorOr<NonnullRefPtr<TCPSocket>> try_create(int protocol, NonnullOwnPtr<DoubleBuffer> receive_buffer);
     virtual ~TCPSocket() override;
+
+    virtual bool unref() const override;
 
     enum class Direction {
         Unspecified,
@@ -85,7 +88,7 @@ public:
         case State::TimeWait:
             return "TimeWait"sv;
         default:
-            return "None";
+            return "None"sv;
         }
     }
 
@@ -137,13 +140,13 @@ public:
     u32 duplicate_acks() const { return m_duplicate_acks; }
 
     ErrorOr<void> send_ack(bool allow_duplicate = false);
-    ErrorOr<void> send_tcp_packet(u16 flags, const UserOrKernelBuffer* = nullptr, size_t = 0, RoutingDecision* = nullptr);
-    void receive_tcp_packet(const TCPPacket&, u16 size);
+    ErrorOr<void> send_tcp_packet(u16 flags, UserOrKernelBuffer const* = nullptr, size_t = 0, RoutingDecision* = nullptr);
+    void receive_tcp_packet(TCPPacket const&, u16 size);
 
     bool should_delay_next_ack() const;
 
     static MutexProtected<HashMap<IPv4SocketTuple, TCPSocket*>>& sockets_by_tuple();
-    static RefPtr<TCPSocket> from_tuple(const IPv4SocketTuple& tuple);
+    static RefPtr<TCPSocket> from_tuple(IPv4SocketTuple const& tuple);
 
     static MutexProtected<HashMap<IPv4SocketTuple, RefPtr<TCPSocket>>>& closing_sockets();
 
@@ -151,13 +154,13 @@ public:
     void set_originator(TCPSocket& originator) { m_originator = originator; }
     bool has_originator() { return !!m_originator; }
     void release_to_originator();
-    void release_for_accept(RefPtr<TCPSocket>);
+    void release_for_accept(NonnullRefPtr<TCPSocket>);
 
     void retransmit_packets();
 
     virtual ErrorOr<void> close() override;
 
-    virtual bool can_write(const OpenFileDescription&, size_t) const override;
+    virtual bool can_write(OpenFileDescription const&, u64) const override;
 
     static NetworkOrdered<u16> compute_tcp_checksum(IPv4Address const& source, IPv4Address const& destination, TCPPacket const&, u16 payload_size);
 
@@ -171,9 +174,10 @@ private:
     virtual void shut_down_for_writing() override;
 
     virtual ErrorOr<size_t> protocol_receive(ReadonlyBytes raw_ipv4_packet, UserOrKernelBuffer& buffer, size_t buffer_size, int flags) override;
-    virtual ErrorOr<size_t> protocol_send(const UserOrKernelBuffer&, size_t) override;
-    virtual ErrorOr<void> protocol_connect(OpenFileDescription&, ShouldBlock) override;
+    virtual ErrorOr<size_t> protocol_send(UserOrKernelBuffer const&, size_t) override;
+    virtual ErrorOr<void> protocol_connect(OpenFileDescription&) override;
     virtual ErrorOr<u16> protocol_allocate_local_port() override;
+    virtual ErrorOr<size_t> protocol_size(ReadonlyBytes raw_ipv4_packet) override;
     virtual bool protocol_is_disconnected() const override;
     virtual ErrorOr<void> protocol_bind() override;
     virtual ErrorOr<void> protocol_listen(bool did_allocate_port) override;
@@ -181,11 +185,11 @@ private:
     void enqueue_for_retransmit();
     void dequeue_for_retransmit();
 
-    WeakPtr<TCPSocket> m_originator;
+    LockWeakPtr<TCPSocket> m_originator;
     HashMap<IPv4SocketTuple, NonnullRefPtr<TCPSocket>> m_pending_release_for_accept;
     Direction m_direction { Direction::Unspecified };
     Error m_error { Error::None };
-    RefPtr<NetworkAdapter> m_adapter;
+    SpinlockProtected<RefPtr<NetworkAdapter>, LockRank::None> m_adapter;
     u32 m_sequence_number { 0 };
     u32 m_ack_number { 0 };
     State m_state { State::Closed };
@@ -198,7 +202,7 @@ private:
         u32 ack_number { 0 };
         RefPtr<PacketWithTimestamp> buffer;
         size_t ipv4_payload_offset;
-        WeakPtr<NetworkAdapter> adapter;
+        LockWeakPtr<NetworkAdapter> adapter;
         int tx_counter { 0 };
     };
 
@@ -212,11 +216,11 @@ private:
     u32 m_duplicate_acks { 0 };
 
     u32 m_last_ack_number_sent { 0 };
-    Time m_last_ack_sent_time;
+    UnixDateTime m_last_ack_sent_time;
 
     // FIXME: Make this configurable (sysctl)
     static constexpr u32 maximum_retransmits = 5;
-    Time m_last_retransmit_time;
+    UnixDateTime m_last_retransmit_time;
     u32 m_retransmit_attempts { 0 };
 
     // FIXME: Parse window size TCP option from the peer

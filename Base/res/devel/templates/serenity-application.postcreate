@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/Shell
 
 echo > $2/CMakeLists.txt <<-EOF
 # NOTE! Make sure to edit this file and remove the comments before submitting a
@@ -24,5 +24,6 @@ serenity_app($1 ICON filetype-executable)
 # You should place all the libraries that your application uses here. You can
 # identify each library by their include path. An exception is LibCore, which
 # is linked to all components by default.
-target_link_libraries($1 LibGUI LibGfx)
+target_link_libraries($1 LibGUI LibGfx LibMain)
+
 EOF

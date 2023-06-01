@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Luke Wilde <lukew@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,10 +9,6 @@
 
 InboxModel::InboxModel(Vector<InboxEntry> entries)
     : m_entries(move(entries))
-{
-}
-
-InboxModel::~InboxModel()
 {
 }
 
@@ -24,9 +21,9 @@ String InboxModel::column_name(int column_index) const
 {
     switch (column_index) {
     case Column::From:
-        return "From";
+        return "From"_short_string;
     case Subject:
-        return "Subject";
+        return "Subject"_short_string;
     default:
         VERIFY_NOT_REACHED();
     }

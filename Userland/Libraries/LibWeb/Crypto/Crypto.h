@@ -6,33 +6,35 @@
 
 #pragma once
 
-#include <LibJS/Runtime/Value.h>
-#include <LibWeb/Bindings/Wrappable.h>
-#include <LibWeb/DOM/ExceptionOr.h>
+#include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/Crypto/SubtleCrypto.h>
+#include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::Crypto {
 
-class Crypto : public Bindings::Wrappable
-    , public RefCounted<Crypto>
-    , public Weakable<Crypto> {
+class Crypto : public Bindings::PlatformObject {
+    WEB_PLATFORM_OBJECT(Crypto, Bindings::PlatformObject);
+
 public:
-    using WrapperType = Bindings::CryptoWrapper;
+    static WebIDL::ExceptionOr<JS::NonnullGCPtr<Crypto>> create(JS::Realm&);
 
-    static NonnullRefPtr<Crypto> create()
-    {
-        return adopt_ref(*new Crypto());
-    }
+    virtual ~Crypto() override;
 
-    DOM::ExceptionOr<JS::Value> get_random_values(JS::Value array) const;
+    JS::NonnullGCPtr<SubtleCrypto> subtle() const;
+
+    WebIDL::ExceptionOr<JS::Value> get_random_values(JS::Value array) const;
+    WebIDL::ExceptionOr<String> random_uuid() const;
+
+protected:
+    virtual JS::ThrowCompletionOr<void> initialize(JS::Realm&) override;
+    virtual void visit_edges(Cell::Visitor&) override;
 
 private:
-    Crypto() = default;
+    explicit Crypto(JS::Realm&);
+
+    JS::GCPtr<SubtleCrypto> m_subtle;
 };
 
-}
-
-namespace Web::Bindings {
-
-CryptoWrapper* wrap(JS::GlobalObject&, Crypto::Crypto&);
+ErrorOr<String> generate_random_uuid();
 
 }

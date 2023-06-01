@@ -38,6 +38,19 @@ describe("correct behavior", () => {
         });
     });
 
+    test("serialize BigInt with a toJSON property", () => {
+        Object.defineProperty(BigInt.prototype, "toJSON", {
+            configurable: true, // Allows deleting this property at the end of this test case.
+            get() {
+                "use strict";
+                return () => typeof this;
+            },
+        });
+
+        expect(JSON.stringify(1n)).toBe('"bigint"');
+        delete BigInt.prototype.toJSON;
+    });
+
     test("ignores non-enumerable properties", () => {
         let o = { foo: "bar" };
         Object.defineProperty(o, "baz", { value: "qux", enumerable: false });
@@ -49,6 +62,14 @@ describe("correct behavior", () => {
         let sym = Symbol("baz");
         o[sym] = "qux";
         expect(JSON.stringify(o)).toBe('{"foo":"bar"}');
+    });
+
+    test("escape surrogate codepoints in strings", () => {
+        expect(JSON.stringify("\ud83d\ude04")).toBe('"😄"');
+        expect(JSON.stringify("\ud83d")).toBe('"\\ud83d"');
+        expect(JSON.stringify("\ude04")).toBe('"\\ude04"');
+        expect(JSON.stringify("\ud83d\ud83d\ude04\ud83d\ude04\ude04")).toBe('"\\ud83d😄😄\\ude04"');
+        expect(JSON.stringify("\ude04\ud83d\ude04\ud83d\ude04\ud83d")).toBe('"\\ude04😄😄\\ud83d"');
     });
 });
 

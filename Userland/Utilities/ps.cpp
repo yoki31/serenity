@@ -1,24 +1,68 @@
 /*
  * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2023, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/QuickSort.h>
+#include <AK/String.h>
+#include <LibCore/Account.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/ProcessStatisticsReader.h>
 #include <LibCore/System.h>
 #include <LibMain/Main.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
+
+static ErrorOr<String> determine_tty_pseudo_name()
+{
+    auto tty_stat = TRY(Core::System::fstat(STDIN_FILENO));
+    int tty_device_major = major(tty_stat.st_rdev);
+    int tty_device_minor = minor(tty_stat.st_rdev);
+
+    if (tty_device_major == 201) {
+        return String::formatted("pts:{}", tty_device_minor);
+    }
+
+    if (tty_device_major == 4) {
+        return String::formatted("tty:{}", tty_device_minor);
+    }
+    return "n/a"_short_string;
+}
+
+template<typename Value, typename ParseValue>
+Core::ArgsParser::Option make_list_option(Vector<Value>& value_list, char const* help_string, char const* long_name, char short_name, char const* value_name, ParseValue parse_value)
+{
+    return Core::ArgsParser::Option {
+        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
+        .help_string = help_string,
+        .long_name = long_name,
+        .short_name = short_name,
+        .value_name = value_name,
+        .accept_value = [&](StringView s) {
+            auto parts = s.split_view_if([](char c) { return c == ',' || c == ' '; });
+            for (auto const& part : parts) {
+                auto value = parse_value(part);
+                if (!value.has_value())
+                    return false;
+                value_list.append(value.value());
+            }
+            return true;
+        },
+    };
+}
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    TRY(Core::System::pledge("stdio rpath tty", nullptr));
-    String this_tty = ttyname(STDIN_FILENO);
+    TRY(Core::System::pledge("stdio rpath tty"));
 
-    TRY(Core::System::pledge("stdio rpath", nullptr));
-    TRY(Core::System::unveil("/proc/all", "r"));
+    auto this_pseudo_tty_name = TRY(determine_tty_pseudo_name());
+
+    TRY(Core::System::pledge("stdio rpath"));
+    TRY(Core::System::unveil("/sys/kernel/processes", "r"));
     TRY(Core::System::unveil("/etc/passwd", "r"));
+    TRY(Core::System::unveil("/etc/group", "r"));
     TRY(Core::System::unveil(nullptr, nullptr));
 
     enum class Alignment {
@@ -34,74 +78,104 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     };
 
     bool every_process_flag = false;
+    bool every_terminal_process_flag = false;
     bool full_format_flag = false;
-    String pid_list;
+    bool provided_pid_list = false;
+    bool provided_quick_pid_list = false;
+    Vector<pid_t> pid_list;
+    Vector<uid_t> uid_list;
 
     Core::ArgsParser args_parser;
-    args_parser.add_option(every_process_flag, "Show every process", nullptr, 'e');
+    args_parser.add_option(every_terminal_process_flag, "Show every process associated with terminals", nullptr, 'a');
+    args_parser.add_option(every_process_flag, "Show every process", nullptr, 'A');
+    args_parser.add_option(every_process_flag, "Show every process (Equivalent to -A)", nullptr, 'e');
     args_parser.add_option(full_format_flag, "Full format", nullptr, 'f');
-    args_parser.add_option(pid_list, "A comma-separated list of PIDs. Only processes matching those PIDs will be selected", nullptr, 'q', "pid-list");
+    args_parser.add_option(make_list_option(pid_list, "Show processes with a matching PID. (Comma- or space-separated list)", nullptr, 'p', "pid-list", [&](StringView pid_string) {
+        provided_pid_list = true;
+        auto pid = pid_string.to_int();
+        if (!pid.has_value())
+            warnln("Could not parse '{}' as a PID.", pid_string);
+        return pid;
+    }));
+    args_parser.add_option(make_list_option(pid_list, "Show processes with a matching PID. (Comma- or space-separated list.) Processes will be listed in the order given.", nullptr, 'q', "pid-list", [&](StringView pid_string) {
+        provided_quick_pid_list = true;
+        auto pid = pid_string.to_int();
+        if (!pid.has_value())
+            warnln("Could not parse '{}' as a PID.", pid_string);
+        return pid;
+    }));
+    args_parser.add_option(make_list_option(uid_list, "Show processes with a matching user ID or login name. (Comma- or space-separated list.)", nullptr, 'u', "user-list", [&](StringView user_string) -> Optional<uid_t> {
+        if (auto uid = user_string.to_uint<uid_t>(); uid.has_value()) {
+            return uid.value();
+        }
+
+        auto maybe_account = Core::Account::from_name(user_string, Core::Account::Read::PasswdOnly);
+        if (maybe_account.is_error()) {
+            warnln("Could not find user '{}': {}", user_string, maybe_account.error());
+            return {};
+        }
+        return maybe_account.value().uid();
+    }));
     args_parser.parse(arguments);
+
+    if (provided_pid_list && provided_quick_pid_list) {
+        warnln("`-p` and `-q` cannot be specified together.");
+        return 1;
+    }
 
     Vector<Column> columns;
 
-    int uid_column = -1;
-    int pid_column = -1;
-    int ppid_column = -1;
-    int pgid_column = -1;
-    int sid_column = -1;
-    int state_column = -1;
-    int tty_column = -1;
-    int cmd_column = -1;
+    Optional<size_t> uid_column;
+    Optional<size_t> pid_column;
+    Optional<size_t> ppid_column;
+    Optional<size_t> pgid_column;
+    Optional<size_t> sid_column;
+    Optional<size_t> state_column;
+    Optional<size_t> tty_column;
+    Optional<size_t> cmd_column;
 
     auto add_column = [&](auto title, auto alignment) {
-        columns.append({ title, alignment, 0, {} });
+        columns.unchecked_append({ title, alignment, 0, {} });
         return columns.size() - 1;
     };
 
     if (full_format_flag) {
-        uid_column = add_column("UID", Alignment::Left);
-        pid_column = add_column("PID", Alignment::Right);
-        ppid_column = add_column("PPID", Alignment::Right);
-        pgid_column = add_column("PGID", Alignment::Right);
-        sid_column = add_column("SID", Alignment::Right);
-        state_column = add_column("STATE", Alignment::Left);
-        tty_column = add_column("TTY", Alignment::Left);
-        cmd_column = add_column("CMD", Alignment::Left);
+        TRY(columns.try_ensure_capacity(8));
+        uid_column = add_column("UID"_short_string, Alignment::Left);
+        pid_column = add_column("PID"_short_string, Alignment::Right);
+        ppid_column = add_column("PPID"_short_string, Alignment::Right);
+        pgid_column = add_column("PGID"_short_string, Alignment::Right);
+        sid_column = add_column("SID"_short_string, Alignment::Right);
+        state_column = add_column("STATE"_short_string, Alignment::Left);
+        tty_column = add_column("TTY"_short_string, Alignment::Left);
+        cmd_column = add_column("CMD"_short_string, Alignment::Left);
     } else {
-        pid_column = add_column("PID", Alignment::Right);
-        tty_column = add_column("TTY", Alignment::Left);
-        cmd_column = add_column("CMD", Alignment::Left);
+        TRY(columns.try_ensure_capacity(3));
+        pid_column = add_column("PID"_short_string, Alignment::Right);
+        tty_column = add_column("TTY"_short_string, Alignment::Left);
+        cmd_column = add_column("CMD"_short_string, Alignment::Left);
     }
 
-    auto all_processes = Core::ProcessStatisticsReader::get_all();
-    if (!all_processes.has_value())
-        return 1;
+    auto all_processes = TRY(Core::ProcessStatisticsReader::get_all());
 
-    auto& processes = all_processes.value().processes;
+    auto& processes = all_processes.processes;
 
+    // Filter
     if (!pid_list.is_empty()) {
-        every_process_flag = true;
-        auto string_parts = pid_list.split_view(',');
-        Vector<pid_t> selected_pids;
-        selected_pids.ensure_capacity(string_parts.size());
+        processes.remove_all_matching([&](auto& process) { return !pid_list.contains_slow(process.pid); });
+    } else if (!uid_list.is_empty()) {
+        processes.remove_all_matching([&](auto& process) { return !uid_list.contains_slow(process.uid); });
+    } else if (every_terminal_process_flag) {
+        processes.remove_all_matching([&](auto& process) { return process.tty.is_empty(); });
+    } else if (!every_process_flag) {
+        // Default is to show processes from the current TTY
+        processes.remove_all_matching([&](Core::ProcessStatistics& process) { return process.tty.view() != this_pseudo_tty_name.bytes_as_string_view(); });
+    }
 
-        for (size_t i = 0; i < string_parts.size(); i++) {
-            auto pid = string_parts[i].to_int();
-
-            if (!pid.has_value()) {
-                warnln("Invalid value for -q: {}", pid_list);
-                warnln("Could not parse '{}' as a PID.", string_parts[i]);
-                return 1;
-            }
-
-            selected_pids.append(pid.value());
-        }
-
-        processes.remove_all_matching([&](auto& a) { return selected_pids.find(a.pid) == selected_pids.end(); });
-
-        auto processes_sort_predicate = [&selected_pids](auto& a, auto& b) {
-            return selected_pids.find_first_index(a.pid).value() < selected_pids.find_first_index(b.pid).value();
+    // Sort
+    if (provided_quick_pid_list) {
+        auto processes_sort_predicate = [&pid_list](auto& a, auto& b) {
+            return pid_list.find_first_index(a.pid).value() < pid_list.find_first_index(b.pid).value();
         };
         quick_sort(processes, processes_sort_predicate);
     } else {
@@ -115,48 +189,38 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     TRY(header.try_ensure_capacity(columns.size()));
     for (auto& column : columns)
         header.unchecked_append(column.title);
-    rows.append(move(header));
+    rows.unchecked_append(move(header));
 
     for (auto const& process : processes) {
-        auto tty = process.tty;
-
-        if (!every_process_flag && tty != this_tty)
-            continue;
-
-        if (tty.starts_with("/dev/"))
-            tty = tty.characters() + 5;
-        else
-            tty = "n/a";
-
-        auto* state = process.threads.is_empty() ? "Zombie" : process.threads.first().state.characters();
-
         Vector<String> row;
         TRY(row.try_resize(columns.size()));
 
-        if (uid_column != -1)
-            row[uid_column] = process.username;
-        if (pid_column != -1)
-            row[pid_column] = String::number(process.pid);
-        if (ppid_column != -1)
-            row[ppid_column] = String::number(process.ppid);
-        if (pgid_column != -1)
-            row[pgid_column] = String::number(process.pgid);
-        if (sid_column != -1)
-            row[sid_column] = String::number(process.sid);
-        if (tty_column != -1)
-            row[tty_column] = tty;
-        if (state_column != -1)
-            row[state_column] = state;
-        if (cmd_column != -1)
-            row[cmd_column] = process.name;
+        if (uid_column.has_value())
+            row[*uid_column] = TRY(String::from_deprecated_string(process.username));
+        if (pid_column.has_value())
+            row[*pid_column] = TRY(String::number(process.pid));
+        if (ppid_column.has_value())
+            row[*ppid_column] = TRY(String::number(process.ppid));
+        if (pgid_column.has_value())
+            row[*pgid_column] = TRY(String::number(process.pgid));
+        if (sid_column.has_value())
+            row[*sid_column] = TRY(String::number(process.sid));
+        if (tty_column.has_value())
+            row[*tty_column] = process.tty == "" ? "n/a"_short_string : TRY(String::from_deprecated_string(process.tty));
+        if (state_column.has_value())
+            row[*state_column] = process.threads.is_empty()
+                ? "Zombie"_short_string
+                : TRY(String::from_deprecated_string(process.threads.first().state));
+        if (cmd_column.has_value())
+            row[*cmd_column] = TRY(String::from_deprecated_string(process.name));
 
-        TRY(rows.try_append(move(row)));
+        rows.unchecked_append(move(row));
     }
 
     for (size_t i = 0; i < columns.size(); i++) {
         auto& column = columns[i];
         for (auto& row : rows)
-            column.width = max(column.width, static_cast<int>(row[i].length()));
+            column.width = max(column.width, static_cast<int>(row[i].code_points().length()));
     }
 
     for (auto& row : rows) {

@@ -20,8 +20,11 @@ inline bool KBufferBuilder::check_expand(size_t size)
     size_t new_buffer_size = m_size + size;
     if (Checked<size_t>::addition_would_overflow(new_buffer_size, 1 * MiB))
         return false;
-    new_buffer_size = Memory::page_round_up(new_buffer_size + 1 * MiB);
-    auto new_buffer_or_error = KBuffer::try_create_with_size(new_buffer_size);
+    auto rounded_new_buffer_size_or_error = Memory::page_round_up(new_buffer_size + 1 * MiB);
+    if (rounded_new_buffer_size_or_error.is_error()) {
+        return false;
+    }
+    auto new_buffer_or_error = KBuffer::try_create_with_size("KBufferBuilder"sv, rounded_new_buffer_size_or_error.value());
     if (new_buffer_or_error.is_error())
         return false;
     auto new_buffer = new_buffer_or_error.release_value();
@@ -48,7 +51,7 @@ OwnPtr<KBuffer> KBufferBuilder::build()
 
 ErrorOr<KBufferBuilder> KBufferBuilder::try_create()
 {
-    auto buffer = TRY(KBuffer::try_create_with_size(4 * MiB, Memory::Region::Access::ReadWrite));
+    auto buffer = TRY(KBuffer::try_create_with_size("KBufferBuilder"sv, 4 * MiB, Memory::Region::Access::ReadWrite));
     return KBufferBuilder { move(buffer) };
 }
 
@@ -77,7 +80,7 @@ ErrorOr<void> KBufferBuilder::append(StringView str)
     return {};
 }
 
-ErrorOr<void> KBufferBuilder::append(const char* characters, int length)
+ErrorOr<void> KBufferBuilder::append(char const* characters, int length)
 {
     if (!length)
         return {};
@@ -102,23 +105,23 @@ ErrorOr<void> KBufferBuilder::append_escaped_for_json(StringView string)
     for (auto ch : string) {
         switch (ch) {
         case '\b':
-            TRY(append("\\b"));
+            TRY(append("\\b"sv));
             break;
         case '\n':
-            TRY(append("\\n"));
+            TRY(append("\\n"sv));
             break;
         case '\t':
-            TRY(append("\\t"));
+            TRY(append("\\t"sv));
             break;
         case '\"':
-            TRY(append("\\\""));
+            TRY(append("\\\""sv));
             break;
         case '\\':
-            TRY(append("\\\\"));
+            TRY(append("\\\\"sv));
             break;
         default:
             if (ch >= 0 && ch <= 0x1f)
-                TRY(append(String::formatted("\\u{:04x}", ch)));
+                TRY(appendff("\\u{:04x}", ch));
             else
                 TRY(append(ch));
         }

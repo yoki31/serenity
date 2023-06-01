@@ -7,22 +7,23 @@ on:
 jobs:
   build:
     name: Static Analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: always() && github.repository == 'SerenityOS/serenity' && github.ref == 'refs/heads/master'
     env:
-      # Latest scanner version is tracked on: https://sonarcloud.io/documentation/analysis/scan/sonarscanner/
-      SONAR_SCANNER_VERSION: 4.6.2.2472
+      # Latest scanner version is tracked on: https://docs.sonarcloud.io/advanced-setup/ci-based-analysis/sonarscanner-cli/
+      SONAR_SCANNER_VERSION: 4.7.0.2747
       SONAR_SERVER_URL: "https://sonarcloud.io"
-      SONAR_ANALYSIS_ARCH: i686
+      SONAR_ANALYSIS_ARCH: x86_64
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
 
         # Install JDK for sonar-scanner
       - name: Set up JDK 11
-        uses: actions/setup-java@v1
+        uses: actions/setup-java@v3
         with:
+          distribution: 'temurin'
           java-version: 11
 
       - name: Download and set up sonar-scanner
@@ -42,8 +43,6 @@ jobs:
           echo "sonar.projectVersion=${{ github.sha }}" >> ${{ github.workspace }}/sonar-project.properties
           echo "sonar.organization=serenityos" >> ${{ github.workspace }}/sonar-project.properties
           echo "sonar.cfamily.compile-commands=${{ github.workspace }}/Build/${{ env.SONAR_ANALYSIS_ARCH }}/compile_commands.json" >> ${{ github.workspace }}/sonar-project.properties
-          echo "sonar.cfamily.threads=2" >> ${{ github.workspace }}/sonar-project.properties
-          echo "sonar.cfamily.cache.enabled=false" >> ${{ github.workspace }}/sonar-project.properties
           echo "sonar.exclusions=Userland/Libraries/LibWasm/Parser/Parser.cpp" >> ${{ github.workspace }}/sonar-project.properties
           echo "sonar.host.url=${{ env.SONAR_SERVER_URL }}" >> ${{ github.workspace }}/sonar-project.properties
           echo "sonar.sources=AK,Build,Userland,Kernel,Meta" >> ${{ github.workspace }}/sonar-project.properties
@@ -54,19 +53,17 @@ jobs:
       # TODO: Is there someway to share these steps with the cmake.yml?
 
       - name: "Install Ubuntu dependencies"
-        # These packages are already part of the ubuntu-20.04 image:
-        # cmake clang-format-11 gcc-10 g++-10 libstdc++-10-dev libgmp-dev npm shellcheck
+        # These packages are already part of the ubuntu-22.04 image:
+        # cmake libgmp-dev npm shellcheck
         # Packages below aren't.
-        #
-        # We add the canonical-server/server-backports PPA to get updated QEMU releases without having to manage
-        #    yet another cache in github actions
         run: |
-          sudo add-apt-repository ppa:canonical-server/server-backports
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository 'deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-15 main'
           sudo apt-get update
-          sudo apt-get install libmpfr-dev libmpc-dev ninja-build unzip
+          sudo apt-get install -y clang-format-15 gcc-12 g++-12 libstdc++-12-dev libmpfr-dev libmpc-dev ninja-build unzip
 
       - name: Check versions
-        run: set +e; g++ --version; g++-10 --version; ninja --version;
+        run: set +e; g++ --version; g++-12 --version; ninja --version;
 
       - name: Prepare useful stamps
         id: stamps
@@ -77,30 +74,46 @@ jobs:
           # *and* as actual output variable, in this order.
           message("  set-output name=time::${current_date}")
           message("::set-output name=time::${current_date}")
-          message("  set-output name=libc_headers::${{ hashFiles('Userland/Libraries/LibC/**/*.h', 'Userland/Libraries/LibPthread/**/*.h', 'Toolchain/Patches/*[!llvm].patch', 'Toolchain/BuildIt.sh') }}")
-          message("::set-output name=libc_headers::${{ hashFiles('Userland/Libraries/LibC/**/*.h', 'Userland/Libraries/LibPthread/**/*.h', 'Toolchain/Patches/*[!llvm].patch', 'Toolchain/BuildIt.sh') }}")
+          message("  set-output name=libc_headers::${{ hashFiles('Userland/Libraries/LibC/**/*.h', 'Userland/Libraries/LibPthread/**/*.h', 'Toolchain/Patches/*.patch', 'Toolchain/Patches/gcc/*.patch', 'Toolchain/BuildIt.sh') }}")
+          message("::set-output name=libc_headers::${{ hashFiles('Userland/Libraries/LibC/**/*.h', 'Userland/Libraries/LibPthread/**/*.h', 'Toolchain/Patches/*.patch', 'Toolchain/Patches/gcc/*.patch', 'Toolchain/BuildIt.sh') }}")
 
       - name: Toolchain cache
-        # TODO: Change the version to the released version when https://github.com/actions/cache/pull/489 (or 571) is merged.
-        uses: actions/cache@03e00da99d75a2204924908e1cca7902cafce66b
-        env:
-          # This job should always read the cache, never populate it.
-          CACHE_SKIP_SAVE: true
-
+        # This job should always read the cache, never populate it.
+        uses: actions/cache/restore@v3
+        id: toolchain-cache
         with:
-          path: ${{ github.workspace }}/Toolchain/Cache/
+          path: ${{ github.workspace }}/Toolchain/Local/${{ env.SONAR_ANALYSIS_ARCH }}
           # This assumes that *ALL* LibC and LibPthread headers have an impact on the Toolchain.
           # This is wrong, and causes more Toolchain rebuilds than necessary.
           # However, we want to avoid false cache hits at all costs.
           key: ${{ runner.os }}-toolchain-${{ env.SONAR_ANALYSIS_ARCH }}-${{ steps.stamps.outputs.libc_headers }}
 
-      - name: Restore or regenerate Toolchain
-        run: TRY_USE_LOCAL_TOOLCHAIN=y ARCH="${{ env.SONAR_ANALYSIS_ARCH }}" ${{ github.workspace }}/Toolchain/BuildIt.sh
+      - name: Build toolchain
+        if: ${{ !steps.toolchain-cache.outputs.cache-hit }}
+        run: ARCH="${{ env.SONAR_ANALYSIS_ARCH }}" ${{ github.workspace }}/Toolchain/BuildIt.sh
 
       - name: Create build directory
         run: |
-          mkdir -p ${{ github.workspace }}/Build/${{ env.SONAR_ANALYSIS_ARCH }}/UCD
-          mkdir -p ${{ github.workspace }}/Build/${{ env.SONAR_ANALYSIS_ARCH }}/CLDR
+          mkdir -p ${{ github.workspace }}/Build/${{ env.SONAR_ANALYSIS_ARCH }}
+          mkdir -p ${{ github.workspace }}/Build/caches/TZDB
+          mkdir -p ${{ github.workspace }}/Build/caches/UCD
+          mkdir -p ${{ github.workspace }}/Build/caches/CLDR
+
+      - name: TimeZoneData cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ github.workspace }}/Build/caches/TZDB
+          key: TimeZoneData-${{ hashFiles('Meta/CMake/time_zone_data.cmake') }}
+      - name: UnicodeData cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ github.workspace }}/Build/caches/UCD
+          key: UnicodeData-${{ hashFiles('Meta/CMake/unicode_data.cmake') }}
+      - name: UnicodeLocale Cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ github.workspace }}/Build/caches/CLDR
+          key: UnicodeLocale-${{ hashFiles('Meta/CMake/locale_data.cmake') }}
 
       - name: Create build environment
         working-directory: ${{ github.workspace }}
@@ -108,8 +121,8 @@ jobs:
           cmake -S Meta/CMake/Superbuild -B Build/superbuild -GNinja \
             -DSERENITY_ARCH=${{ env.SONAR_ANALYSIS_ARCH }} \
             -DSERENITY_TOOLCHAIN=GNU \
-            -DCMAKE_C_COMPILER=gcc-10 \
-            -DCMAKE_CXX_COMPILER=g++-10 \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_CXX_COMPILER=g++-12 \
             -DENABLE_PCI_IDS_DOWNLOAD=OFF \
             -DENABLE_USB_IDS_DOWNLOAD=OFF
 

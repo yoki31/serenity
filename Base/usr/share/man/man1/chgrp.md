@@ -13,6 +13,10 @@ $ chgrp <name> <path>
 
 `chgrp` called as root or as file owner changes owning group of specified `path` to `gid` or `name`.
 
+## Options
+
+* `-h`, `--no-dereference`: Don't follow symlinks
+
 ## Examples
 
 ```sh
@@ -25,5 +29,5 @@ $ chgrp <name> <path>
 
 ## See also
 
-* [`chmod`(1)](chmod.md)
-* [`chown`(1)](chown.md)
+* [`chmod`(1)](help://man/1/chmod)
+* [`chown`(1)](help://man/1/chown)

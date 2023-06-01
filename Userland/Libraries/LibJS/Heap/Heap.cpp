@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2020-2022, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -17,22 +17,26 @@
 #include <LibJS/Interpreter.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/WeakContainer.h>
+#include <LibJS/SafeFunction.h>
 #include <setjmp.h>
 
-#ifdef __serenity__
+#ifdef AK_OS_SERENITY
 #    include <serenity.h>
 #endif
 
 namespace JS {
 
-#ifdef __serenity__
+#ifdef AK_OS_SERENITY
 static int gc_perf_string_id;
 #endif
+
+// NOTE: We keep a per-thread list of custom ranges. This hinges on the assumption that there is one JS VM per thread.
+static __thread HashMap<FlatPtr*, size_t>* s_custom_ranges_for_conservative_scan = nullptr;
 
 Heap::Heap(VM& vm)
     : m_vm(vm)
 {
-#ifdef __serenity__
+#ifdef AK_OS_SERENITY
     auto gc_signpost_string = "Garbage collection"sv;
     gc_perf_string_id = perf_register_string(gc_signpost_string.characters_without_null_termination(), gc_signpost_string.length());
 #endif
@@ -43,6 +47,7 @@ Heap::Heap(VM& vm)
     static_assert(HeapBlock::min_possible_cell_size <= 24, "Heap Cell tracking uses too much data!");
     m_allocators.append(make<CellAllocator>(32));
     m_allocators.append(make<CellAllocator>(64));
+    m_allocators.append(make<CellAllocator>(96));
     m_allocators.append(make<CellAllocator>(128));
     m_allocators.append(make<CellAllocator>(256));
     m_allocators.append(make<CellAllocator>(512));
@@ -53,6 +58,7 @@ Heap::Heap(VM& vm)
 Heap::~Heap()
 {
     vm().string_cache().clear();
+    vm().deprecated_string_cache().clear();
     collect_garbage(CollectionType::CollectEverything);
 }
 
@@ -86,12 +92,15 @@ void Heap::collect_garbage(CollectionType collection_type, bool print_report)
     VERIFY(!m_collecting_garbage);
     TemporaryChange change(m_collecting_garbage, true);
 
-#ifdef __serenity__
+#ifdef AK_OS_SERENITY
     static size_t global_gc_counter = 0;
     perf_event(PERF_EVENT_SIGNPOST, gc_perf_string_id, global_gc_counter++);
 #endif
 
-    auto collection_measurement_timer = Core::ElapsedTimer::start_new();
+    Core::ElapsedTimer collection_measurement_timer;
+    if (print_report)
+        collection_measurement_timer.start();
+
     if (collection_type == CollectionType::CollectGarbage) {
         if (m_gc_deferrals) {
             m_should_gc_when_deferral_ends = true;
@@ -101,6 +110,7 @@ void Heap::collect_garbage(CollectionType collection_type, bool print_report)
         gather_roots(roots);
         mark_live_cells(roots);
     }
+    finalize_unmarked_cells();
     sweep_dead_cells(print_report, collection_measurement_timer);
 }
 
@@ -112,12 +122,8 @@ void Heap::gather_roots(HashTable<Cell*>& roots)
     for (auto& handle : m_handles)
         roots.set(handle.cell());
 
-    for (auto& list : m_marked_value_lists) {
-        for (auto& value : list.values()) {
-            if (value.is_cell())
-                roots.set(&value.as_cell());
-        }
-    }
+    for (auto& vector : m_marked_vectors)
+        vector.gather_roots(roots);
 
     if constexpr (HEAP_DEBUG) {
         dbgln("gather_roots:");
@@ -139,15 +145,42 @@ __attribute__((no_sanitize("address"))) void Heap::gather_conservative_roots(Has
 
     auto* raw_jmp_buf = reinterpret_cast<FlatPtr const*>(buf);
 
-    for (size_t i = 0; i < ((size_t)sizeof(buf)) / sizeof(FlatPtr); i += sizeof(FlatPtr))
-        possible_pointers.set(raw_jmp_buf[i]);
+    auto add_possible_value = [&](FlatPtr data) {
+        if constexpr (sizeof(FlatPtr*) == sizeof(Value)) {
+            // Because Value stores pointers in non-canonical form we have to check if the top bytes
+            // match any pointer-backed tag, in that case we have to extract the pointer to its
+            // canonical form and add that as a possible pointer.
+            if ((data & SHIFTED_IS_CELL_PATTERN) == SHIFTED_IS_CELL_PATTERN)
+                possible_pointers.set(Value::extract_pointer_bits(data));
+            else
+                possible_pointers.set(data);
+        } else {
+            static_assert((sizeof(Value) % sizeof(FlatPtr*)) == 0);
+            // In the 32-bit case we will look at the top and bottom part of Value separately we just
+            // add both the upper and lower bytes as possible pointers.
+            possible_pointers.set(data);
+        }
+    };
+
+    for (size_t i = 0; i < ((size_t)sizeof(buf)) / sizeof(FlatPtr); ++i)
+        add_possible_value(raw_jmp_buf[i]);
 
     auto stack_reference = bit_cast<FlatPtr>(&dummy);
     auto& stack_info = m_vm.stack_info();
 
     for (FlatPtr stack_address = stack_reference; stack_address < stack_info.top(); stack_address += sizeof(FlatPtr)) {
         auto data = *reinterpret_cast<FlatPtr*>(stack_address);
-        possible_pointers.set(data);
+        add_possible_value(data);
+    }
+
+    // NOTE: If we have any custom ranges registered, scan those as well.
+    //       This is where JS::SafeFunction closures get marked.
+    if (s_custom_ranges_for_conservative_scan) {
+        for (auto& custom_range : *s_custom_ranges_for_conservative_scan) {
+            for (size_t i = 0; i < (custom_range.value / sizeof(FlatPtr)); ++i) {
+                add_possible_value(custom_range.key[i]);
+            }
+        }
     }
 
     HashTable<HeapBlock*> all_live_heap_blocks;
@@ -159,15 +192,15 @@ __attribute__((no_sanitize("address"))) void Heap::gather_conservative_roots(Has
     for (auto possible_pointer : possible_pointers) {
         if (!possible_pointer)
             continue;
-        dbgln_if(HEAP_DEBUG, "  ? {}", (const void*)possible_pointer);
-        auto* possible_heap_block = HeapBlock::from_cell(reinterpret_cast<const Cell*>(possible_pointer));
+        dbgln_if(HEAP_DEBUG, "  ? {}", (void const*)possible_pointer);
+        auto* possible_heap_block = HeapBlock::from_cell(reinterpret_cast<Cell const*>(possible_pointer));
         if (all_live_heap_blocks.contains(possible_heap_block)) {
             if (auto* cell = possible_heap_block->cell_from_possible_pointer(possible_pointer)) {
                 if (cell->state() == Cell::State::Live) {
-                    dbgln_if(HEAP_DEBUG, "  ?-> {}", (const void*)cell);
+                    dbgln_if(HEAP_DEBUG, "  ?-> {}", (void const*)cell);
                     roots.set(cell);
                 } else {
-                    dbgln_if(HEAP_DEBUG, "  #-> {}", (const void*)cell);
+                    dbgln_if(HEAP_DEBUG, "  #-> {}", (void const*)cell);
                 }
             }
         }
@@ -176,34 +209,40 @@ __attribute__((no_sanitize("address"))) void Heap::gather_conservative_roots(Has
 
 class MarkingVisitor final : public Cell::Visitor {
 public:
-    MarkingVisitor() { }
+    explicit MarkingVisitor(HashTable<Cell*> const& roots)
+    {
+        for (auto* root : roots) {
+            visit(root);
+        }
+    }
 
-    virtual void visit_impl(Cell& cell)
+    virtual void visit_impl(Cell& cell) override
     {
         if (cell.is_marked())
             return;
         dbgln_if(HEAP_DEBUG, "  ! {}", &cell);
 
-#ifdef JS_TRACK_ZOMBIE_CELLS
-        if (cell.state() == Cell::State::Zombie) {
-            dbgln("BUG! Marking a zombie cell, {} @ {:p}", cell.class_name(), &cell);
-            cell.vm().dump_backtrace();
-            VERIFY_NOT_REACHED();
-        }
-#endif
-
         cell.set_marked(true);
-        cell.visit_edges(*this);
+        m_work_queue.append(cell);
     }
+
+    void mark_all_live_cells()
+    {
+        while (!m_work_queue.is_empty()) {
+            m_work_queue.take_last().visit_edges(*this);
+        }
+    }
+
+private:
+    Vector<Cell&> m_work_queue;
 };
 
-void Heap::mark_live_cells(const HashTable<Cell*>& roots)
+void Heap::mark_live_cells(HashTable<Cell*> const& roots)
 {
     dbgln_if(HEAP_DEBUG, "mark_live_cells:");
 
-    MarkingVisitor visitor;
-    for (auto* root : roots)
-        visitor.visit(root);
+    MarkingVisitor visitor(roots);
+    visitor.mark_all_live_cells();
 
     for (auto& inverse_root : m_uprooted_cells)
         inverse_root->set_marked(false);
@@ -211,7 +250,25 @@ void Heap::mark_live_cells(const HashTable<Cell*>& roots)
     m_uprooted_cells.clear();
 }
 
-void Heap::sweep_dead_cells(bool print_report, const Core::ElapsedTimer& measurement_timer)
+bool Heap::cell_must_survive_garbage_collection(Cell const& cell)
+{
+    if (!cell.overrides_must_survive_garbage_collection({}))
+        return false;
+    return cell.must_survive_garbage_collection();
+}
+
+void Heap::finalize_unmarked_cells()
+{
+    for_each_block([&](auto& block) {
+        block.template for_each_cell_in_state<Cell::State::Live>([](Cell* cell) {
+            if (!cell->is_marked() && !cell_must_survive_garbage_collection(*cell))
+                cell->finalize();
+        });
+        return IterationDecision::Continue;
+    });
+}
+
+void Heap::sweep_dead_cells(bool print_report, Core::ElapsedTimer const& measurement_timer)
 {
     dbgln_if(HEAP_DEBUG, "sweep_dead_cells:");
     Vector<HeapBlock*, 32> empty_blocks;
@@ -226,18 +283,9 @@ void Heap::sweep_dead_cells(bool print_report, const Core::ElapsedTimer& measure
         bool block_has_live_cells = false;
         bool block_was_full = block.is_full();
         block.template for_each_cell_in_state<Cell::State::Live>([&](Cell* cell) {
-            if (!cell->is_marked()) {
+            if (!cell->is_marked() && !cell_must_survive_garbage_collection(*cell)) {
                 dbgln_if(HEAP_DEBUG, "  ~ {}", cell);
-#ifdef JS_TRACK_ZOMBIE_CELLS
-                if (m_zombify_dead_cells) {
-                    cell->set_state(Cell::State::Zombie);
-                    cell->did_become_zombie();
-                } else {
-#endif
-                    block.deallocate(cell);
-#ifdef JS_TRACK_ZOMBIE_CELLS
-                }
-#endif
+                block.deallocate(cell);
                 ++collected_cells;
                 collected_cell_bytes += block.cell_size();
             } else {
@@ -274,9 +322,8 @@ void Heap::sweep_dead_cells(bool print_report, const Core::ElapsedTimer& measure
         });
     }
 
-    int time_spent = measurement_timer.elapsed();
-
     if (print_report) {
+        Duration const time_spent = measurement_timer.elapsed_time();
         size_t live_block_count = 0;
         for_each_block([&](auto&) {
             ++live_block_count;
@@ -285,7 +332,7 @@ void Heap::sweep_dead_cells(bool print_report, const Core::ElapsedTimer& measure
 
         dbgln("Garbage collection report");
         dbgln("=============================================");
-        dbgln("     Time spent: {} ms", time_spent);
+        dbgln("     Time spent: {} ms", time_spent.to_milliseconds());
         dbgln("     Live cells: {} ({} bytes)", live_cells, live_cell_bytes);
         dbgln("Collected cells: {} ({} bytes)", collected_cells, collected_cell_bytes);
         dbgln("    Live blocks: {} ({} bytes)", live_block_count, live_block_count * HeapBlock::block_size);
@@ -306,16 +353,16 @@ void Heap::did_destroy_handle(Badge<HandleImpl>, HandleImpl& impl)
     m_handles.remove(impl);
 }
 
-void Heap::did_create_marked_value_list(Badge<MarkedValueList>, MarkedValueList& list)
+void Heap::did_create_marked_vector(Badge<MarkedVectorBase>, MarkedVectorBase& vector)
 {
-    VERIFY(!m_marked_value_lists.contains(list));
-    m_marked_value_lists.append(list);
+    VERIFY(!m_marked_vectors.contains(vector));
+    m_marked_vectors.append(vector);
 }
 
-void Heap::did_destroy_marked_value_list(Badge<MarkedValueList>, MarkedValueList& list)
+void Heap::did_destroy_marked_vector(Badge<MarkedVectorBase>, MarkedVectorBase& vector)
 {
-    VERIFY(m_marked_value_lists.contains(list));
-    m_marked_value_lists.remove(list);
+    VERIFY(m_marked_vectors.contains(vector));
+    m_marked_vectors.remove(vector);
 }
 
 void Heap::did_create_weak_container(Badge<WeakContainer>, WeakContainer& set)
@@ -350,6 +397,23 @@ void Heap::undefer_gc(Badge<DeferGC>)
 void Heap::uproot_cell(Cell* cell)
 {
     m_uprooted_cells.append(cell);
+}
+
+void register_safe_function_closure(void* base, size_t size)
+{
+    if (!s_custom_ranges_for_conservative_scan) {
+        // FIXME: This per-thread HashMap is currently leaked on thread exit.
+        s_custom_ranges_for_conservative_scan = new HashMap<FlatPtr*, size_t>;
+    }
+    auto result = s_custom_ranges_for_conservative_scan->set(reinterpret_cast<FlatPtr*>(base), size);
+    VERIFY(result == AK::HashSetResult::InsertedNewEntry);
+}
+
+void unregister_safe_function_closure(void* base, size_t)
+{
+    VERIFY(s_custom_ranges_for_conservative_scan);
+    bool did_remove = s_custom_ranges_for_conservative_scan->remove(reinterpret_cast<FlatPtr*>(base));
+    VERIFY(did_remove);
 }
 
 }

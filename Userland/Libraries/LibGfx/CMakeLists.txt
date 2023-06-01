@@ -2,31 +2,58 @@ set(SOURCES
     AffineTransform.cpp
     AntiAliasingPainter.cpp
     Bitmap.cpp
-    BitmapFont.cpp
-    BMPLoader.cpp
-    BMPWriter.cpp
-    CharacterBitmap.cpp
+    BitmapMixer.cpp
     ClassicStylePainter.cpp
     ClassicWindowTheme.cpp
     Color.cpp
     CursorParams.cpp
-    DDSLoader.cpp
-    DisjointRectSet.cpp
-    Emoji.cpp
+    DeltaE.cpp
+    EdgeFlagPathRasterizer.cpp
+    Filters/ColorBlindnessFilter.cpp
     Filters/FastBoxBlurFilter.cpp
-    FontDatabase.cpp
-    GIFLoader.cpp
-    ICOLoader.cpp
-    ImageDecoder.cpp
-    JPGLoader.cpp
+    Filters/LumaFilter.cpp
+    Filters/StackBlurFilter.cpp
+    Font/BitmapFont.cpp
+    Font/Emoji.cpp
+    Font/Font.cpp
+    Font/FontDatabase.cpp
+    Font/OpenType/Cmap.cpp
+    Font/OpenType/Font.cpp
+    Font/OpenType/Glyf.cpp
+    Font/OpenType/Hinting/Opcodes.cpp
+    Font/PathRasterizer.cpp
+    Font/ScaledFont.cpp
+    Font/Typeface.cpp
+    Font/WOFF/Font.cpp
+    GradientPainting.cpp
+    ICC/BinaryWriter.cpp
+    ICC/Profile.cpp
+    ICC/Tags.cpp
+    ICC/TagTypes.cpp
+    ICC/WellKnownProfiles.cpp
+    ImageFormats/BMPLoader.cpp
+    ImageFormats/BMPWriter.cpp
+    ImageFormats/BooleanDecoder.cpp
+    ImageFormats/DDSLoader.cpp
+    ImageFormats/GIFLoader.cpp
+    ImageFormats/ICOLoader.cpp
+    ImageFormats/ImageDecoder.cpp
+    ImageFormats/JPEGLoader.cpp
+    ImageFormats/PBMLoader.cpp
+    ImageFormats/PGMLoader.cpp
+    ImageFormats/PNGLoader.cpp
+    ImageFormats/PNGWriter.cpp
+    ImageFormats/PortableFormatWriter.cpp
+    ImageFormats/PPMLoader.cpp
+    ImageFormats/QOILoader.cpp
+    ImageFormats/QOIWriter.cpp
+    ImageFormats/TGALoader.cpp
+    ImageFormats/WebPLoader.cpp
+    ImageFormats/WebPLoaderLossless.cpp
+    ImageFormats/WebPLoaderLossy.cpp
     Painter.cpp
     Palette.cpp
     Path.cpp
-    PBMLoader.cpp
-    PGMLoader.cpp
-    PNGLoader.cpp
-    PNGWriter.cpp
-    PPMLoader.cpp
     Point.cpp
     Rect.cpp
     ShareableBitmap.cpp
@@ -36,12 +63,8 @@ set(SOURCES
     TextDirection.cpp
     TextLayout.cpp
     Triangle.cpp
-    TrueTypeFont/Font.cpp
-    TrueTypeFont/Glyf.cpp
-    TrueTypeFont/Cmap.cpp
-    Typeface.cpp
     WindowTheme.cpp
 )
 
 serenity_lib(LibGfx gfx)
-target_link_libraries(LibGfx LibM LibCompress LibCore LibTextCodec)
+target_link_libraries(LibGfx PRIVATE LibCompress LibCore LibCrypto LibFileSystem LibTextCodec LibIPC LibUnicode)

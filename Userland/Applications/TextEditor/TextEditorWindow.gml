@@ -1,7 +1,6 @@
 @GUI::Widget {
     name: "main"
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
         spacing: 2
     }
@@ -15,6 +14,8 @@
     }
 
     @GUI::HorizontalSplitter {
+        opportunistic_resizee: "First"
+
         @GUI::TextEditor {
             name: "editor"
         }
@@ -22,9 +23,7 @@
         @GUI::Widget {
             name: "web_view_container"
             visible: false
-
-            layout: @GUI::VerticalBoxLayout {
-            }
+            layout: @GUI::VerticalBoxLayout {}
         }
     }
 
@@ -33,7 +32,6 @@
         visible: false
         fill_with_background_color: true
         fixed_height: 56
-
         layout: @GUI::VerticalBoxLayout {
             spacing: 2
             margins: [3]
@@ -43,7 +41,6 @@
             name: "find_widget"
             fill_with_background_color: true
             fixed_height: 22
-
             layout: @GUI::HorizontalBoxLayout {
                 spacing: 4
             }
@@ -79,7 +76,6 @@
             name: "replace_widget"
             fill_with_background_color: true
             fixed_height: 22
-
             layout: @GUI::HorizontalBoxLayout {
                 spacing: 4
             }
@@ -110,6 +106,6 @@
 
     @GUI::Statusbar {
         name: "statusbar"
-        label_count: 2
+        segment_count: 3
     }
 }

@@ -49,7 +49,7 @@ void SortingProxyModel::model_did_update(unsigned flags)
     update_sort(flags);
 }
 
-bool SortingProxyModel::accepts_drag(ModelIndex const& proxy_index, Vector<String> const& mime_types) const
+bool SortingProxyModel::accepts_drag(ModelIndex const& proxy_index, Vector<DeprecatedString> const& mime_types) const
 {
     return source().accepts_drag(map_to_source(proxy_index), mime_types);
 }
@@ -163,6 +163,8 @@ ModelIndex SortingProxyModel::parent_index(ModelIndex const& proxy_index) const
 
 void SortingProxyModel::sort_mapping(Mapping& mapping, int column, SortOrder sort_order)
 {
+    auto old_source_rows = mapping.source_rows;
+
     int row_count = source().row_count(mapping.source_parent);
     mapping.source_rows.resize(row_count);
     mapping.proxy_rows.resize(row_count);
@@ -174,8 +176,6 @@ void SortingProxyModel::sort_mapping(Mapping& mapping, int column, SortOrder sor
         }
         return;
     }
-
-    auto old_source_rows = mapping.source_rows;
 
     for (int i = 0; i < row_count; ++i)
         mapping.source_rows[i] = i;
@@ -190,18 +190,6 @@ void SortingProxyModel::sort_mapping(Mapping& mapping, int column, SortOrder sor
 
     // FIXME: I really feel like this should be done at the view layer somehow.
     for_each_view([&](AbstractView& view) {
-        // Update the view's cursor.
-        auto cursor = view.cursor_index();
-        if (cursor.is_valid() && cursor.parent() == mapping.source_parent) {
-            for (size_t i = 0; i < mapping.source_rows.size(); ++i) {
-                if (mapping.source_rows[i] == view.cursor_index().row()) {
-                    auto new_source_index = this->index(i, view.cursor_index().column(), mapping.source_parent);
-                    view.set_cursor(new_source_index, AbstractView::SelectionUpdate::None, false);
-                    break;
-                }
-            }
-        }
-
         // Update the view's selection.
         view.selection().change_from_model({}, [&](ModelSelection& selection) {
             Vector<ModelIndex> selected_indices_in_source;
@@ -222,6 +210,10 @@ void SortingProxyModel::sort_mapping(Mapping& mapping, int column, SortOrder sor
                     if (mapping.source_rows[i] == index.row()) {
                         auto new_source_index = this->index(i, index.column(), mapping.source_parent);
                         selection.add(new_source_index);
+                        // Update the view's cursor.
+                        auto cursor = view.cursor_index();
+                        if (cursor.is_valid() && cursor.parent() == mapping.source_parent)
+                            view.set_cursor(new_source_index, AbstractView::SelectionUpdate::None, false);
                         break;
                     }
                 }

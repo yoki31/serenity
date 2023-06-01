@@ -7,7 +7,6 @@
 #pragma once
 
 #include <AK/Time.h>
-#include <sys/time.h>
 
 namespace Core {
 
@@ -23,17 +22,22 @@ public:
     bool is_valid() const { return m_valid; }
     void start();
     void reset();
-    int elapsed() const;
-    Time elapsed_time() const;
 
-    const struct timeval& origin_time() const { return m_origin_time; }
+    i64 elapsed_milliseconds() const;
+    Duration elapsed_time() const;
+
+    // FIXME: Move callers to elapsed_milliseconds(), remove this.
+    i64 elapsed() const // milliseconds
+    {
+        return elapsed_milliseconds();
+    }
+
+    MonotonicTime const& origin_time() const { return m_origin_time; }
 
 private:
+    MonotonicTime m_origin_time { MonotonicTime::now() };
     bool m_precise { false };
     bool m_valid { false };
-    struct timeval m_origin_time {
-        0, 0
-    };
 };
 
 }

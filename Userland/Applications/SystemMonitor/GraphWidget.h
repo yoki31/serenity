@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,10 +11,12 @@
 #include <LibGUI/Frame.h>
 #include <LibGfx/SystemTheme.h>
 
+namespace SystemMonitor {
+
 class GraphWidget final : public GUI::Frame {
     C_OBJECT(GraphWidget)
 public:
-    virtual ~GraphWidget() override;
+    virtual ~GraphWidget() override = default;
 
     void set_max(u64 max) { m_max = max; }
     u64 max() const { return m_max; }
@@ -23,7 +26,7 @@ public:
     struct ValueFormat {
         Gfx::ColorRole graph_color_role { Gfx::ColorRole::Base };
         Color text_shadow_color { Color::Transparent };
-        Function<String(size_t)> text_formatter;
+        Function<DeprecatedString(u64)> text_formatter;
     };
     void set_value_format(size_t index, ValueFormat&& format)
     {
@@ -31,7 +34,8 @@ public:
             m_value_format.resize(index + 1);
         m_value_format[index] = move(format);
     }
-    void set_stack_values(bool stack_values) { m_stack_values = stack_values; }
+    void set_stack_values(bool stack_values);
+    bool stack_values() const { return m_stack_values; }
 
 private:
     explicit GraphWidget();
@@ -45,3 +49,5 @@ private:
 
     Vector<Gfx::IntPoint, 1> m_calculated_points;
 };
+
+}

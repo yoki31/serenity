@@ -17,12 +17,12 @@ class Inspector : public Debug::ProcessInspector {
     AK_MAKE_NONMOVABLE(Inspector);
 
 public:
-    static OwnPtr<Inspector> create(String const& coredump_path, Function<void(float)> on_progress = {});
+    static OwnPtr<Inspector> create(StringView coredump_path, Function<void(float)> on_progress = {});
     virtual ~Inspector() override = default;
 
     // ^Debug::ProcessInspector
-    virtual bool poke(void* address, FlatPtr data) override;
-    virtual Optional<FlatPtr> peek(void* address) const override;
+    virtual bool poke(FlatPtr address, FlatPtr data) override;
+    virtual Optional<FlatPtr> peek(FlatPtr address) const override;
     virtual PtraceRegisters get_registers() const override;
     virtual void set_registers(PtraceRegisters const&) override;
     virtual void for_each_loaded_library(Function<IterationDecision(Debug::LoadedLibrary const&)>) const override;
@@ -35,7 +35,7 @@ private:
 
     NonnullOwnPtr<Reader> m_reader;
 
-    NonnullOwnPtrVector<Debug::LoadedLibrary> m_loaded_libraries;
+    Vector<NonnullOwnPtr<Debug::LoadedLibrary>> m_loaded_libraries;
 };
 
 }

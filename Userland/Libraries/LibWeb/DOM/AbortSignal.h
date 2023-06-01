@@ -8,61 +8,51 @@
 
 #include <AK/RefCounted.h>
 #include <AK/Weakable.h>
-#include <LibWeb/Bindings/Wrappable.h>
 #include <LibWeb/DOM/EventTarget.h>
-#include <LibWeb/DOM/Window.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::DOM {
 
 // https://dom.spec.whatwg.org/#abortsignal
-class AbortSignal final
-    : public RefCounted<AbortSignal>
-    , public Weakable<AbortSignal>
-    , public EventTarget
-    , public Bindings::Wrappable {
+class AbortSignal final : public EventTarget {
+    WEB_PLATFORM_OBJECT(AbortSignal, EventTarget);
+
 public:
-    using WrapperType = Bindings::AbortSignalWrapper;
+    static WebIDL::ExceptionOr<JS::NonnullGCPtr<AbortSignal>> construct_impl(JS::Realm&);
 
-    using RefCounted::ref;
-    using RefCounted::unref;
+    virtual ~AbortSignal() override = default;
 
-    static NonnullRefPtr<AbortSignal> create(Document& document)
-    {
-        return adopt_ref(*new AbortSignal(document));
-    }
-
-    static NonnullRefPtr<AbortSignal> create_with_global_object(Bindings::WindowObject& window_object)
-    {
-        return AbortSignal::create(window_object.impl().associated_document());
-    }
-
-    virtual ~AbortSignal() override;
-
-    void add_abort_algorithm(Function<void()>);
+    void add_abort_algorithm(JS::SafeFunction<void()>);
 
     // https://dom.spec.whatwg.org/#dom-abortsignal-aborted
-    bool aborted() const { return m_aborted; }
+    // An AbortSignal object is aborted when its abort reason is not undefined.
+    bool aborted() const { return !m_abort_reason.is_undefined(); }
 
-    void signal_abort();
+    void signal_abort(JS::Value reason);
 
-    void set_onabort(HTML::EventHandler);
-    HTML::EventHandler onabort();
+    void set_onabort(WebIDL::CallbackType*);
+    WebIDL::CallbackType* onabort();
 
-    // ^EventTarget
-    virtual void ref_event_target() override { ref(); }
-    virtual void unref_event_target() override { unref(); }
-    virtual JS::Object* create_wrapper(JS::GlobalObject&) override;
+    // https://dom.spec.whatwg.org/#dom-abortsignal-reason
+    JS::Value reason() const { return m_abort_reason; }
+
+    JS::ThrowCompletionOr<void> throw_if_aborted() const;
+
+    void follow(JS::NonnullGCPtr<AbortSignal> parent_signal);
 
 private:
-    AbortSignal(Document& document);
+    explicit AbortSignal(JS::Realm&);
 
-    // https://dom.spec.whatwg.org/#abortsignal-aborted-flag
-    bool m_aborted { false };
+    virtual JS::ThrowCompletionOr<void> initialize(JS::Realm&) override;
+    virtual void visit_edges(JS::Cell::Visitor&) override;
+
+    // https://dom.spec.whatwg.org/#abortsignal-abort-reason
+    // An AbortSignal object has an associated abort reason, which is a JavaScript value. It is undefined unless specified otherwise.
+    JS::Value m_abort_reason { JS::js_undefined() };
 
     // https://dom.spec.whatwg.org/#abortsignal-abort-algorithms
     // FIXME: This should be a set.
-    Vector<Function<void()>> m_abort_algorithms;
+    Vector<JS::SafeFunction<void()>> m_abort_algorithms;
 };
 
 }

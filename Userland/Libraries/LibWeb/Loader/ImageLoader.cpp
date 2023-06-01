@@ -5,26 +5,38 @@
  */
 
 #include <AK/Debug.h>
-#include <LibCore/Timer.h>
 #include <LibGfx/Bitmap.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
 #include <LibWeb/Loader/ImageLoader.h>
 #include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/Platform/Timer.h>
 
 namespace Web {
 
 ImageLoader::ImageLoader(DOM::Element& owner_element)
     : m_owner_element(owner_element)
-    , m_timer(Core::Timer::construct())
+    , m_timer(Platform::Timer::create())
 {
+}
+
+void ImageLoader::adopt_object_resource(Badge<HTML::HTMLObjectElement>, Resource& resource)
+{
+    auto image_resource = ImageResource::convert_from_resource(resource);
+    set_resource(image_resource);
 }
 
 void ImageLoader::load(const AK::URL& url)
 {
+    m_redirects_count = 0;
+    load_without_resetting_redirect_counter(url);
+}
+
+void ImageLoader::load_without_resetting_redirect_counter(AK::URL const& url)
+{
     m_loading_state = LoadingState::Loading;
 
-    auto request = LoadRequest::create_for_url_on_page(url, m_owner_element.document().page());
+    auto request = LoadRequest::create_for_url_on_page(url, m_owner_element->document().page());
     set_resource(ResourceLoader::the().load_resource(Resource::Type::Image, request));
 }
 
@@ -45,7 +57,26 @@ void ImageLoader::resource_did_load()
 {
     VERIFY(resource());
 
-    if (!resource()->mime_type().starts_with("image/")) {
+    // For 3xx (Redirection) responses, the Location value refers to the preferred target resource for automatically redirecting the request.
+    auto status_code = resource()->status_code();
+    if (status_code.has_value() && *status_code >= 300 && *status_code <= 399) {
+        auto location = resource()->response_headers().get("Location");
+        if (location.has_value()) {
+            if (m_redirects_count > maximum_redirects_allowed) {
+                m_redirects_count = 0;
+                m_loading_state = LoadingState::Failed;
+                if (on_fail)
+                    on_fail();
+                return;
+            }
+            m_redirects_count++;
+            load_without_resetting_redirect_counter(resource()->url().complete_url(location.value()));
+            return;
+        }
+    }
+    m_redirects_count = 0;
+
+    if (!resource()->mime_type().starts_with("image/"sv)) {
         m_loading_state = LoadingState::Failed;
         if (on_fail)
             on_fail();
@@ -124,7 +155,7 @@ unsigned ImageLoader::height() const
     return bitmap(0) ? bitmap(0)->height() : 0;
 }
 
-const Gfx::Bitmap* ImageLoader::bitmap(size_t frame_index) const
+Gfx::Bitmap const* ImageLoader::bitmap(size_t frame_index) const
 {
     if (!resource())
         return nullptr;

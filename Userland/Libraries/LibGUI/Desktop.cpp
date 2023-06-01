@@ -1,32 +1,26 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/Badge.h>
-#include <LibGUI/Desktop.h>
-#include <LibGUI/WindowServerConnection.h>
-#include <string.h>
-
-// Including this after to avoid LibIPC errors
+#include <AK/TemporaryChange.h>
 #include <LibConfig/Client.h>
+#include <LibGUI/ConnectionToWindowServer.h>
+#include <LibGUI/Desktop.h>
+#include <string.h>
 
 namespace GUI {
 
 Desktop& Desktop::the()
 {
-    static Desktop* the;
-    if (!the)
-        the = new Desktop;
-    return *the;
+    static Desktop s_the;
+    return s_the;
 }
 
-Desktop::Desktop()
-{
-}
-
-void Desktop::did_receive_screen_rects(Badge<WindowServerConnection>, const Vector<Gfx::IntRect, 4>& rects, size_t main_screen_index, unsigned workspace_rows, unsigned workspace_columns)
+void Desktop::did_receive_screen_rects(Badge<ConnectionToWindowServer>, Vector<Gfx::IntRect, 4> const& rects, size_t main_screen_index, unsigned workspace_rows, unsigned workspace_columns)
 {
     m_main_screen_index = main_screen_index;
     m_rects = rects;
@@ -47,30 +41,38 @@ void Desktop::did_receive_screen_rects(Badge<WindowServerConnection>, const Vect
 
 void Desktop::set_background_color(StringView background_color)
 {
-    WindowServerConnection::the().async_set_background_color(background_color);
+    ConnectionToWindowServer::the().async_set_background_color(background_color);
 }
 
 void Desktop::set_wallpaper_mode(StringView mode)
 {
-    WindowServerConnection::the().async_set_wallpaper_mode(mode);
+    ConnectionToWindowServer::the().async_set_wallpaper_mode(mode);
 }
 
-bool Desktop::set_wallpaper(StringView path, bool save_config)
+DeprecatedString Desktop::wallpaper_path() const
 {
-    WindowServerConnection::the().async_set_wallpaper(path);
-    auto ret_val = WindowServerConnection::the().wait_for_specific_message<Messages::WindowClient::SetWallpaperFinished>()->success();
+    return Config::read_string("WindowManager"sv, "Background"sv, "Wallpaper"sv);
+}
 
-    if (ret_val && save_config) {
-        dbgln("Saving wallpaper path '{}' to ConfigServer", path);
-        Config::write_string("WindowManager", "Background", "Wallpaper", path);
+RefPtr<Gfx::Bitmap> Desktop::wallpaper_bitmap() const
+{
+    return ConnectionToWindowServer::the().get_wallpaper().bitmap();
+}
+
+bool Desktop::set_wallpaper(RefPtr<Gfx::Bitmap const> wallpaper_bitmap, Optional<StringView> path)
+{
+    if (m_is_setting_desktop_wallpaper)
+        return false;
+
+    TemporaryChange is_setting_desktop_wallpaper_change(m_is_setting_desktop_wallpaper, true);
+    auto result = ConnectionToWindowServer::the().set_wallpaper(wallpaper_bitmap ? wallpaper_bitmap->to_shareable_bitmap() : Gfx::ShareableBitmap {});
+
+    if (result && path.has_value()) {
+        dbgln("Saving wallpaper path '{}' to ConfigServer", *path);
+        Config::write_string("WindowManager"sv, "Background"sv, "Wallpaper"sv, *path);
     }
 
-    return ret_val;
-}
-
-String Desktop::wallpaper() const
-{
-    return WindowServerConnection::the().get_wallpaper();
+    return result;
 }
 
 }

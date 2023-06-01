@@ -1,11 +1,10 @@
 @GUI::Widget {
     fill_with_background_color: true
-
-    layout: @GUI::VerticalBoxLayout
+    layout: @GUI::VerticalBoxLayout {}
 
     @GUI::ImageWidget {
         name: "banner"
-        auto_resie: true
+        auto_resize: true
     }
 
     @GUI::Widget {
@@ -24,9 +23,14 @@
         }
 
         @GUI::Widget {
-            layout: @GUI::HorizontalBoxLayout
+            layout: @GUI::HorizontalBoxLayout {}
 
-            @GUI::Widget
+            @GUI::Label {
+                name: "fail_message"
+                text_alignment: "CenterLeft"
+            }
+
+            @GUI::Layout::Spacer {}
 
             @GUI::Button {
                 name: "log_in"

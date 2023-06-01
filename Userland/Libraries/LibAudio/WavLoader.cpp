@@ -1,218 +1,239 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2021, kleines Filmröllchen <malu.bertsch@gmail.com>
+ * Copyright (c) 2021-2023, kleines Filmröllchen <filmroellchen@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "WavLoader.h"
-#include "Buffer.h"
+#include "LoaderError.h"
+#include "RIFFTypes.h"
 #include <AK/Debug.h>
+#include <AK/Endian.h>
+#include <AK/FixedArray.h>
+#include <AK/MemoryStream.h>
 #include <AK/NumericLimits.h>
-#include <AK/OwnPtr.h>
+#include <AK/Try.h>
 #include <LibCore/File.h>
-#include <LibCore/FileStream.h>
 
 namespace Audio {
 
-static constexpr size_t maximum_wav_size = 1 * GiB; // FIXME: is there a more appropriate size limit?
+static constexpr size_t const maximum_wav_size = 1 * GiB; // FIXME: is there a more appropriate size limit?
 
-WavLoaderPlugin::WavLoaderPlugin(StringView path)
-    : m_file(Core::File::construct(path))
+WavLoaderPlugin::WavLoaderPlugin(NonnullOwnPtr<SeekableStream> stream)
+    : LoaderPlugin(move(stream))
 {
-    if (!m_file->open(Core::OpenMode::ReadOnly)) {
-        m_error_string = String::formatted("Can't open file: {}", m_file->error_string());
-        return;
-    }
-    m_stream = make<Core::InputFileStream>(*m_file);
-
-    valid = parse_header();
-    if (!valid)
-        return;
 }
 
-WavLoaderPlugin::WavLoaderPlugin(const ByteBuffer& buffer)
+Result<NonnullOwnPtr<WavLoaderPlugin>, LoaderError> WavLoaderPlugin::create(StringView path)
 {
-    m_stream = make<InputMemoryStream>(buffer);
-    if (!m_stream) {
-        m_error_string = String::formatted("Can't open memory stream");
-        return;
-    }
-    m_memory_stream = static_cast<InputMemoryStream*>(m_stream.ptr());
+    auto stream = LOADER_TRY(Core::InputBufferedFile::create(LOADER_TRY(Core::File::open(path, Core::File::OpenMode::Read))));
+    auto loader = make<WavLoaderPlugin>(move(stream));
 
-    valid = parse_header();
-    if (!valid)
-        return;
+    LOADER_TRY(loader->initialize());
+
+    return loader;
 }
 
-RefPtr<Buffer> WavLoaderPlugin::get_more_samples(size_t max_bytes_to_read_from_input)
+Result<NonnullOwnPtr<WavLoaderPlugin>, LoaderError> WavLoaderPlugin::create(Bytes buffer)
 {
-    if (!m_stream)
-        return nullptr;
+    auto stream = LOADER_TRY(try_make<FixedMemoryStream>(buffer));
+    auto loader = make<WavLoaderPlugin>(move(stream));
 
-    int remaining_samples = m_total_samples - m_loaded_samples;
-    if (remaining_samples <= 0) {
-        return nullptr;
+    LOADER_TRY(loader->initialize());
+
+    return loader;
+}
+
+MaybeLoaderError WavLoaderPlugin::initialize()
+{
+    LOADER_TRY(parse_header());
+
+    return {};
+}
+
+template<typename SampleReader>
+MaybeLoaderError WavLoaderPlugin::read_samples_from_stream(Stream& stream, SampleReader read_sample, FixedArray<Sample>& samples) const
+{
+    switch (m_num_channels) {
+    case 1:
+        for (auto& sample : samples)
+            sample = Sample(LOADER_TRY(read_sample(stream)));
+        break;
+    case 2:
+        for (auto& sample : samples) {
+            auto left_channel_sample = LOADER_TRY(read_sample(stream));
+            auto right_channel_sample = LOADER_TRY(read_sample(stream));
+            sample = Sample(left_channel_sample, right_channel_sample);
+        }
+        break;
+    default:
+        VERIFY_NOT_REACHED();
     }
+    return {};
+}
+
+// There's no i24 type + we need to do the endianness conversion manually anyways.
+static ErrorOr<double> read_sample_int24(Stream& stream)
+{
+    i32 sample1 = TRY(stream.read_value<u8>());
+    i32 sample2 = TRY(stream.read_value<u8>());
+    i32 sample3 = TRY(stream.read_value<u8>());
+
+    i32 value = 0;
+    value = sample1;
+    value |= sample2 << 8;
+    value |= sample3 << 16;
+    // Sign extend the value, as it can currently not have the correct sign.
+    value = (value << 8) >> 8;
+    // Range of value is now -2^23 to 2^23-1 and we can rescale normally.
+    return static_cast<double>(value) / static_cast<double>((1 << 23) - 1);
+}
+
+template<typename T>
+static ErrorOr<double> read_sample(Stream& stream)
+{
+    T sample { 0 };
+    TRY(stream.read_until_filled(Bytes { &sample, sizeof(T) }));
+    // Remap integer samples to normalized floating-point range of -1 to 1.
+    if constexpr (IsIntegral<T>) {
+        if constexpr (NumericLimits<T>::is_signed()) {
+            // Signed integer samples are centered around zero, so this division is enough.
+            return static_cast<double>(AK::convert_between_host_and_little_endian(sample)) / static_cast<double>(NumericLimits<T>::max());
+        } else {
+            // Unsigned integer samples, on the other hand, need to be shifted to center them around zero.
+            // The first division therefore remaps to the range 0 to 2.
+            return static_cast<double>(AK::convert_between_host_and_little_endian(sample)) / (static_cast<double>(NumericLimits<T>::max()) / 2.0) - 1.0;
+        }
+    } else {
+        return static_cast<double>(AK::convert_between_host_and_little_endian(sample));
+    }
+}
+
+LoaderSamples WavLoaderPlugin::samples_from_pcm_data(Bytes const& data, size_t samples_to_read) const
+{
+    FixedArray<Sample> samples = LOADER_TRY(FixedArray<Sample>::create(samples_to_read));
+    FixedMemoryStream stream { data };
+
+    switch (m_sample_format) {
+    case PcmSampleFormat::Uint8:
+        TRY(read_samples_from_stream(stream, read_sample<u8>, samples));
+        break;
+    case PcmSampleFormat::Int16:
+        TRY(read_samples_from_stream(stream, read_sample<i16>, samples));
+        break;
+    case PcmSampleFormat::Int24:
+        TRY(read_samples_from_stream(stream, read_sample_int24, samples));
+        break;
+    case PcmSampleFormat::Float32:
+        TRY(read_samples_from_stream(stream, read_sample<float>, samples));
+        break;
+    case PcmSampleFormat::Float64:
+        TRY(read_samples_from_stream(stream, read_sample<double>, samples));
+        break;
+    default:
+        VERIFY_NOT_REACHED();
+    }
+
+    return samples;
+}
+
+ErrorOr<Vector<FixedArray<Sample>>, LoaderError> WavLoaderPlugin::load_chunks(size_t samples_to_read_from_input)
+{
+    auto remaining_samples = m_total_samples - m_loaded_samples;
+    if (remaining_samples <= 0)
+        return Vector<FixedArray<Sample>> {};
 
     // One "sample" contains data from all channels.
     // In the Wave spec, this is also called a block.
-    size_t bytes_per_sample = m_num_channels * pcm_bits_per_sample(m_sample_format) / 8;
+    size_t bytes_per_sample
+        = m_num_channels * pcm_bits_per_sample(m_sample_format) / 8;
 
-    // Might truncate if not evenly divisible by the sample size
-    int max_samples_to_read = static_cast<int>(max_bytes_to_read_from_input) / bytes_per_sample;
-    int samples_to_read = min(max_samples_to_read, remaining_samples);
-    size_t bytes_to_read = samples_to_read * bytes_per_sample;
+    auto samples_to_read = min(samples_to_read_from_input, remaining_samples);
+    auto bytes_to_read = samples_to_read * bytes_per_sample;
 
     dbgln_if(AWAVLOADER_DEBUG, "Read {} bytes WAV with num_channels {} sample rate {}, "
                                "bits per sample {}, sample format {}",
         bytes_to_read, m_num_channels, m_sample_rate,
         pcm_bits_per_sample(m_sample_format), sample_format_name(m_sample_format));
 
-    auto sample_data_result = ByteBuffer::create_zeroed(bytes_to_read);
-    if (!sample_data_result.has_value())
-        return nullptr;
-    auto sample_data = sample_data_result.release_value();
-    m_stream->read_or_error(sample_data.bytes());
-    if (m_stream->handle_any_error()) {
-        return nullptr;
-    }
-
-    RefPtr<Buffer> buffer = Buffer::from_pcm_data(
-        sample_data.bytes(),
-        m_num_channels,
-        m_sample_format);
+    auto sample_data = LOADER_TRY(ByteBuffer::create_zeroed(bytes_to_read));
+    LOADER_TRY(m_stream->read_until_filled(sample_data.bytes()));
 
     // m_loaded_samples should contain the amount of actually loaded samples
     m_loaded_samples += samples_to_read;
-    return buffer;
+    Vector<FixedArray<Sample>> samples;
+    TRY(samples.try_append(TRY(samples_from_pcm_data(sample_data.bytes(), samples_to_read))));
+    return samples;
 }
 
-void WavLoaderPlugin::seek(const int sample_index)
+MaybeLoaderError WavLoaderPlugin::seek(int sample_index)
 {
     dbgln_if(AWAVLOADER_DEBUG, "seek sample_index {}", sample_index);
-    if (sample_index < 0 || sample_index >= m_total_samples)
-        return;
+    if (sample_index < 0 || sample_index >= static_cast<int>(m_total_samples))
+        return LoaderError { LoaderError::Category::Internal, m_loaded_samples, "Seek outside the sample range" };
 
-    size_t sample_offset = m_byte_offset_of_data_samples + (sample_index * m_num_channels * (pcm_bits_per_sample(m_sample_format) / 8));
+    size_t sample_offset = m_byte_offset_of_data_samples + static_cast<size_t>(sample_index * m_num_channels * (pcm_bits_per_sample(m_sample_format) / 8));
 
-    // AK::InputStream does not define seek, hence the special-cases for file and stream.
-    if (m_file) {
-        m_file->seek(sample_offset);
-    } else {
-        m_memory_stream->seek(sample_offset);
-    }
+    LOADER_TRY(m_stream->seek(sample_offset, SeekMode::SetPosition));
 
     m_loaded_samples = sample_index;
+    return {};
 }
 
 // Specification reference: http://www-mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/WAVE.html
-bool WavLoaderPlugin::parse_header()
+MaybeLoaderError WavLoaderPlugin::parse_header()
 {
-    if (!m_stream)
-        return false;
-
-    bool ok = true;
-    size_t bytes_read = 0;
-
-    auto read_u8 = [&]() -> u8 {
-        u8 value;
-        *m_stream >> value;
-        if (m_stream->handle_any_error())
-            ok = false;
-        bytes_read += 1;
-        return value;
-    };
-
-    auto read_u16 = [&]() -> u16 {
-        u16 value;
-        *m_stream >> value;
-        if (m_stream->handle_any_error())
-            ok = false;
-        bytes_read += 2;
-        return value;
-    };
-
-    auto read_u32 = [&]() -> u32 {
-        u32 value;
-        *m_stream >> value;
-        if (m_stream->handle_any_error())
-            ok = false;
-        bytes_read += 4;
-        return value;
-    };
-
-#define CHECK_OK(msg)                                                      \
-    do {                                                                   \
-        if (!ok) {                                                         \
-            m_error_string = String::formatted("Parsing failed: {}", msg); \
-            dbgln_if(AWAVLOADER_DEBUG, m_error_string);                    \
-            return {};                                                     \
-        }                                                                  \
+#define CHECK(check, category, msg)                                                                                                                 \
+    do {                                                                                                                                            \
+        if (!(check)) {                                                                                                                             \
+            return LoaderError { category, static_cast<size_t>(LOADER_TRY(m_stream->tell())), DeprecatedString::formatted("WAV header: {}", msg) }; \
+        }                                                                                                                                           \
     } while (0)
 
-    u32 riff = read_u32();
-    ok = ok && riff == 0x46464952; // "RIFF"
-    CHECK_OK("RIFF header");
+    auto riff = TRY(m_stream->read_value<RIFF::ChunkID>());
+    CHECK(riff == RIFF::riff_magic, LoaderError::Category::Format, "RIFF header magic invalid");
 
-    u32 sz = read_u32();
-    ok = ok && sz < maximum_wav_size;
-    CHECK_OK("File size");
+    u32 size = TRY(m_stream->read_value<LittleEndian<u32>>());
+    CHECK(size < maximum_wav_size, LoaderError::Category::Format, "File size too large");
 
-    u32 wave = read_u32();
-    ok = ok && wave == 0x45564157; // "WAVE"
-    CHECK_OK("WAVE header");
+    auto wave = TRY(m_stream->read_value<RIFF::ChunkID>());
+    CHECK(wave == RIFF::wave_subformat_id, LoaderError::Category::Format, "WAVE subformat id invalid");
 
-    u32 fmt_id = read_u32();
-    ok = ok && fmt_id == 0x20746D66; // "fmt "
-    CHECK_OK("FMT header");
+    auto format_chunk = TRY(m_stream->read_value<RIFF::Chunk>());
+    CHECK(format_chunk.id.as_ascii_string() == RIFF::format_chunk_id, LoaderError::Category::Format, "FMT chunk id invalid");
 
-    u32 fmt_size = read_u32();
-    ok = ok && (fmt_size == 16 || fmt_size == 18 || fmt_size == 40);
-    CHECK_OK("FMT size");
+    auto format_stream = format_chunk.data_stream();
+    u16 audio_format = TRY(format_stream.read_value<LittleEndian<u16>>());
+    CHECK(audio_format == to_underlying(RIFF::WaveFormat::Pcm) || audio_format == to_underlying(RIFF::WaveFormat::IEEEFloat) || audio_format == to_underlying(RIFF::WaveFormat::Extensible),
+        LoaderError::Category::Unimplemented, "Audio format not supported");
 
-    u16 audio_format = read_u16();
-    CHECK_OK("Audio format"); // incomplete read check
-    ok = ok && (audio_format == WAVE_FORMAT_PCM || audio_format == WAVE_FORMAT_IEEE_FLOAT || audio_format == WAVE_FORMAT_EXTENSIBLE);
-    CHECK_OK("Audio format PCM/Float"); // value check
+    m_num_channels = TRY(format_stream.read_value<LittleEndian<u16>>());
+    CHECK(m_num_channels == 1 || m_num_channels == 2, LoaderError::Category::Unimplemented, "Channel count");
 
-    m_num_channels = read_u16();
-    ok = ok && (m_num_channels == 1 || m_num_channels == 2);
-    CHECK_OK("Channel count");
+    m_sample_rate = TRY(format_stream.read_value<LittleEndian<u32>>());
+    // Data rate; can be ignored.
+    TRY(format_stream.read_value<LittleEndian<u32>>());
+    u16 block_size_bytes = TRY(format_stream.read_value<LittleEndian<u16>>());
 
-    m_sample_rate = read_u32();
-    CHECK_OK("Sample rate");
+    u16 bits_per_sample = TRY(format_stream.read_value<LittleEndian<u16>>());
 
-    read_u32();
-    CHECK_OK("Data rate");
-
-    u16 block_size_bytes = read_u16();
-    CHECK_OK("Block size");
-
-    u16 bits_per_sample = read_u16();
-    CHECK_OK("Bits per sample");
-
-    if (audio_format == WAVE_FORMAT_EXTENSIBLE) {
-        ok = ok && (fmt_size == 40);
-        CHECK_OK("Extensible fmt size"); // value check
+    if (audio_format == to_underlying(RIFF::WaveFormat::Extensible)) {
+        CHECK(format_chunk.size == 40, LoaderError::Category::Format, "Extensible fmt size is not 40 bytes");
 
         // Discard everything until the GUID.
         // We've already read 16 bytes from the stream. The GUID starts in another 8 bytes.
-        read_u32();
-        read_u32();
-        CHECK_OK("Discard until GUID");
+        TRY(format_stream.read_value<LittleEndian<u64>>());
 
         // Get the underlying audio format from the first two bytes of GUID
-        u16 guid_subformat = read_u16();
-        ok = ok && (guid_subformat == WAVE_FORMAT_PCM || guid_subformat == WAVE_FORMAT_IEEE_FLOAT);
-        CHECK_OK("GUID SubFormat");
+        u16 guid_subformat = TRY(format_stream.read_value<LittleEndian<u16>>());
+        CHECK(guid_subformat == to_underlying(RIFF::WaveFormat::Pcm) || guid_subformat == to_underlying(RIFF::WaveFormat::IEEEFloat), LoaderError::Category::Unimplemented, "GUID SubFormat not supported");
 
         audio_format = guid_subformat;
     }
 
-    if (audio_format == WAVE_FORMAT_PCM) {
-        ok = ok && (bits_per_sample == 8 || bits_per_sample == 16 || bits_per_sample == 24);
-        CHECK_OK("Bits per sample (PCM)"); // value check
+    if (audio_format == to_underlying(RIFF::WaveFormat::Pcm)) {
+        CHECK(bits_per_sample == 8 || bits_per_sample == 16 || bits_per_sample == 24, LoaderError::Category::Unimplemented, "PCM bits per sample not supported");
 
         // We only support 8-24 bit audio right now because other formats are uncommon
         if (bits_per_sample == 8) {
@@ -222,9 +243,8 @@ bool WavLoaderPlugin::parse_header()
         } else if (bits_per_sample == 24) {
             m_sample_format = PcmSampleFormat::Int24;
         }
-    } else if (audio_format == WAVE_FORMAT_IEEE_FLOAT) {
-        ok = ok && (bits_per_sample == 32 || bits_per_sample == 64);
-        CHECK_OK("Bits per sample (Float)"); // value check
+    } else if (audio_format == to_underlying(RIFF::WaveFormat::IEEEFloat)) {
+        CHECK(bits_per_sample == 32 || bits_per_sample == 64, LoaderError::Category::Unimplemented, "Float bits per sample not supported");
 
         // Again, only the common 32 and 64 bit
         if (bits_per_sample == 32) {
@@ -234,52 +254,93 @@ bool WavLoaderPlugin::parse_header()
         }
     }
 
-    ok = ok && (block_size_bytes == (m_num_channels * (bits_per_sample / 8)));
-    CHECK_OK("Block size sanity check");
+    CHECK(block_size_bytes == (m_num_channels * (bits_per_sample / 8)), LoaderError::Category::Format, "Block size invalid");
 
     dbgln_if(AWAVLOADER_DEBUG, "WAV format {} at {} bit, {} channels, rate {}Hz ",
         sample_format_name(m_sample_format), pcm_bits_per_sample(m_sample_format), m_num_channels, m_sample_rate);
 
-    // Read chunks until we find DATA
+    // Read all chunks before DATA.
     bool found_data = false;
-    u32 data_sz = 0;
-    u8 search_byte = 0;
-    while (true) {
-        search_byte = read_u8();
-        CHECK_OK("Reading byte searching for data");
-        if (search_byte != 0x64) // D
-            continue;
+    while (!found_data) {
+        auto chunk_header = TRY(m_stream->read_value<RIFF::ChunkID>());
+        if (chunk_header == RIFF::data_chunk_id) {
+            found_data = true;
+        } else {
+            TRY(m_stream->seek(-RIFF::chunk_id_size, SeekMode::FromCurrentPosition));
+            auto chunk = TRY(m_stream->read_value<RIFF::Chunk>());
+            if (chunk.id == RIFF::list_chunk_id) {
+                auto maybe_list = chunk.data_stream().read_value<RIFF::List>();
+                if (maybe_list.is_error()) {
+                    dbgln("WAV Warning: LIST chunk invalid, error: {}", maybe_list.release_error());
+                    continue;
+                }
 
-        search_byte = read_u8();
-        CHECK_OK("Reading next byte searching for data");
-        if (search_byte != 0x61) // A
-            continue;
+                auto list = maybe_list.release_value();
+                if (list.type == RIFF::info_chunk_id) {
+                    auto maybe_error = load_wav_info_block(move(list.chunks));
+                    if (maybe_error.is_error())
+                        dbgln("WAV Warning: INFO chunk invalid, error: {}", maybe_error.release_error());
 
-        u16 search_remaining = read_u16();
-        CHECK_OK("Reading remaining bytes searching for data");
-        if (search_remaining != 0x6174) // TA
-            continue;
-
-        data_sz = read_u32();
-        found_data = true;
-        break;
+                } else {
+                    dbgln("Unhandled WAV list of type {} with {} subchunks", list.type.as_ascii_string(), list.chunks.size());
+                }
+            } else {
+                dbgln_if(AWAVLOADER_DEBUG, "Unhandled WAV chunk of type {}, size {} bytes", chunk.id.as_ascii_string(), chunk.size);
+            }
+        }
     }
 
-    ok = ok && found_data;
-    CHECK_OK("Found no data chunk");
+    u32 data_size = TRY(m_stream->read_value<LittleEndian<u32>>());
+    CHECK(found_data, LoaderError::Category::Format, "Found no data chunk");
+    CHECK(data_size < maximum_wav_size, LoaderError::Category::Format, "Data too large");
 
-    ok = ok && data_sz < maximum_wav_size;
-    CHECK_OK("Data was too large");
-
-    m_total_samples = data_sz / block_size_bytes;
+    m_total_samples = data_size / block_size_bytes;
 
     dbgln_if(AWAVLOADER_DEBUG, "WAV data size {}, bytes per sample {}, total samples {}",
-        data_sz,
+        data_size,
         block_size_bytes,
         m_total_samples);
 
-    m_byte_offset_of_data_samples = bytes_read;
-    return true;
+    m_byte_offset_of_data_samples = TRY(m_stream->tell());
+    return {};
+}
+
+// http://www-mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/Docs/riffmci.pdf page 23 (LIST type)
+// We only recognize the relevant official metadata types; types added in later errata of RIFF are not relevant for audio.
+MaybeLoaderError WavLoaderPlugin::load_wav_info_block(Vector<RIFF::Chunk> info_chunks)
+{
+    for (auto const& chunk : info_chunks) {
+        auto metadata_name = chunk.id.as_ascii_string();
+        // Chunk contents are zero-terminated strings "ZSTR", so we just drop the null terminator.
+        StringView metadata_text { chunk.data.span().trim(chunk.data.size() - 1) };
+        // Note that we assume chunks to be unique, since that seems to almost always be the case.
+        // Worst case we just drop some metadata.
+        if (metadata_name == "IART"sv) {
+            // Artists are combined together with semicolons, at least when you edit them in Windows File Explorer.
+            auto artists = metadata_text.split_view(";"sv);
+            for (auto artist : artists)
+                TRY(m_metadata.add_person(Person::Role::Artist, TRY(String::from_utf8(artist))));
+        } else if (metadata_name == "ICMT"sv) {
+            m_metadata.comment = TRY(String::from_utf8(metadata_text));
+        } else if (metadata_name == "ICOP"sv) {
+            m_metadata.copyright = TRY(String::from_utf8(metadata_text));
+        } else if (metadata_name == "ICRD"sv) {
+            m_metadata.unparsed_time = TRY(String::from_utf8(metadata_text));
+        } else if (metadata_name == "IENG"sv) {
+            TRY(m_metadata.add_person(Person::Role::Engineer, TRY(String::from_utf8(metadata_text))));
+        } else if (metadata_name == "IGNR"sv) {
+            m_metadata.genre = TRY(String::from_utf8(metadata_text));
+        } else if (metadata_name == "INAM"sv) {
+            m_metadata.title = TRY(String::from_utf8(metadata_text));
+        } else if (metadata_name == "ISFT"sv) {
+            m_metadata.encoder = TRY(String::from_utf8(metadata_text));
+        } else if (metadata_name == "ISRC"sv) {
+            TRY(m_metadata.add_person(Person::Role::Publisher, TRY(String::from_utf8(metadata_text))));
+        } else {
+            TRY(m_metadata.add_miscellaneous(TRY(String::from_utf8(metadata_name)), TRY(String::from_utf8(metadata_text))));
+        }
+    }
+    return {};
 }
 
 }

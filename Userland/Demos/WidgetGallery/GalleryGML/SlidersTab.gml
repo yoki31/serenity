@@ -5,25 +5,23 @@
     }
 
     @GUI::GroupBox {
-        fixed_height: 129
+        preferred_height: "fit"
         layout: @GUI::VerticalBoxLayout {
             margins: [6]
         }
 
         @GUI::GroupBox {
-            max_height: 30
-
+            preferred_height: "fit"
             layout: @GUI::HorizontalBoxLayout {
                 margins: [8]
             }
 
-            @GUI::OpacitySlider {
+            @GUI::HorizontalOpacitySlider {
                 name: "opacity_slider"
                 tooltip: "Opacity Slider"
             }
 
-            @GUI::VerticalSeparator {
-            }
+            @GUI::VerticalSeparator {}
 
             @GUI::ValueSlider {
                 name: "opacity_value_slider"
@@ -34,15 +32,11 @@
             }
         }
 
-        @GUI::HorizontalSeparator {
-        }
+        @GUI::HorizontalSeparator {}
 
         @GUI::Frame {
-            shape: "Panel"
-            shadow: "Sunken"
-            thickness: 1
-            max_width: 394
-            max_height: 79
+            style: "SunkenPanel"
+            preferred_height: "fit"
             layout: @GUI::VerticalBoxLayout {
                 margins: [1]
             }
@@ -54,46 +48,36 @@
     }
 
     @GUI::Widget {
-        fixed_height: 88
+        preferred_height: "fit"
         layout: @GUI::VerticalBoxLayout {
             margins: [0, 8]
-        }
-
-        @GUI::Widget {
         }
 
         @GUI::Scrollbar {
             name: "enabled_scrollbar"
             fixed_height: 16
-            fixed_width: -1
             min: 0
             max: 100
             value: 50
         }
 
-        @GUI::Widget {
-        }
-
-        @GUI::HorizontalSeparator {
-        }
-
-        @GUI::Widget {
-        }
+        @GUI::HorizontalSeparator {}
 
         @GUI::Scrollbar {
             name: "disabled_scrollbar"
             fixed_height: 16
-            fixed_width: -1
         }
 
-        @GUI::Widget {
-        }
+        @GUI::Layout::Spacer {}
     }
 
     @GUI::GroupBox {
         layout: @GUI::HorizontalBoxLayout {
             margins: [6]
         }
+        preferred_height: "opportunistic_grow"
+
+        @GUI::Layout::Spacer {}
 
         @GUI::VerticalProgressbar {
             name: "vertical_progressbar_left"
@@ -109,8 +93,9 @@
             tooltip: "Fixed"
         }
 
-        @GUI::VerticalSeparator {
-        }
+        @GUI::Layout::Spacer {}
+
+        @GUI::VerticalSeparator {}
 
         @GUI::VerticalSlider {
             enabled: false
@@ -120,8 +105,9 @@
             value: 5
         }
 
-        @GUI::VerticalSeparator {
-        }
+        @GUI::VerticalSeparator {}
+
+        @GUI::Layout::Spacer {}
 
         @GUI::VerticalProgressbar {
             name: "vertical_progressbar_right"
@@ -136,16 +122,19 @@
             value: 0
             tooltip: "Proportional"
         }
+
+        @GUI::Layout::Spacer {}
     }
 
     @GUI::GroupBox {
         layout: @GUI::VerticalBoxLayout {
             margins: [6]
         }
+        preferred_height: "fit"
 
         @GUI::Widget {
-            layout: @GUI::HorizontalBoxLayout {
-            }
+            layout: @GUI::HorizontalBoxLayout {}
+            preferred_height: "fit"
 
             @GUI::HorizontalSlider {
                 name: "horizontal_slider_left"
@@ -155,8 +144,7 @@
                 value: 0
             }
 
-            @GUI::VerticalSeparator {
-            }
+            @GUI::VerticalSeparator {}
 
             @GUI::HorizontalSlider {
                 enabled: false
@@ -165,8 +153,7 @@
                 value: 5
             }
 
-            @GUI::VerticalSeparator {
-            }
+            @GUI::VerticalSeparator {}
 
             @GUI::HorizontalSlider {
                 name: "horizontal_slider_right"
@@ -177,8 +164,7 @@
             }
         }
 
-        @GUI::HorizontalSeparator {
-        }
+        @GUI::HorizontalSeparator {}
 
         @GUI::HorizontalProgressbar {
             name: "horizontal_progressbar"

@@ -1,11 +1,13 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <LibCore/EventLoop.h>
 #include <LibGUI/Window.h>
 
 namespace GUI {
@@ -13,47 +15,43 @@ namespace GUI {
 class Dialog : public Window {
     C_OBJECT(Dialog)
 public:
-    enum ExecResult {
-        ExecOK = 0,
-        ExecCancel = 1,
-        ExecAborted = 2,
-        ExecYes = 3,
-        ExecNo = 4,
-    };
-    enum ScreenPosition {
-        CenterWithinParent = 0,
-
-        Center = 1,
-        CenterLeft = 2,
-        CenterRight = 3,
-
-        TopLeft = 4,
-        TopCenter = 5,
-        TopRight = 6,
-
-        BottomLeft = 7,
-        BottomCenter = 8,
-        BottomRight = 9,
+    enum class ExecResult {
+        OK = 0,
+        Cancel = 1,
+        Aborted = 2,
+        Yes = 3,
+        No = 4,
     };
 
-    virtual ~Dialog() override;
+    enum class ScreenPosition {
+        DoNotPosition,
+        CenterWithinParent,
+        Center,
+    };
 
-    int exec();
+    virtual ~Dialog() override = default;
 
-    int result() const { return m_result; }
-    void done(int result);
+    ExecResult exec();
+
+    ExecResult result() const { return m_result; }
+    void done(ExecResult);
+
+    ScreenPosition screen_position() const { return m_screen_position; }
+    void set_screen_position(ScreenPosition position) { m_screen_position = position; }
 
     virtual void event(Core::Event&) override;
 
     virtual void close() override;
 
 protected:
-    explicit Dialog(Window* parent_window, ScreenPosition screen_position = CenterWithinParent);
+    explicit Dialog(Window* parent_window, ScreenPosition = ScreenPosition::CenterWithinParent);
+
+    virtual void on_done(ExecResult) { }
 
 private:
     OwnPtr<Core::EventLoop> m_event_loop;
-    int m_result { ExecAborted };
-    int m_screen_position { CenterWithinParent };
+    ExecResult m_result { ExecResult::Aborted };
+    ScreenPosition m_screen_position { ScreenPosition::CenterWithinParent };
 };
 
 }

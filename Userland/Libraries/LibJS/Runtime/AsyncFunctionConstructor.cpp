@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibJS/Interpreter.h>
 #include <LibJS/Runtime/AsyncFunctionConstructor.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
 #include <LibJS/Runtime/FunctionConstructor.h>
@@ -13,20 +12,22 @@
 
 namespace JS {
 
-AsyncFunctionConstructor::AsyncFunctionConstructor(GlobalObject& global_object)
-    : NativeFunction(vm().names.AsyncFunction.as_string(), *global_object.function_prototype())
+AsyncFunctionConstructor::AsyncFunctionConstructor(Realm& realm)
+    : NativeFunction(realm.vm().names.AsyncFunction.as_string(), realm.intrinsics().function_constructor())
 {
 }
 
-void AsyncFunctionConstructor::initialize(GlobalObject& global_object)
+ThrowCompletionOr<void> AsyncFunctionConstructor::initialize(Realm& realm)
 {
     auto& vm = this->vm();
-    NativeFunction::initialize(global_object);
+    MUST_OR_THROW_OOM(NativeFunction::initialize(realm));
 
     // 27.7.2.2 AsyncFunction.prototype, https://tc39.es/ecma262/#sec-async-function-constructor-prototype
-    define_direct_property(vm.names.prototype, global_object.async_function_prototype(), 0);
+    define_direct_property(vm.names.prototype, realm.intrinsics().async_function_prototype(), 0);
 
     define_direct_property(vm.names.length, Value(1), Attribute::Configurable);
+
+    return {};
 }
 
 // 27.7.1.1 AsyncFunction ( p1, p2, … , pn, body ), https://tc39.es/ecma262/#sec-async-function-constructor-arguments
@@ -36,25 +37,18 @@ ThrowCompletionOr<Value> AsyncFunctionConstructor::call()
 }
 
 // 27.7.1.1 AsyncFunction ( p1, p2, … , pn, body ), https://tc39.es/ecma262/#sec-async-function-constructor-arguments
-ThrowCompletionOr<Object*> AsyncFunctionConstructor::construct(FunctionObject& new_target)
+ThrowCompletionOr<NonnullGCPtr<Object>> AsyncFunctionConstructor::construct(FunctionObject& new_target)
 {
     auto& vm = this->vm();
-    auto function = TRY(FunctionConstructor::create_dynamic_function_node(global_object(), new_target, FunctionKind::Async));
 
-    OwnPtr<Interpreter> local_interpreter;
-    Interpreter* interpreter = vm.interpreter_if_exists();
+    // 1. Let C be the active function object.
+    auto* constructor = vm.active_function_object();
 
-    if (!interpreter) {
-        local_interpreter = Interpreter::create_with_existing_realm(*realm());
-        interpreter = local_interpreter.ptr();
-    }
+    // 2. Let args be the argumentsList that was passed to this function by [[Call]] or [[Construct]].
+    auto& args = vm.running_execution_context().arguments;
 
-    VM::InterpreterExecutionScope scope(*interpreter);
-    auto result = function->execute(*interpreter, global_object());
-    if (auto* exception = vm.exception())
-        return throw_completion(exception->value());
-    VERIFY(result.is_object() && is<ECMAScriptFunctionObject>(result.as_object()));
-    return &result.as_object();
+    // 3. Return CreateDynamicFunction(C, NewTarget, async, args).
+    return *TRY(FunctionConstructor::create_dynamic_function(vm, *constructor, &new_target, FunctionKind::Async, args));
 }
 
 }

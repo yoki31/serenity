@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/DeprecatedString.h>
+#include <AK/ScopeGuard.h>
 #include <AK/ScopedValueRollback.h>
-#include <AK/String.h>
 #include <AK/Vector.h>
+#include <Kernel/API/Unveil.h>
+#include <LibFileSystem/FileSystem.h>
 #include <alloca.h>
 #include <assert.h>
+#include <bits/pthread_cancel.h>
 #include <bits/pthread_integration.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -21,7 +26,11 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/select.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <syscall.h>
 #include <termios.h>
@@ -38,23 +47,49 @@ static __thread int s_cached_tid = 0;
 
 static int s_cached_pid = 0;
 
-int chown(const char* pathname, uid_t uid, gid_t gid)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/lchown.html
+int lchown(char const* pathname, uid_t uid, gid_t gid)
 {
     if (!pathname) {
         errno = EFAULT;
         return -1;
     }
-    Syscall::SC_chown_params params { { pathname, strlen(pathname) }, uid, gid };
+    Syscall::SC_chown_params params { { pathname, strlen(pathname) }, uid, gid, AT_FDCWD, false };
     int rc = syscall(SC_chown, &params);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/chown.html
+int chown(char const* pathname, uid_t uid, gid_t gid)
+{
+    if (!pathname) {
+        errno = EFAULT;
+        return -1;
+    }
+    Syscall::SC_chown_params params { { pathname, strlen(pathname) }, uid, gid, AT_FDCWD, true };
+    int rc = syscall(SC_chown, &params);
+    __RETURN_WITH_ERRNO(rc, rc, -1);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/fchown.html
 int fchown(int fd, uid_t uid, gid_t gid)
 {
     int rc = syscall(SC_fchown, fd, uid, gid);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+int fchownat(int fd, char const* pathname, uid_t uid, gid_t gid, int flags)
+{
+    if (!pathname) {
+        errno = EFAULT;
+        return -1;
+    }
+    Syscall::SC_chown_params params { { pathname, strlen(pathname) }, uid, gid, fd, !(flags & AT_SYMLINK_NOFOLLOW) };
+    int rc = syscall(SC_chown, &params);
+    __RETURN_WITH_ERRNO(rc, rc, -1);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/fork.html
 pid_t fork()
 {
     __pthread_fork_prepare();
@@ -70,17 +105,53 @@ pid_t fork()
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/vfork.html
 pid_t vfork()
 {
     return fork();
 }
 
-int execv(const char* path, char* const argv[])
+// Non-POSIX, but present in BSDs and Linux
+// https://man.openbsd.org/daemon.3
+int daemon(int nochdir, int noclose)
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+
+    // exit parent, continue execution in child
+    if (pid > 0)
+        _exit(0);
+
+    pid = setsid();
+    if (pid < 0)
+        return -1;
+
+    if (nochdir == 0)
+        (void)chdir("/");
+
+    if (noclose == 0) {
+        // redirect stdout and stderr to /dev/null
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd < 0)
+            return -1;
+        (void)close(STDOUT_FILENO);
+        (void)close(STDERR_FILENO);
+        (void)dup2(fd, STDOUT_FILENO);
+        (void)dup2(fd, STDERR_FILENO);
+        (void)close(fd);
+    }
+    return 0;
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/execv.html
+int execv(char const* path, char* const argv[])
 {
     return execve(path, argv, environ);
 }
 
-int execve(const char* filename, char* const argv[], char* const envp[])
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/execve.html
+int execve(char const* filename, char* const argv[], char* const envp[])
 {
     size_t arg_count = 0;
     for (size_t i = 0; argv[i]; ++i)
@@ -110,18 +181,21 @@ int execve(const char* filename, char* const argv[], char* const envp[])
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int execvpe(const char* filename, char* const argv[], char* const envp[])
+// https://linux.die.net/man/3/execvpe (GNU extension)
+int execvpe(char const* filename, char* const argv[], char* const envp[])
 {
     if (strchr(filename, '/'))
         return execve(filename, argv, envp);
 
     ScopedValueRollback errno_rollback(errno);
-    String path = getenv("PATH");
+
+    // TODO: Make this use the PATH search implementation from LibFileSystem.
+    DeprecatedString path = getenv("PATH");
     if (path.is_empty())
-        path = "/bin:/usr/bin";
+        path = DEFAULT_PATH;
     auto parts = path.split(':');
     for (auto& part : parts) {
-        auto candidate = String::formatted("{}/{}", part, filename);
+        auto candidate = DeprecatedString::formatted("{}/{}", part, filename);
         int rc = execve(candidate.characters(), argv, envp);
         if (rc < 0 && errno != ENOENT) {
             errno_rollback.set_override_rollback_value(errno);
@@ -134,7 +208,8 @@ int execvpe(const char* filename, char* const argv[], char* const envp[])
     return -1;
 }
 
-int execvp(const char* filename, char* const argv[])
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/execvp.html
+int execvp(char const* filename, char* const argv[])
 {
     int rc = execvpe(filename, argv, environ);
     int saved_errno = errno;
@@ -143,15 +218,16 @@ int execvp(const char* filename, char* const argv[])
     return rc;
 }
 
-int execl(const char* filename, const char* arg0, ...)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/execl.html
+int execl(char const* filename, char const* arg0, ...)
 {
-    Vector<const char*, 16> args;
+    Vector<char const*, 16> args;
     args.append(arg0);
 
     va_list ap;
     va_start(ap, arg0);
     for (;;) {
-        const char* arg = va_arg(ap, const char*);
+        char const* arg = va_arg(ap, char const*);
         if (!arg)
             break;
         args.append(arg);
@@ -161,6 +237,7 @@ int execl(const char* filename, const char* arg0, ...)
     return execve(filename, const_cast<char* const*>(args.data()), environ);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/execle.html
 int execle(char const* filename, char const* arg0, ...)
 {
     Vector<char const*> args;
@@ -181,15 +258,16 @@ int execle(char const* filename, char const* arg0, ...)
     return execve(filename, argv, envp);
 }
 
-int execlp(const char* filename, const char* arg0, ...)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/execlp.html
+int execlp(char const* filename, char const* arg0, ...)
 {
-    Vector<const char*, 16> args;
+    Vector<char const*, 16> args;
     args.append(arg0);
 
     va_list ap;
     va_start(ap, arg0);
     for (;;) {
-        const char* arg = va_arg(ap, const char*);
+        char const* arg = va_arg(ap, char const*);
         if (!arg)
             break;
         args.append(arg);
@@ -199,26 +277,31 @@ int execlp(const char* filename, const char* arg0, ...)
     return execvpe(filename, const_cast<char* const*>(args.data()), environ);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getuid.html
 uid_t geteuid()
 {
     return syscall(SC_geteuid);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getegid.html
 gid_t getegid()
 {
     return syscall(SC_getegid);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getuid.html
 uid_t getuid()
 {
     return syscall(SC_getuid);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getgid.html
 gid_t getgid()
 {
     return syscall(SC_getgid);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getpid.html
 pid_t getpid()
 {
     int cached_pid = s_cached_pid;
@@ -229,6 +312,7 @@ pid_t getpid()
     return cached_pid;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getppid.html
 pid_t getppid()
 {
     return syscall(SC_getppid);
@@ -244,12 +328,14 @@ int getresgid(gid_t* rgid, gid_t* egid, gid_t* sgid)
     return syscall(SC_getresgid, rgid, egid, sgid);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getsid.html
 pid_t getsid(pid_t pid)
 {
     int rc = syscall(SC_getsid, pid);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/setsid.html
 pid_t setsid()
 {
     int rc = syscall(SC_setsid);
@@ -265,49 +351,65 @@ pid_t tcgetpgrp(int fd)
     return pgrp;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/tcgetpgrp.html
 int tcsetpgrp(int fd, pid_t pgid)
 {
     return ioctl(fd, TIOCSPGRP, pgid);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/setpgid.html
 int setpgid(pid_t pid, pid_t pgid)
 {
     int rc = syscall(SC_setpgid, pid, pgid);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getpgid.html
 pid_t getpgid(pid_t pid)
 {
     int rc = syscall(SC_getpgid, pid);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getpgrp.html
 pid_t getpgrp()
 {
     int rc = syscall(SC_getpgrp);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/read.html
 ssize_t read(int fd, void* buf, size_t count)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_read, fd, buf, count);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/pread.html
 ssize_t pread(int fd, void* buf, size_t count, off_t offset)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_pread, fd, buf, count, &offset);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-ssize_t write(int fd, const void* buf, size_t count)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/write.html
+ssize_t write(int fd, void const* buf, size_t count)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_write, fd, buf, count);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-ssize_t pwrite(int fd, const void* buf, size_t count, off_t offset)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/pwrite.html
+ssize_t pwrite(int fd, void const* buf, size_t count, off_t offset)
 {
+    __pthread_maybe_cancel();
+
     // FIXME: This is not thread safe and should be implemented in the kernel instead.
     off_t old_offset = lseek(fd, 0, SEEK_CUR);
     lseek(fd, offset, SEEK_SET);
@@ -316,13 +418,77 @@ ssize_t pwrite(int fd, const void* buf, size_t count, off_t offset)
     return nwritten;
 }
 
+// Note: Be sure to send to directory_name parameter a directory name ended with trailing slash.
+static int ttyname_r_for_directory(char const* directory_name, dev_t device_mode, ino_t inode_number, char* buffer, size_t size)
+{
+    DIR* dirstream = opendir(directory_name);
+    if (!dirstream) {
+        return -1;
+    }
+
+    auto close_dir_stream_on_exit = ScopeGuard([dirstream] {
+        closedir(dirstream);
+    });
+
+    struct dirent* entry = nullptr;
+    char* name_path = nullptr;
+
+    // FIXME: Use LibCore DirIterator here instead
+    while ((entry = readdir(dirstream)) != nullptr) {
+        if (((ino_t)entry->d_ino == inode_number)
+            && strcmp(entry->d_name, "stdin")
+            && strcmp(entry->d_name, "stdout")
+            && strcmp(entry->d_name, "stderr")) {
+
+            size_t name_length = strlen(directory_name) + strlen(entry->d_name) + 1;
+
+            if (name_length > size) {
+                errno = ERANGE;
+                return -1;
+            }
+
+            name_path = (char*)malloc(name_length);
+            memset(name_path, 0, name_length);
+            memcpy(name_path, directory_name, strlen(directory_name));
+            memcpy(&name_path[strlen(directory_name)], entry->d_name, strlen(entry->d_name));
+            struct stat st;
+            if (lstat(name_path, &st) < 0) {
+                free(name_path);
+                name_path = nullptr;
+                continue;
+            }
+
+            if (device_mode == st.st_rdev) {
+                memset(buffer, 0, name_length);
+                memcpy(buffer, name_path, name_length);
+                free(name_path);
+                return 0;
+            }
+        }
+    }
+    free(name_path);
+    return -1;
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/ttyname_r.html
 int ttyname_r(int fd, char* buffer, size_t size)
 {
-    int rc = syscall(SC_ttyname, fd, buffer, size);
-    __RETURN_WITH_ERRNO(rc, rc, -1);
+    struct stat stat;
+    if (fstat(fd, &stat) < 0)
+        return -1;
+    dev_t major_minor_numbers = stat.st_rdev;
+    ino_t inode_number = stat.st_ino;
+    if (ttyname_r_for_directory("/dev/", major_minor_numbers, inode_number, buffer, size) < 0) {
+        if (ttyname_r_for_directory("/dev/pts/", major_minor_numbers, inode_number, buffer, size) < 0) {
+            errno = ENOTTY;
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static char ttyname_buf[32];
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/ttyname.html
 char* ttyname(int fd)
 {
     if (ttyname_r(fd, ttyname_buf, sizeof(ttyname_buf)) < 0)
@@ -330,13 +496,17 @@ char* ttyname(int fd)
     return ttyname_buf;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/close.html
 int close(int fd)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_close, fd);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int chdir(const char* path)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/chdir.html
+int chdir(char const* path)
 {
     if (!path) {
         errno = EFAULT;
@@ -346,12 +516,14 @@ int chdir(const char* path)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/fchdir.html
 int fchdir(int fd)
 {
     int rc = syscall(SC_fchdir, fd);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getcwd.html
 char* getcwd(char* buffer, size_t size)
 {
     if (buffer && size == 0) {
@@ -416,6 +588,7 @@ char* getcwd(char* buffer, size_t size)
     return buffer;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getwd.html
 char* getwd(char* buf)
 {
     if (buf == nullptr) {
@@ -430,6 +603,7 @@ char* getwd(char* buf)
     return p;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/sleep.html
 unsigned int sleep(unsigned int seconds)
 {
     struct timespec ts = { seconds, 0 };
@@ -438,6 +612,7 @@ unsigned int sleep(unsigned int seconds)
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/usleep.html
 int usleep(useconds_t usec)
 {
     struct timespec ts = { (long)(usec / 1000000), (long)(usec % 1000000) * 1000 };
@@ -450,27 +625,35 @@ int gethostname(char* buffer, size_t size)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int sethostname(const char* hostname, ssize_t size)
+int sethostname(char const* hostname, ssize_t size)
 {
     int rc = syscall(SC_sethostname, hostname, size);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-ssize_t readlink(const char* path, char* buffer, size_t size)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/readlinkat.html
+ssize_t readlink(char const* path, char* buffer, size_t size)
 {
-    Syscall::SC_readlink_params params { { path, strlen(path) }, { buffer, size } };
+    return readlinkat(AT_FDCWD, path, buffer, size);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/readlinkat.html
+ssize_t readlinkat(int dirfd, char const* path, char* buffer, size_t size)
+{
+    Syscall::SC_readlink_params params { { path, strlen(path) }, { buffer, size }, dirfd };
     int rc = syscall(SC_readlink, &params);
     // Return the number of bytes placed in the buffer, not the full path size.
     __RETURN_WITH_ERRNO(rc, min((size_t)rc, size), -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/lseek.html
 off_t lseek(int fd, off_t offset, int whence)
 {
     int rc = syscall(SC_lseek, fd, &offset, whence);
     __RETURN_WITH_ERRNO(rc, offset, -1);
 }
-
-int link(const char* old_path, const char* new_path)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/link.html
+int link(char const* old_path, char const* new_path)
 {
     if (!old_path || !new_path) {
         errno = EFAULT;
@@ -481,24 +664,39 @@ int link(const char* old_path, const char* new_path)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int unlink(const char* pathname)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/unlink.html
+int unlink(char const* pathname)
 {
-    int rc = syscall(SC_unlink, pathname, strlen(pathname));
+    return unlinkat(AT_FDCWD, pathname, 0);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/unlinkat.html
+int unlinkat(int dirfd, char const* pathname, int flags)
+{
+    int rc = syscall(SC_unlink, dirfd, pathname, strlen(pathname), flags);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int symlink(const char* target, const char* linkpath)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/symlink.html
+int symlink(char const* target, char const* linkpath)
+{
+    return symlinkat(target, AT_FDCWD, linkpath);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/symlinkat.html
+int symlinkat(char const* target, int newdirfd, char const* linkpath)
 {
     if (!target || !linkpath) {
         errno = EFAULT;
         return -1;
     }
-    Syscall::SC_symlink_params params { { target, strlen(target) }, { linkpath, strlen(linkpath) } };
+    Syscall::SC_symlink_params params { { target, strlen(target) }, { linkpath, strlen(linkpath) }, newdirfd };
     int rc = syscall(SC_symlink, &params);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int rmdir(const char* pathname)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/rmdir.html
+int rmdir(char const* pathname)
 {
     if (!pathname) {
         errno = EFAULT;
@@ -508,23 +706,26 @@ int rmdir(const char* pathname)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/isatty.html
 int isatty(int fd)
 {
     return fcntl(fd, F_ISTTY);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/dup.html
 int dup(int old_fd)
 {
     return fcntl(old_fd, F_DUPFD, 0);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/dup2.html
 int dup2(int old_fd, int new_fd)
 {
     int rc = syscall(SC_dup2, old_fd, new_fd);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int setgroups(size_t size, const gid_t* list)
+int setgroups(size_t size, gid_t const* list)
 {
     int rc = syscall(SC_setgroups, size, list);
     __RETURN_WITH_ERRNO(rc, rc, -1);
@@ -536,11 +737,13 @@ int getgroups(int size, gid_t list[])
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/pipe.html
 int pipe(int pipefd[2])
 {
     return pipe2(pipefd, 0);
 }
 
+//
 int pipe2(int pipefd[2], int flags)
 {
     int rc = syscall(SC_pipe, pipefd, flags);
@@ -588,23 +791,39 @@ int setresuid(uid_t ruid, uid_t euid, uid_t suid)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+int setregid(gid_t rgid, gid_t egid)
+{
+    int rc = syscall(SC_setresgid, rgid, egid);
+    __RETURN_WITH_ERRNO(rc, rc, -1);
+}
+
 int setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 {
     int rc = syscall(SC_setresgid, rgid, egid, sgid);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int access(const char* pathname, int mode)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/access.html
+int access(char const* pathname, int mode)
+{
+    return faccessat(AT_FDCWD, pathname, mode, 0);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/faccessat.html
+int faccessat(int dirfd, char const* pathname, int mode, int flags)
 {
     if (!pathname) {
         errno = EFAULT;
         return -1;
     }
-    int rc = syscall(SC_access, pathname, strlen(pathname), mode);
+
+    Syscall::SC_faccessat_params params { dirfd, { pathname, strlen(pathname) }, mode, flags };
+    int rc = syscall(SC_faccessat, &params);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int mknod(const char* pathname, mode_t mode, dev_t dev)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/mknod.html
+int mknod(char const* pathname, mode_t mode, dev_t dev)
 {
     if (!pathname) {
         errno = EFAULT;
@@ -615,6 +834,7 @@ int mknod(const char* pathname, mode_t mode, dev_t dev)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/fpathconf.html
 long fpathconf([[maybe_unused]] int fd, int name)
 {
     switch (name) {
@@ -631,7 +851,8 @@ long fpathconf([[maybe_unused]] int fd, int name)
     VERIFY_NOT_REACHED();
 }
 
-long pathconf([[maybe_unused]] const char* path, int name)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/pathconf.html
+long pathconf([[maybe_unused]] char const* path, int name)
 {
     switch (name) {
     case _PC_NAME_MAX:
@@ -647,37 +868,41 @@ long pathconf([[maybe_unused]] const char* path, int name)
     VERIFY_NOT_REACHED();
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/_exit.html
 void _exit(int status)
 {
     syscall(SC_exit, status);
     VERIFY_NOT_REACHED();
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/sync.html
 void sync()
 {
     syscall(SC_sync);
 }
 
-static String getlogin_buffer;
+static DeprecatedString getlogin_buffer;
 
 char* getlogin()
 {
     if (getlogin_buffer.is_null()) {
         if (auto* passwd = getpwuid(getuid())) {
-            getlogin_buffer = String(passwd->pw_name);
+            getlogin_buffer = DeprecatedString(passwd->pw_name);
         }
         endpwent();
     }
     return const_cast<char*>(getlogin_buffer.characters());
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/ftruncate.html
 int ftruncate(int fd, off_t length)
 {
     int rc = syscall(SC_ftruncate, fd, &length);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int truncate(const char* path, off_t length)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/truncate.html
+int truncate(char const* path, off_t length)
 {
     int fd = open(path, O_RDWR | O_CREAT, 0666);
     if (fd < 0)
@@ -700,18 +925,22 @@ int gettid()
     return cached_tid;
 }
 
-void sysbeep()
+int sysbeep(int tone)
 {
-    syscall(SC_beep);
+    int rc = syscall(SC_beep, tone);
+    __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/fsync.html
 int fsync(int fd)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_fsync, fd);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int mount(int source_fd, const char* target, const char* fs_type, int flags)
+int mount(int source_fd, char const* target, char const* fs_type, int flags)
 {
     if (!target || !fs_type) {
         errno = EFAULT;
@@ -728,7 +957,7 @@ int mount(int source_fd, const char* target, const char* fs_type, int flags)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int umount(const char* mountpoint)
+int umount(char const* mountpoint)
 {
     int rc = syscall(SC_umount, mountpoint, strlen(mountpoint));
     __RETURN_WITH_ERRNO(rc, rc, -1);
@@ -741,17 +970,17 @@ void dump_backtrace()
 
 int get_process_name(char* buffer, int buffer_size)
 {
-    int rc = syscall(SC_get_process_name, buffer, buffer_size);
+    int rc = syscall(SC_prctl, PR_GET_PROCESS_NAME, buffer, buffer_size);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int set_process_name(const char* name, size_t name_length)
+int set_process_name(char const* name, size_t name_length)
 {
-    int rc = syscall(SC_set_process_name, name, name_length);
+    int rc = syscall(SC_prctl, PR_SET_PROCESS_NAME, name, name_length);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int pledge(const char* promises, const char* execpromises)
+int pledge(char const* promises, char const* execpromises)
 {
     Syscall::SC_pledge_params params {
         { promises, promises ? strlen(promises) : 0 },
@@ -761,9 +990,10 @@ int pledge(const char* promises, const char* execpromises)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int unveil(const char* path, const char* permissions)
+int unveil(char const* path, char const* permissions)
 {
     Syscall::SC_unveil_params params {
+        static_cast<int>(UnveilFlags::CurrentProgram),
         { path, path ? strlen(path) : 0 },
         { permissions, permissions ? strlen(permissions) : 0 }
     };
@@ -771,31 +1001,113 @@ int unveil(const char* path, const char* permissions)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-char* getpass(const char* prompt)
+// https://pubs.opengroup.org/onlinepubs/7908799/xsh/getpass.html
+char* getpass(char const* prompt)
 {
-    dbgln("FIXME: getpass('{}')", prompt);
-    TODO();
+    int tty = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (tty < 0)
+        return nullptr;
+
+    static char password[PASS_MAX];
+    ssize_t chars_read;
+
+    {
+        auto close_tty = ScopeGuard([tty] {
+            close(tty);
+        });
+
+        struct termios backup { };
+        if (tcgetattr(tty, &backup) < 0)
+            return nullptr;
+
+        {
+            auto restore_termios = ScopeGuard([tty, backup] {
+                tcsetattr(tty, TCSAFLUSH, &backup);
+            });
+
+            struct termios noecho = backup;
+            noecho.c_lflag &= ~(ECHO);
+            noecho.c_lflag |= ICANON;
+
+            if (tcsetattr(tty, TCSAFLUSH, &noecho) < 0)
+                return nullptr;
+            if (tcdrain(tty) < 0)
+                return nullptr;
+
+            if (prompt) {
+                if (write(tty, prompt, strlen(prompt)) < 0)
+                    return nullptr;
+            }
+
+            chars_read = read(tty, password, sizeof(password));
+        }
+
+        write(tty, "\n", 1);
+    }
+
+    if (chars_read < 0)
+        return nullptr;
+
+    if (chars_read > 0 && (password[chars_read - 1] == '\n' || chars_read == sizeof(password)))
+        password[chars_read - 1] = '\0';
+    else
+        password[chars_read] = '\0';
+
+    return password;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/sysconf.html
 long sysconf(int name)
 {
     int rc = syscall(SC_sysconf, name);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getpagesize.html
 int getpagesize()
 {
     return PAGE_SIZE;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/pause.html
 int pause()
 {
     return select(0, nullptr, nullptr, nullptr, nullptr);
 }
 
-int chroot(const char* path)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/chroot.html
+int chroot(char const* path)
 {
     dbgln("FIXME: chroot(\"{}\")", path);
     return -1;
+}
+
+// https://pubs.opengroup.org/onlinepubs/7908799/xsh/getdtablesize.html
+int getdtablesize()
+{
+    rlimit dtablesize;
+    int rc = getrlimit(RLIMIT_NOFILE, &dtablesize);
+    __RETURN_WITH_ERRNO(rc, dtablesize.rlim_cur, rc);
+}
+
+// https://pubs.opengroup.org/onlinepubs/007904975/functions/nice.html
+int nice(int incr)
+{
+    dbgln("FIXME: nice was called with: {}, not implemented", incr);
+    return incr;
+}
+
+int brk(void* addr)
+{
+    dbgln("TODO: brk({:#x})", addr);
+    errno = ENOMEM;
+    return -1;
+}
+
+void* sbrk(intptr_t incr)
+{
+    dbgln("TODO: sbrk({:#x})", incr);
+    errno = ENOMEM;
+    return reinterpret_cast<void*>(-1);
 }
 }

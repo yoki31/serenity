@@ -1,73 +1,62 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, Mustafa Quraish <mustafa@serenityos.org>
+ * Copyright (c) 2021, Conor Byrne <conor@cbyrne.dev>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "HexEditorWidget.h"
 #include <LibConfig/Client.h>
+#include <LibCore/System.h>
+#include <LibDesktop/Launcher.h>
 #include <LibFileSystemAccessClient/Client.h>
 #include <LibGUI/Icon.h>
 #include <LibGUI/Menubar.h>
 #include <LibGUI/MessageBox.h>
+#include <LibMain/Main.h>
 #include <stdio.h>
 #include <unistd.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio recvfd sendfd rpath unix cpath wpath thread", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio recvfd sendfd rpath unix cpath wpath thread"));
 
-    auto app = GUI::Application::construct(argc, argv);
+    auto app = TRY(GUI::Application::create(arguments));
 
-    Config::pledge_domains("HexEditor");
+    TRY(Desktop::Launcher::add_allowed_handler_with_only_specific_urls("/bin/Help", { URL::create_with_file_scheme("/usr/share/man/man1/Applications/HexEditor.md") }));
+    TRY(Desktop::Launcher::seal_allowlist());
 
-    auto app_icon = GUI::Icon::default_icon("app-hex-editor");
+    Config::pledge_domain("HexEditor");
+    app->set_config_domain(TRY("HexEditor"_string));
 
-    auto window = GUI::Window::construct();
+    auto app_icon = TRY(GUI::Icon::try_create_default_icon("app-hex-editor"sv));
+
+    auto window = TRY(GUI::Window::try_create());
     window->set_title("Hex Editor");
     window->resize(640, 400);
 
-    auto& hex_editor_widget = window->set_main_widget<HexEditorWidget>();
+    auto hex_editor_widget = TRY(window->set_main_widget<HexEditorWidget>());
 
     window->on_close_request = [&]() -> GUI::Window::CloseRequestDecision {
-        if (hex_editor_widget.request_close())
+        if (hex_editor_widget->request_close())
             return GUI::Window::CloseRequestDecision::Close;
         return GUI::Window::CloseRequestDecision::StayOpen;
     };
 
-    if (unveil("/res", "r") < 0) {
-        perror("unveil");
-        return 1;
-    }
+    TRY(Core::System::unveil("/tmp/session/%sid/portal/filesystemaccess", "rw"));
+    TRY(Core::System::unveil("/res", "r"));
+    TRY(Core::System::unveil(nullptr, nullptr));
 
-    if (unveil("/tmp/portal/filesystemaccess", "rw") < 0) {
-        perror("unveil");
-        return 1;
-    }
-
-    if (unveil(nullptr, nullptr) < 0) {
-        perror("unveil");
-        return 1;
-    }
-
-    hex_editor_widget.initialize_menubar(*window);
+    TRY(hex_editor_widget->initialize_menubar(*window));
     window->show();
     window->set_icon(app_icon.bitmap_for_size(16));
 
-    if (argc > 1) {
-        auto response = FileSystemAccessClient::Client::the().request_file_read_only_approved(window->window_id(), argv[1]);
-
-        if (response.error != 0) {
-            if (response.error != -1)
-                GUI::MessageBox::show_error(window, String::formatted("Opening \"{}\" failed: {}", *response.chosen_file, strerror(response.error)));
-            return 1;
-        }
-
-        hex_editor_widget.open_file(*response.fd, *response.chosen_file);
+    if (arguments.argc > 1) {
+        // FIXME: Using `try_request_file_read_only_approved` doesn't work here since the file stored in the editor is only readable.
+        auto response = FileSystemAccessClient::Client::the().request_file(window, arguments.strings[1], Core::File::OpenMode::ReadWrite);
+        if (!response.is_error())
+            hex_editor_widget->open_file(response.value().filename(), response.value().release_stream());
     }
 
     return app->exec();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,90 +10,73 @@
 #include <AK/StringBuilder.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/File.h>
-#include <stdio.h>
-#include <string.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <unistd.h>
 
 static bool use_color = false;
-static void print(const String& name, const JsonValue&, Vector<String>& trail);
+static void print(StringView name, JsonValue const&, Vector<DeprecatedString>& trail);
 
-static const char* color_name = "";
-static const char* color_index = "";
-static const char* color_brace = "";
-static const char* color_bool = "";
-static const char* color_null = "";
-static const char* color_string = "";
-static const char* color_off = "";
+static StringView color_name = ""sv;
+static StringView color_index = ""sv;
+static StringView color_brace = ""sv;
+static StringView color_bool = ""sv;
+static StringView color_null = ""sv;
+static StringView color_string = ""sv;
+static StringView color_off = ""sv;
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio tty rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath tty"));
 
     if (isatty(STDOUT_FILENO))
         use_color = true;
 
-    if (pledge("stdio rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath"));
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("Print each value in a JSON file with its fully expanded key.");
 
-    const char* path = nullptr;
+    StringView path;
+    args_parser.add_option(use_color, "Colorize output (default on tty)", "colorize", 'c');
+    args_parser.add_option(Core::ArgsParser::Option {
+        Core::ArgsParser::OptionArgumentMode::None,
+        "Monochrome (don't colorize output)",
+        "monochrome",
+        'm',
+        nullptr,
+        [](StringView s) {
+            VERIFY(s.is_empty());
+            use_color = false;
+            return true;
+        },
+    });
     args_parser.add_positional_argument(path, "Input", "input", Core::ArgsParser::Required::No);
+    args_parser.parse(arguments);
 
-    args_parser.parse(argc, argv);
+    auto file = TRY(Core::File::open_file_or_standard_stream(path, Core::File::OpenMode::Read));
 
-    RefPtr<Core::File> file;
+    TRY(Core::System::pledge("stdio"));
 
-    if (!path) {
-        file = Core::File::standard_input();
-    } else {
-        auto file_or_error = Core::File::open(path, Core::OpenMode::ReadOnly);
-        if (file_or_error.is_error()) {
-            warnln("Failed to open {}: {}", path, file_or_error.error());
-            return 1;
-        }
-        file = file_or_error.value();
-    }
-
-    if (pledge("stdio", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
-
-    auto file_contents = file->read_all();
-    auto json = JsonValue::from_string(file_contents);
-
-    if (json.is_error()) {
-        if (path) {
-            warnln("Failed to parse '{}' as JSON", path);
-        } else {
-            warnln("Failed to parse stdin as JSON");
-        }
-        return 1;
-    }
+    auto file_contents = TRY(file->read_until_eof());
+    auto json = TRY(JsonValue::from_string(file_contents));
 
     if (use_color) {
-        color_name = "\033[33;1m";
-        color_index = "\033[35;1m";
-        color_brace = "\033[36m";
-        color_bool = "\033[32;1m";
-        color_string = "\033[31;1m";
-        color_null = "\033[34;1m";
-        color_off = "\033[0m";
+        color_name = "\033[33;1m"sv;
+        color_index = "\033[35;1m"sv;
+        color_brace = "\033[36m"sv;
+        color_bool = "\033[32;1m"sv;
+        color_string = "\033[31;1m"sv;
+        color_null = "\033[34;1m"sv;
+        color_off = "\033[0m"sv;
     }
 
-    Vector<String> trail;
-    print("json", json.value(), trail);
+    Vector<DeprecatedString> trail;
+    print("json"sv, json, trail);
     return 0;
 }
 
-static void print(const String& name, const JsonValue& value, Vector<String>& trail)
+static void print(StringView name, JsonValue const& value, Vector<DeprecatedString>& trail)
 {
     for (size_t i = 0; i < trail.size(); ++i)
         out("{}", trail[i]);
@@ -102,16 +85,16 @@ static void print(const String& name, const JsonValue& value, Vector<String>& tr
 
     if (value.is_object()) {
         outln("{}{{}}{};", color_brace, color_off);
-        trail.append(String::formatted("{}{}{}.", color_name, name, color_off));
+        trail.append(DeprecatedString::formatted("{}{}{}.", color_name, name, color_off));
         value.as_object().for_each_member([&](auto& on, auto& ov) { print(on, ov, trail); });
         trail.take_last();
         return;
     }
     if (value.is_array()) {
         outln("{}[]{};", color_brace, color_off);
-        trail.append(String::formatted("{}{}{}", color_name, name, color_off));
+        trail.append(DeprecatedString::formatted("{}{}{}", color_name, name, color_off));
         for (size_t i = 0; i < value.as_array().size(); ++i) {
-            auto element_name = String::formatted("{}{}[{}{}{}{}{}]{}", color_off, color_brace, color_off, color_index, i, color_off, color_brace, color_off);
+            auto element_name = DeprecatedString::formatted("{}{}[{}{}{}{}{}]{}", color_off, color_brace, color_off, color_index, i, color_off, color_brace, color_off);
             print(element_name, value.as_array()[i], trail);
         }
         trail.take_last();

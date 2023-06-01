@@ -1,6 +1,7 @@
 serenity_component(
     Spreadsheet
     TARGETS Spreadsheet
+    DEPENDS WebContent
 )
 
 compile_gml(CondFormatting.gml CondFormattingGML.h cond_fmt_gml)
@@ -19,8 +20,6 @@ set(SOURCES
     CellType/String.cpp
     CellType/Type.cpp
     CellTypeDialog.cpp
-    CondFormattingGML.h
-    CondFormattingViewGML.h
     ExportDialog.cpp
     HelpWindow.cpp
     ImportDialog.cpp
@@ -37,11 +36,13 @@ set(SOURCES
 set(GENERATED_SOURCES
     CSVExportGML.h
     CSVImportGML.h
+    CondFormattingGML.h
+    CondFormattingViewGML.h
     FormatSelectionPageGML.h
 )
 
 serenity_app(Spreadsheet ICON app-spreadsheet)
-target_link_libraries(Spreadsheet LibGUI LibJS LibWeb)
+target_link_libraries(Spreadsheet PRIVATE LibConfig LibCore LibFileSystem LibFileSystemAccessClient LibGfx LibGUI LibJS LibMain LibMarkdown LibSyntax LibWebView LibWeb)
 
 serenity_test(Writers/Test/TestXSVWriter.cpp Spreadsheet)
 

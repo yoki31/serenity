@@ -11,17 +11,18 @@
 
 TEST_CASE(normal_behavior)
 {
-    Trie<char, String> dictionary('/', "");
-    constexpr StringView data[] { "test", "example", "foo", "foobar" };
+    Trie<char, DeprecatedString> dictionary('/', "");
+    constexpr StringView data[] { "test"sv, "example"sv, "foo"sv, "foobar"sv };
     constexpr size_t total_chars = 18; // root (1), 'test' (4), 'example' (7), 'foo' (3), 'foobar' (3, "foo" already stored).
     for (auto& view : data) {
         auto it = view.begin();
-        dictionary.insert(it, view.end(), view, [](auto& parent, auto& it) -> Optional<String> { return String::formatted("{}{}", parent.metadata_value(), *it); });
+        MUST(dictionary.insert(it, view.end(), view, [](auto& parent, auto& it) -> Optional<DeprecatedString> { return DeprecatedString::formatted("{}{}", parent.metadata_value(), *it); }));
     }
 
     size_t i = 0;
-    for ([[maybe_unused]] auto& node : dictionary)
+    MUST(dictionary.for_each_node_in_tree_order([&](auto&) {
         ++i;
+    }));
     EXPECT_EQ(i, total_chars);
 
     for (auto& view : data) {
@@ -32,7 +33,7 @@ TEST_CASE(normal_behavior)
         EXPECT_EQ(view, node.metadata_value());
     }
 
-    constexpr StringView test_data_with_prefix_in_dict[] { "testx", "exampley", "fooa", "foobarb", "fox", "text" };
+    constexpr StringView test_data_with_prefix_in_dict[] { "testx"sv, "exampley"sv, "fooa"sv, "foobarb"sv, "fox"sv, "text"sv };
     for (auto& view : test_data_with_prefix_in_dict) {
         auto it = view.begin();
         auto& node = dictionary.traverse_until_last_accessible_node(it, view.end());
@@ -49,18 +50,18 @@ TEST_CASE(iterate)
     for (size_t i = 0; i < input.size(); ++i)
         input[i] = i;
 
-    bunch_of_numbers.insert(input.begin(), input.end());
+    MUST(bunch_of_numbers.insert(input.begin(), input.end()));
 
     // Iteration order is preorder (order between adjacent nodes is not defined, but parents come before children)
     // in this case, the tree is linear.
     size_t i = 0;
     bool is_root = true;
-    for (auto& node : bunch_of_numbers) {
+    MUST(bunch_of_numbers.for_each_node_in_tree_order([&](auto& node) {
         if (is_root) {
             is_root = false;
-            continue;
+            return;
         }
         EXPECT_EQ(input[i], node.value());
         ++i;
-    }
+    }));
 }

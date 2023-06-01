@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,7 +8,6 @@
 #pragma once
 
 #include <AK/Function.h>
-#include <AK/String.h>
 #include <AK/Types.h>
 #include <AK/WeakPtr.h>
 #include <LibCore/DeferredInvocationContext.h>
@@ -21,20 +21,19 @@ public:
         Invalid = 0,
         Quit,
         Timer,
-        NotifierRead,
-        NotifierWrite,
+        NotifierActivation,
         DeferredInvoke,
         ChildAdded,
         ChildRemoved,
         Custom,
     };
 
-    Event() { }
+    Event() = default;
     explicit Event(unsigned type)
         : m_type(type)
     {
     }
-    virtual ~Event() { }
+    virtual ~Event() = default;
 
     unsigned type() const { return m_type; }
 
@@ -49,6 +48,7 @@ private:
 
 class DeferredInvocationEvent : public Event {
     friend class EventLoop;
+    friend class ThreadEventQueue;
 
 public:
     DeferredInvocationEvent(NonnullRefPtr<DeferredInvocationContext> context, Function<void()> invokee)
@@ -70,7 +70,7 @@ public:
         , m_timer_id(timer_id)
     {
     }
-    ~TimerEvent() { }
+    ~TimerEvent() = default;
 
     int timer_id() const { return m_timer_id; }
 
@@ -78,29 +78,14 @@ private:
     int m_timer_id;
 };
 
-class NotifierReadEvent final : public Event {
+class NotifierActivationEvent final : public Event {
 public:
-    explicit NotifierReadEvent(int fd)
-        : Event(Event::NotifierRead)
+    explicit NotifierActivationEvent(int fd)
+        : Event(Event::NotifierActivation)
         , m_fd(fd)
     {
     }
-    ~NotifierReadEvent() { }
-
-    int fd() const { return m_fd; }
-
-private:
-    int m_fd;
-};
-
-class NotifierWriteEvent final : public Event {
-public:
-    explicit NotifierWriteEvent(int fd)
-        : Event(Event::NotifierWrite)
-        , m_fd(fd)
-    {
-    }
-    ~NotifierWriteEvent() { }
+    ~NotifierActivationEvent() = default;
 
     int fd() const { return m_fd; }
 
@@ -111,13 +96,13 @@ private:
 class ChildEvent final : public Event {
 public:
     ChildEvent(Type, Object& child, Object* insertion_before_child = nullptr);
-    ~ChildEvent();
+    ~ChildEvent() = default;
 
     Object* child();
-    const Object* child() const;
+    Object const* child() const;
 
     Object* insertion_before_child();
-    const Object* insertion_before_child() const;
+    Object const* insertion_before_child() const;
 
 private:
     WeakPtr<Object> m_child;
@@ -131,7 +116,7 @@ public:
         , m_custom_type(custom_type)
     {
     }
-    ~CustomEvent() { }
+    ~CustomEvent() = default;
 
     int custom_type() const { return m_custom_type; }
 

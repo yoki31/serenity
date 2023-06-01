@@ -11,31 +11,21 @@
 
 namespace Keyboard {
 
-Optional<CharacterMapData> CharacterMapFile::load_from_file(const String& filename)
+ErrorOr<CharacterMapData> CharacterMapFile::load_from_file(DeprecatedString const& filename)
 {
     auto path = filename;
-    if (!path.ends_with(".json")) {
+    if (!path.ends_with(".json"sv)) {
         StringBuilder full_path;
-        full_path.append("/res/keymaps/");
+        full_path.append("/res/keymaps/"sv);
         full_path.append(filename);
-        full_path.append(".json");
-        path = full_path.to_string();
+        full_path.append(".json"sv);
+        path = full_path.to_deprecated_string();
     }
 
-    auto file = Core::File::construct(path);
-    file->open(Core::OpenMode::ReadOnly);
-    if (!file->is_open()) {
-        dbgln("Failed to open {}: {}", path, file->error_string());
-        return {};
-    }
-
-    auto file_contents = file->read_all();
-    auto json_result = JsonValue::from_string(file_contents);
-    if (json_result.is_error()) {
-        dbgln("Failed to load character map from file {}", path);
-        return {};
-    }
-    auto json = json_result.value().as_object();
+    auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
+    auto file_contents = TRY(file->read_until_eof());
+    auto json_result = TRY(JsonValue::from_string(file_contents));
+    auto const& json = json_result.as_object();
 
     Vector<u32> map = read_map(json, "map");
     Vector<u32> shift_map = read_map(json, "shift_map");
@@ -65,7 +55,7 @@ Optional<CharacterMapData> CharacterMapFile::load_from_file(const String& filena
     return character_map;
 }
 
-Vector<u32> CharacterMapFile::read_map(const JsonObject& json, const String& name)
+Vector<u32> CharacterMapFile::read_map(JsonObject const& json, DeprecatedString const& name)
 {
     if (!json.has(name))
         return {};
@@ -73,7 +63,7 @@ Vector<u32> CharacterMapFile::read_map(const JsonObject& json, const String& nam
     Vector<u32> buffer;
     buffer.resize(CHAR_MAP_SIZE);
 
-    auto map_arr = json.get(name).as_array();
+    auto map_arr = json.get_array(name).value();
     for (size_t i = 0; i < map_arr.size(); i++) {
         auto key_value = map_arr.at(i).as_string();
         if (key_value.length() == 0) {

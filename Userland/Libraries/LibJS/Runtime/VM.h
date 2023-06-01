@@ -1,27 +1,27 @@
 /*
- * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2020-2021, Linus Groh <linusg@serenityos.org>
- * Copyright (c) 2021, David Tuin <davidot@serenityos.org>
+ * Copyright (c) 2020-2023, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2020-2023, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2021-2022, David Tuin <davidot@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/DeprecatedFlyString.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/RefCounted.h>
 #include <AK/StackInfo.h>
 #include <AK/Variant.h>
 #include <LibJS/Heap/Heap.h>
+#include <LibJS/Heap/MarkedVector.h>
 #include <LibJS/Runtime/CommonPropertyNames.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibJS/Runtime/Error.h>
 #include <LibJS/Runtime/ErrorTypes.h>
-#include <LibJS/Runtime/Exception.h>
 #include <LibJS/Runtime/ExecutionContext.h>
-#include <LibJS/Runtime/MarkedValueList.h>
+#include <LibJS/Runtime/Iterator.h>
 #include <LibJS/Runtime/Promise.h>
 #include <LibJS/Runtime/Value.h>
 
@@ -30,36 +30,25 @@ namespace JS {
 class Identifier;
 struct BindingPattern;
 
-enum class ScopeType {
-    None,
-    Function,
-    Block,
-    Try,
-    Breakable,
-    Continuable,
-};
-
 class VM : public RefCounted<VM> {
 public:
     struct CustomData {
-        virtual ~CustomData();
+        virtual ~CustomData() = default;
+
+        virtual void spin_event_loop_until(JS::SafeFunction<bool()> goal_condition) = 0;
     };
 
-    static NonnullRefPtr<VM> create(OwnPtr<CustomData> = {});
-    ~VM();
+    static ErrorOr<NonnullRefPtr<VM>> create(OwnPtr<CustomData> = {});
+    ~VM() = default;
 
     Heap& heap() { return m_heap; }
-    const Heap& heap() const { return m_heap; }
+    Heap const& heap() const { return m_heap; }
 
     Interpreter& interpreter();
     Interpreter* interpreter_if_exists();
 
     void push_interpreter(Interpreter&);
     void pop_interpreter(Interpreter&);
-
-    Exception* exception() { return m_exception; }
-    void set_exception(Exception& exception) { m_exception = &exception; }
-    void clear_exception() { m_exception = nullptr; }
 
     void dump_backtrace() const;
 
@@ -68,42 +57,71 @@ public:
         InterpreterExecutionScope(Interpreter&);
         ~InterpreterExecutionScope();
 
+        Interpreter& interpreter() { return m_interpreter; }
+
     private:
         Interpreter& m_interpreter;
     };
 
     void gather_roots(HashTable<Cell*>&);
 
-#define __JS_ENUMERATE(SymbolName, snake_name) \
-    Symbol* well_known_symbol_##snake_name() const { return m_well_known_symbol_##snake_name; }
+#define __JS_ENUMERATE(SymbolName, snake_name)                  \
+    NonnullGCPtr<Symbol> well_known_symbol_##snake_name() const \
+    {                                                           \
+        return *m_well_known_symbols.snake_name;                \
+    }
     JS_ENUMERATE_WELL_KNOWN_SYMBOLS
 #undef __JS_ENUMERATE
 
-    Symbol* get_global_symbol(const String& description);
+    HashMap<String, GCPtr<PrimitiveString>>& string_cache()
+    {
+        return m_string_cache;
+    }
 
-    HashMap<String, PrimitiveString*>& string_cache() { return m_string_cache; }
+    HashMap<DeprecatedString, GCPtr<PrimitiveString>>& deprecated_string_cache()
+    {
+        return m_deprecated_string_cache;
+    }
+
     PrimitiveString& empty_string() { return *m_empty_string; }
+
     PrimitiveString& single_ascii_character_string(u8 character)
     {
         VERIFY(character < 0x80);
         return *m_single_ascii_character_strings[character];
     }
 
+    // This represents the list of errors from ErrorTypes.h whose messages are used in contexts which
+    // must not fail to allocate when they are used. For example, we cannot allocate when we raise an
+    // out-of-memory error, thus we pre-allocate that error string at VM creation time.
+    enum class ErrorMessage {
+        OutOfMemory,
+
+        // Keep this last:
+        __Count,
+    };
+    String const& error_message(ErrorMessage) const;
+
     bool did_reach_stack_space_limit() const
     {
-#ifdef HAS_ADDRESS_SANITIZER
+        // Address sanitizer (ASAN) used to check for more space but
+        // currently we can't detect the stack size with it enabled.
         return m_stack_info.size_free() < 32 * KiB;
-#else
-        return m_stack_info.size_free() < 16 * KiB;
-#endif
     }
 
-    ThrowCompletionOr<void> push_execution_context(ExecutionContext& context, GlobalObject& global_object)
+    void push_execution_context(ExecutionContext& context)
     {
-        VERIFY(!exception());
+        m_execution_context_stack.append(&context);
+    }
+
+    // TODO: Rename this function instead of providing a second argument, now that the global object is no longer passed in.
+    struct CheckStackSpaceLimitTag { };
+
+    ThrowCompletionOr<void> push_execution_context(ExecutionContext& context, CheckStackSpaceLimitTag)
+    {
         // Ensure we got some stack space left, so the next function call doesn't kill us.
         if (did_reach_stack_space_limit())
-            return throw_completion<Error>(global_object, ErrorType::CallStackSizeExceeded);
+            return throw_completion<InternalError>(ErrorType::CallStackSizeExceeded);
         m_execution_context_stack.append(&context);
         return {};
     }
@@ -115,8 +133,14 @@ public:
             on_call_stack_emptied();
     }
 
+    // https://tc39.es/ecma262/#running-execution-context
+    // At any point in time, there is at most one execution context per agent that is actually executing code.
+    // This is known as the agent's running execution context.
     ExecutionContext& running_execution_context() { return *m_execution_context_stack.last(); }
     ExecutionContext const& running_execution_context() const { return *m_execution_context_stack.last(); }
+
+    // https://tc39.es/ecma262/#execution-context-stack
+    // The execution context stack is used to track execution contexts.
     Vector<ExecutionContext*> const& execution_context_stack() const { return m_execution_context_stack; }
     Vector<ExecutionContext*>& execution_context_stack() { return m_execution_context_stack; }
 
@@ -130,6 +154,11 @@ public:
     // The value of the Realm component of the running execution context is also called the current Realm Record.
     Realm const* current_realm() const { return running_execution_context().realm; }
     Realm* current_realm() { return running_execution_context().realm; }
+
+    // https://tc39.es/ecma262/#active-function-object
+    // The value of the Function component of the running execution context is also called the active function object.
+    FunctionObject const* active_function_object() const { return running_execution_context().function; }
+    FunctionObject* active_function_object() { return running_execution_context().function; }
 
     bool in_strict_mode() const;
 
@@ -148,145 +177,122 @@ public:
         return index < arguments.size() ? arguments[index] : js_undefined();
     }
 
-    Value this_value(Object& global_object) const
+    Value this_value() const
     {
-        if (m_execution_context_stack.is_empty())
-            return &global_object;
+        VERIFY(!m_execution_context_stack.is_empty());
         return running_execution_context().this_value;
     }
 
-    Value resolve_this_binding(GlobalObject&);
+    ThrowCompletionOr<Value> resolve_this_binding();
 
-    Value last_value() const { return m_last_value; }
-    void set_last_value(Badge<Bytecode::Interpreter>, Value value) { m_last_value = value; }
-    void set_last_value(Badge<Interpreter>, Value value) { m_last_value = value; }
+    StackInfo const& stack_info() const { return m_stack_info; };
 
-    const StackInfo& stack_info() const { return m_stack_info; };
-
-    bool underscore_is_last_value() const { return m_underscore_is_last_value; }
-    void set_underscore_is_last_value(bool b) { m_underscore_is_last_value = b; }
+    HashMap<String, NonnullGCPtr<Symbol>> const& global_symbol_registry() const { return m_global_symbol_registry; }
+    HashMap<String, NonnullGCPtr<Symbol>>& global_symbol_registry() { return m_global_symbol_registry; }
 
     u32 execution_generation() const { return m_execution_generation; }
     void finish_execution_generation() { ++m_execution_generation; }
 
-    void unwind(ScopeType type, FlyString label = {})
-    {
-        m_unwind_until = type;
-        m_unwind_until_label = move(label);
-    }
-    void stop_unwind()
-    {
-        m_unwind_until = ScopeType::None;
-        m_unwind_until_label = {};
-    }
-    bool should_unwind_until(ScopeType type, Vector<FlyString> const& labels) const
-    {
-        if (m_unwind_until_label.is_null())
-            return m_unwind_until == type;
-        return m_unwind_until == type && any_of(labels.begin(), labels.end(), [&](FlyString const& label) {
-            return m_unwind_until_label == label;
-        });
-    }
-    bool should_unwind() const { return m_unwind_until != ScopeType::None; }
-
-    ScopeType unwind_until() const { return m_unwind_until; }
-    FlyString unwind_until_label() const { return m_unwind_until_label; }
-
-    Reference resolve_binding(FlyString const&, Environment* = nullptr);
-    Reference get_identifier_reference(Environment*, FlyString, bool strict, size_t hops = 0);
-
-    template<typename T, typename... Args>
-    void throw_exception(GlobalObject& global_object, Args&&... args)
-    {
-        return throw_exception(global_object, T::create(global_object, forward<Args>(args)...));
-    }
-
-    void throw_exception(Exception&);
-    void throw_exception(GlobalObject& global_object, Value value)
-    {
-        return throw_exception(*heap().allocate<Exception>(global_object, value));
-    }
-
-    template<typename T, typename... Args>
-    void throw_exception(GlobalObject& global_object, ErrorType type, Args&&... args)
-    {
-        return throw_exception(global_object, T::create(global_object, String::formatted(type.message(), forward<Args>(args)...)));
-    }
+    ThrowCompletionOr<Reference> resolve_binding(DeprecatedFlyString const&, Environment* = nullptr);
+    ThrowCompletionOr<Reference> get_identifier_reference(Environment*, DeprecatedFlyString, bool strict, size_t hops = 0);
 
     // 5.2.3.2 Throw an Exception, https://tc39.es/ecma262/#sec-throw-an-exception
     template<typename T, typename... Args>
-    Completion throw_completion(GlobalObject& global_object, Args&&... args)
+    Completion throw_completion(Args&&... args)
     {
-        auto* error = T::create(global_object, forward<Args>(args)...);
-        // NOTE: This is temporary until we remove VM::exception().
-        throw_exception(global_object, error);
-        return JS::throw_completion(error);
+        auto& realm = *current_realm();
+        auto completion = T::create(realm, forward<Args>(args)...);
+
+        if constexpr (IsSame<decltype(completion), ThrowCompletionOr<NonnullGCPtr<T>>>)
+            return JS::throw_completion(MUST_OR_THROW_OOM(completion));
+        else
+            return JS::throw_completion(completion);
     }
 
     template<typename T, typename... Args>
-    Completion throw_completion(GlobalObject& global_object, ErrorType type, Args&&... args)
+    Completion throw_completion(ErrorType type, Args&&... args)
     {
-        return throw_completion<T>(global_object, String::formatted(type.message(), forward<Args>(args)...));
+        return throw_completion<T>(DeprecatedString::formatted(type.message(), forward<Args>(args)...));
     }
-
-    Value construct(FunctionObject&, FunctionObject& new_target, Optional<MarkedValueList> arguments);
-
-    String join_arguments(size_t start_index = 0) const;
 
     Value get_new_target();
 
-    template<typename... Args>
-    [[nodiscard]] ALWAYS_INLINE ThrowCompletionOr<Value> call(FunctionObject& function, Value this_value, Args... args)
-    {
-        if constexpr (sizeof...(Args) > 0) {
-            MarkedValueList arguments_list { heap() };
-            (..., arguments_list.append(move(args)));
-            return call(function, this_value, move(arguments_list));
-        }
-
-        return call(function, this_value);
-    }
+    Object& get_global_object();
 
     CommonPropertyNames names;
 
     void run_queued_promise_jobs();
-    void enqueue_promise_job(NativeFunction&);
+    void enqueue_promise_job(Function<ThrowCompletionOr<Value>()> job, Realm*);
 
     void run_queued_finalization_registry_cleanup_jobs();
     void enqueue_finalization_registry_cleanup_job(FinalizationRegistry&);
 
-    void promise_rejection_tracker(const Promise&, Promise::RejectionOperation) const;
+    void promise_rejection_tracker(Promise&, Promise::RejectionOperation) const;
 
     Function<void()> on_call_stack_emptied;
-    Function<void(const Promise&)> on_promise_unhandled_rejection;
-    Function<void(const Promise&)> on_promise_rejection_handled;
-
-    ThrowCompletionOr<void> initialize_instance_elements(Object& object, ECMAScriptFunctionObject& constructor);
+    Function<void(Promise&)> on_promise_unhandled_rejection;
+    Function<void(Promise&)> on_promise_rejection_handled;
 
     CustomData* custom_data() { return m_custom_data; }
 
-    ThrowCompletionOr<void> destructuring_assignment_evaluation(NonnullRefPtr<BindingPattern> const& target, Value value, GlobalObject& global_object);
-    ThrowCompletionOr<void> binding_initialization(FlyString const& target, Value value, Environment* environment, GlobalObject& global_object);
-    ThrowCompletionOr<void> binding_initialization(NonnullRefPtr<BindingPattern> const& target, Value value, Environment* environment, GlobalObject& global_object);
+    ThrowCompletionOr<void> destructuring_assignment_evaluation(NonnullRefPtr<BindingPattern const> const& target, Value value);
+    ThrowCompletionOr<void> binding_initialization(DeprecatedFlyString const& target, Value value, Environment* environment);
+    ThrowCompletionOr<void> binding_initialization(NonnullRefPtr<BindingPattern const> const& target, Value value, Environment* environment);
 
-    ThrowCompletionOr<Value> named_evaluation_if_anonymous_function(GlobalObject& global_object, ASTNode const& expression, FlyString const& name);
+    ThrowCompletionOr<Value> named_evaluation_if_anonymous_function(ASTNode const& expression, DeprecatedFlyString const& name);
 
     void save_execution_context_stack();
     void restore_execution_context_stack();
 
+    // Do not call this method unless you are sure this is the only and first module to be loaded in this vm.
+    ThrowCompletionOr<void> link_and_eval_module(Badge<Interpreter>, SourceTextModule& module);
+
+    ScriptOrModule get_active_script_or_module() const;
+
+    Function<ThrowCompletionOr<NonnullGCPtr<Module>>(ScriptOrModule, ModuleRequest const&)> host_resolve_imported_module;
+    Function<ThrowCompletionOr<void>(ScriptOrModule, ModuleRequest, PromiseCapability const&)> host_import_module_dynamically;
+    Function<void(ScriptOrModule, ModuleRequest const&, PromiseCapability const&, Promise*)> host_finish_dynamic_import;
+
+    Function<HashMap<PropertyKey, Value>(SourceTextModule const&)> host_get_import_meta_properties;
+    Function<void(Object*, SourceTextModule const&)> host_finalize_import_meta;
+
+    Function<Vector<DeprecatedString>()> host_get_supported_import_assertions;
+
+    void enable_default_host_import_module_dynamically_hook();
+
+    Function<void(Promise&, Promise::RejectionOperation)> host_promise_rejection_tracker;
+    Function<ThrowCompletionOr<Value>(JobCallback&, Value, MarkedVector<Value>)> host_call_job_callback;
+    Function<void(FinalizationRegistry&)> host_enqueue_finalization_registry_cleanup_job;
+    Function<void(Function<ThrowCompletionOr<Value>()>, Realm*)> host_enqueue_promise_job;
+    Function<JobCallback(FunctionObject&)> host_make_job_callback;
+    Function<ThrowCompletionOr<void>(Realm&)> host_ensure_can_compile_strings;
+    Function<ThrowCompletionOr<void>(Object&)> host_ensure_can_add_private_element;
+
 private:
-    explicit VM(OwnPtr<CustomData>);
+    using ErrorMessages = AK::Array<String, to_underlying(ErrorMessage::__Count)>;
 
-    [[nodiscard]] ThrowCompletionOr<Value> call_internal(FunctionObject&, Value this_value, Optional<MarkedValueList> arguments);
+    struct WellKnownSymbols {
+#define __JS_ENUMERATE(SymbolName, snake_name) \
+    GCPtr<Symbol> snake_name;
+        JS_ENUMERATE_WELL_KNOWN_SYMBOLS
+#undef __JS_ENUMERATE
+    };
 
-    ThrowCompletionOr<Object*> copy_data_properties(Object& rest_object, Object const& source, HashTable<PropertyKey> const& seen_names, GlobalObject& global_object);
+    VM(OwnPtr<CustomData>, ErrorMessages);
 
-    ThrowCompletionOr<void> property_binding_initialization(BindingPattern const& binding, Value value, Environment* environment, GlobalObject& global_object);
-    ThrowCompletionOr<void> iterator_binding_initialization(BindingPattern const& binding, Object* iterator, bool& iterator_done, Environment* environment, GlobalObject& global_object);
+    ThrowCompletionOr<void> property_binding_initialization(BindingPattern const& binding, Value value, Environment* environment);
+    ThrowCompletionOr<void> iterator_binding_initialization(BindingPattern const& binding, Iterator& iterator_record, Environment* environment);
 
-    Exception* m_exception { nullptr };
+    ThrowCompletionOr<NonnullGCPtr<Module>> resolve_imported_module(ScriptOrModule referencing_script_or_module, ModuleRequest const& module_request);
+    ThrowCompletionOr<void> link_and_eval_module(Module& module);
 
-    HashMap<String, PrimitiveString*> m_string_cache;
+    ThrowCompletionOr<void> import_module_dynamically(ScriptOrModule referencing_script_or_module, ModuleRequest module_request, PromiseCapability const& promise_capability);
+    void finish_dynamic_import(ScriptOrModule referencing_script_or_module, ModuleRequest module_request, PromiseCapability const& promise_capability, Promise* inner_promise);
+
+    void set_well_known_symbols(WellKnownSymbols well_known_symbols) { m_well_known_symbols = move(well_known_symbols); }
+
+    HashMap<String, GCPtr<PrimitiveString>> m_string_cache;
+    HashMap<DeprecatedString, GCPtr<PrimitiveString>> m_deprecated_string_cache;
 
     Heap m_heap;
     Vector<Interpreter*> m_interpreters;
@@ -295,41 +301,37 @@ private:
 
     Vector<Vector<ExecutionContext*>> m_saved_execution_context_stacks;
 
-    Value m_last_value;
-    ScopeType m_unwind_until { ScopeType::None };
-    FlyString m_unwind_until_label;
-
     StackInfo m_stack_info;
 
-    HashMap<String, Symbol*> m_global_symbol_map;
+    // GlobalSymbolRegistry, https://tc39.es/ecma262/#table-globalsymbolregistry-record-fields
+    HashMap<String, NonnullGCPtr<Symbol>> m_global_symbol_registry;
 
-    Vector<NativeFunction*> m_promise_jobs;
+    Vector<Function<ThrowCompletionOr<Value>()>> m_promise_jobs;
 
-    Vector<FinalizationRegistry*> m_finalization_registry_cleanup_jobs;
+    Vector<GCPtr<FinalizationRegistry>> m_finalization_registry_cleanup_jobs;
 
-    PrimitiveString* m_empty_string { nullptr };
-    PrimitiveString* m_single_ascii_character_strings[128] {};
+    GCPtr<PrimitiveString> m_empty_string;
+    GCPtr<PrimitiveString> m_single_ascii_character_strings[128] {};
+    ErrorMessages m_error_messages;
 
-#define __JS_ENUMERATE(SymbolName, snake_name) \
-    Symbol* m_well_known_symbol_##snake_name { nullptr };
-    JS_ENUMERATE_WELL_KNOWN_SYMBOLS
-#undef __JS_ENUMERATE
+    struct StoredModule {
+        ScriptOrModule referencing_script_or_module;
+        DeprecatedString filename;
+        DeprecatedString type;
+        Handle<Module> module;
+        bool has_once_started_linking { false };
+    };
 
-    bool m_underscore_is_last_value { false };
+    StoredModule* get_stored_module(ScriptOrModule const& script_or_module, DeprecatedString const& filename, DeprecatedString const& type);
+
+    Vector<StoredModule> m_loaded_modules;
+
+    WellKnownSymbols m_well_known_symbols;
 
     u32 m_execution_generation { 0 };
 
     OwnPtr<CustomData> m_custom_data;
 };
-
-template<>
-[[nodiscard]] ALWAYS_INLINE ThrowCompletionOr<Value> VM::call(FunctionObject& function, Value this_value, MarkedValueList arguments) { return call_internal(function, this_value, move(arguments)); }
-
-template<>
-[[nodiscard]] ALWAYS_INLINE ThrowCompletionOr<Value> VM::call(FunctionObject& function, Value this_value, Optional<MarkedValueList> arguments) { return call_internal(function, this_value, move(arguments)); }
-
-template<>
-[[nodiscard]] ALWAYS_INLINE ThrowCompletionOr<Value> VM::call(FunctionObject& function, Value this_value) { return call(function, this_value, Optional<MarkedValueList> {}); }
 
 ALWAYS_INLINE Heap& Cell::heap() const
 {

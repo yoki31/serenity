@@ -1,24 +1,29 @@
+include(libgl_generators)
+
 set(SOURCES
-    Tex/NameAllocator.cpp
-    Tex/Sampler2D.cpp
-    Tex/Texture2D.cpp
-    Tex/TextureUnit.cpp
-    Clipper.cpp
-    GLBlend.cpp
-    GLColor.cpp
+    Buffer/Buffer.cpp
+    Buffer.cpp
+    ClipPlane.cpp
+    ContextParameter.cpp
     GLContext.cpp
-    GLFog.cpp
-    GLLights.cpp
-    GLLists.cpp
-    GLMat.cpp
-    GLTexture.cpp
-    GLUtils.cpp
-    GLVert.cpp
-    GLVertexArrays.cpp
-    SoftwareGLContext.cpp
-    SoftwareRasterizer.cpp
-    DepthBuffer.cpp
+    Image.cpp
+    Lighting.cpp
+    List.cpp
+    Matrix.cpp
+    NameAllocator.cpp
+    Shader.cpp
+    Shaders/Program.cpp
+    Shaders/Shader.cpp
+    Stencil.cpp
+    Tex/Texture2D.cpp
+    Texture.cpp
+    Vertex.cpp
 )
 
+generate_libgl_implementation()
+
+set(GENERATED_SOURCES
+    GLAPI.cpp)
+
 serenity_lib(LibGL gl)
-target_link_libraries(LibGL LibM LibCore LibGfx)
+target_link_libraries(LibGL PRIVATE LibCore LibGfx LibGLSL LibGPU)

@@ -1,6 +1,5 @@
 set(SOURCES
     Document.cpp
-    GeminiJob.cpp
     GeminiRequest.cpp
     GeminiResponse.cpp
     Job.cpp
@@ -8,4 +7,4 @@ set(SOURCES
 )
 
 serenity_lib(LibGemini gemini)
-target_link_libraries(LibGemini LibCore LibTLS)
+target_link_libraries(LibGemini PRIVATE LibCore LibTLS)

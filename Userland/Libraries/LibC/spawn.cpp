@@ -18,7 +18,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -29,7 +28,7 @@ struct posix_spawn_file_actions_state {
 
 extern "C" {
 
-[[noreturn]] static void posix_spawn_child(const char* path, const posix_spawn_file_actions_t* file_actions, const posix_spawnattr_t* attr, char* const argv[], char* const envp[], int (*exec)(const char*, char* const[], char* const[]))
+[[noreturn]] static void posix_spawn_child(char const* path, posix_spawn_file_actions_t const* file_actions, posix_spawnattr_t const* attr, char* const argv[], char* const envp[], int (*exec)(char const*, char* const[], char* const[]))
 {
     if (attr) {
         short flags = attr->flags;
@@ -86,7 +85,7 @@ extern "C" {
     }
 
     if (file_actions) {
-        for (const auto& action : file_actions->state->actions) {
+        for (auto const& action : file_actions->state->actions) {
             if (action() < 0) {
                 perror("posix_spawn file action");
                 _exit(127);
@@ -99,7 +98,8 @@ extern "C" {
     _exit(127);
 }
 
-int posix_spawn(pid_t* out_pid, const char* path, const posix_spawn_file_actions_t* file_actions, const posix_spawnattr_t* attr, char* const argv[], char* const envp[])
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawn.html
+int posix_spawn(pid_t* out_pid, char const* path, posix_spawn_file_actions_t const* file_actions, posix_spawnattr_t const* attr, char* const argv[], char* const envp[])
 {
     pid_t child_pid = fork();
     if (child_pid < 0)
@@ -113,7 +113,8 @@ int posix_spawn(pid_t* out_pid, const char* path, const posix_spawn_file_actions
     posix_spawn_child(path, file_actions, attr, argv, envp, execve);
 }
 
-int posix_spawnp(pid_t* out_pid, const char* path, const posix_spawn_file_actions_t* file_actions, const posix_spawnattr_t* attr, char* const argv[], char* const envp[])
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnp.html
+int posix_spawnp(pid_t* out_pid, char const* file, posix_spawn_file_actions_t const* file_actions, posix_spawnattr_t const* attr, char* const argv[], char* const envp[])
 {
     pid_t child_pid = fork();
     if (child_pid < 0)
@@ -124,10 +125,11 @@ int posix_spawnp(pid_t* out_pid, const char* path, const posix_spawn_file_action
         return 0;
     }
 
-    posix_spawn_child(path, file_actions, attr, argv, envp, execvpe);
+    posix_spawn_child(file, file_actions, attr, argv, envp, execvpe);
 }
 
-int posix_spawn_file_actions_addchdir(posix_spawn_file_actions_t* actions, const char* path)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawn_file_actions_addchdir.html
+int posix_spawn_file_actions_addchdir(posix_spawn_file_actions_t* actions, char const* path)
 {
     actions->state->actions.append([path]() { return chdir(path); });
     return 0;
@@ -139,19 +141,22 @@ int posix_spawn_file_actions_addfchdir(posix_spawn_file_actions_t* actions, int 
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawn_file_actions_addclose.html
 int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t* actions, int fd)
 {
     actions->state->actions.append([fd]() { return close(fd); });
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawn_file_actions_adddup2.html
 int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t* actions, int old_fd, int new_fd)
 {
     actions->state->actions.append([old_fd, new_fd]() { return dup2(old_fd, new_fd); });
     return 0;
 }
 
-int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t* actions, int want_fd, const char* path, int flags, mode_t mode)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawn_file_actions_addopen.html
+int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t* actions, int want_fd, char const* path, int flags, mode_t mode)
 {
     actions->state->actions.append([want_fd, path, flags, mode]() {
         int opened_fd = open(path, flags, mode);
@@ -164,59 +169,69 @@ int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t* actions, int wa
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawn_file_actions_destroy.html
 int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t* actions)
 {
     delete actions->state;
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawn_file_actions_init.html
 int posix_spawn_file_actions_init(posix_spawn_file_actions_t* actions)
 {
     actions->state = new posix_spawn_file_actions_state;
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_destroy.html
 int posix_spawnattr_destroy(posix_spawnattr_t*)
 {
     return 0;
 }
 
-int posix_spawnattr_getflags(const posix_spawnattr_t* attr, short* out_flags)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_getflags.html
+int posix_spawnattr_getflags(posix_spawnattr_t const* attr, short* out_flags)
 {
     *out_flags = attr->flags;
     return 0;
 }
 
-int posix_spawnattr_getpgroup(const posix_spawnattr_t* attr, pid_t* out_pgroup)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_getpgroup.html
+int posix_spawnattr_getpgroup(posix_spawnattr_t const* attr, pid_t* out_pgroup)
 {
     *out_pgroup = attr->pgroup;
     return 0;
 }
 
-int posix_spawnattr_getschedparam(const posix_spawnattr_t* attr, struct sched_param* out_schedparam)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_getschedparam.html
+int posix_spawnattr_getschedparam(posix_spawnattr_t const* attr, struct sched_param* out_schedparam)
 {
     *out_schedparam = attr->schedparam;
     return 0;
 }
 
-int posix_spawnattr_getschedpolicy(const posix_spawnattr_t* attr, int* out_schedpolicty)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_getschedpolicy.html
+int posix_spawnattr_getschedpolicy(posix_spawnattr_t const* attr, int* out_schedpolicy)
 {
-    *out_schedpolicty = attr->schedpolicy;
+    *out_schedpolicy = attr->schedpolicy;
     return 0;
 }
 
-int posix_spawnattr_getsigdefault(const posix_spawnattr_t* attr, sigset_t* out_sigdefault)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_getsigdefault.html
+int posix_spawnattr_getsigdefault(posix_spawnattr_t const* attr, sigset_t* out_sigdefault)
 {
     *out_sigdefault = attr->sigdefault;
     return 0;
 }
 
-int posix_spawnattr_getsigmask(const posix_spawnattr_t* attr, sigset_t* out_sigmask)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_getsigmask.html
+int posix_spawnattr_getsigmask(posix_spawnattr_t const* attr, sigset_t* out_sigmask)
 {
     *out_sigmask = attr->sigmask;
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_init.html
 int posix_spawnattr_init(posix_spawnattr_t* attr)
 {
     attr->flags = 0;
@@ -228,6 +243,7 @@ int posix_spawnattr_init(posix_spawnattr_t* attr)
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_setflags.html
 int posix_spawnattr_setflags(posix_spawnattr_t* attr, short flags)
 {
     if (flags & ~(POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSCHEDPARAM | POSIX_SPAWN_SETSCHEDULER | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSID))
@@ -237,31 +253,36 @@ int posix_spawnattr_setflags(posix_spawnattr_t* attr, short flags)
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_setpgroup.html
 int posix_spawnattr_setpgroup(posix_spawnattr_t* attr, pid_t pgroup)
 {
     attr->pgroup = pgroup;
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_setschedparam.html
 int posix_spawnattr_setschedparam(posix_spawnattr_t* attr, const struct sched_param* schedparam)
 {
     attr->schedparam = *schedparam;
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_setschedpolicy.html
 int posix_spawnattr_setschedpolicy(posix_spawnattr_t* attr, int schedpolicy)
 {
     attr->schedpolicy = schedpolicy;
     return 0;
 }
 
-int posix_spawnattr_setsigdefault(posix_spawnattr_t* attr, const sigset_t* sigdefault)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_setsigdefault.html
+int posix_spawnattr_setsigdefault(posix_spawnattr_t* attr, sigset_t const* sigdefault)
 {
     attr->sigdefault = *sigdefault;
     return 0;
 }
 
-int posix_spawnattr_setsigmask(posix_spawnattr_t* attr, const sigset_t* sigmask)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/posix_spawnattr_setsigmask.html
+int posix_spawnattr_setsigmask(posix_spawnattr_t* attr, sigset_t const* sigmask)
 {
     attr->sigmask = *sigmask;
     return 0;

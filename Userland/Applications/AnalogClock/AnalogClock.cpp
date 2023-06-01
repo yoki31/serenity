@@ -11,13 +11,13 @@
 #include <LibGfx/Palette.h>
 #include <LibGfx/Path.h>
 
-void AnalogClock::draw_graduations(GUI::Painter& painter, Gfx::IntRect& rect, int x, int y)
+void AnalogClock::draw_graduations(GUI::Painter& painter, Gfx::IntRect rect, int x, int y)
 {
-    rect.set_x(x);
-    rect.set_y(y);
+    rect.set_location({ x, y });
 
     painter.fill_rect(rect, palette().active_window_border2());
 
+    rect.shrink(0, 1, 1, 0);
     painter.draw_line(rect.top_left(), rect.top_right(), palette().threed_highlight());
     painter.draw_line(rect.bottom_left(), rect.bottom_right(), palette().active_window_border1().darkened(0.7f));
     painter.draw_line(rect.bottom_right(), rect.top_right(), palette().active_window_border1().darkened(0.7f));
@@ -130,7 +130,7 @@ void AnalogClock::paint_event(GUI::PaintEvent& event)
 
 void AnalogClock::update_title_date()
 {
-    window()->set_title(Core::DateTime::now().to_string("%Y-%m-%d"));
+    window()->set_title(Core::DateTime::now().to_deprecated_string("%Y-%m-%d"sv));
 }
 
 void AnalogClock::context_menu_event(GUI::ContextMenuEvent& event)
@@ -147,5 +147,4 @@ void AnalogClock::set_show_window_frame(bool show)
     auto& w = *window();
     w.set_frameless(!m_show_window_frame);
     w.set_has_alpha_channel(!m_show_window_frame);
-    w.set_alpha_hit_threshold(m_show_window_frame ? 0 : 1);
 }

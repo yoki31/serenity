@@ -6,7 +6,8 @@
 
 #pragma once
 
-#include <AK/FlyString.h>
+#include <AK/DeprecatedFlyString.h>
+#include <AK/Error.h>
 
 namespace Web::SVG::AttributeNames {
 
@@ -19,9 +20,14 @@ namespace Web::SVG::AttributeNames {
     E(clipPathUnits)                \
     E(contentScriptType)            \
     E(contentStyleType)             \
+    E(cx)                           \
+    E(cy)                           \
     E(diffuseConstant)              \
     E(edgeMode)                     \
     E(filterUnits)                  \
+    E(fr)                           \
+    E(fx)                           \
+    E(fy)                           \
     E(glyphRef)                     \
     E(gradientTransform)            \
     E(gradientUnits)                \
@@ -39,22 +45,27 @@ namespace Web::SVG::AttributeNames {
     E(maskContentUnits)             \
     E(maskUnits)                    \
     E(numOctaves)                   \
+    E(offset)                       \
     E(pathLength)                   \
     E(patternContentUnits)          \
     E(patternTransform)             \
     E(patternUnits)                 \
+    E(points)                       \
     E(pointsAtX)                    \
     E(pointsAtY)                    \
     E(pointsAtZ)                    \
     E(preserveAlpha)                \
     E(preserveAspectRatio)          \
     E(primitiveUnits)               \
+    E(r)                            \
     E(refX)                         \
     E(refY)                         \
     E(repeatCount)                  \
     E(repeatDur)                    \
     E(requiredExtensions)           \
     E(requiredFeatures)             \
+    E(rx)                           \
+    E(ry)                           \
     E(specularConstant)             \
     E(specularExponent)             \
     E(spreadMethod)                 \
@@ -72,13 +83,19 @@ namespace Web::SVG::AttributeNames {
     E(viewTarget)                   \
     E(width)                        \
     E(x)                            \
+    E(x1)                           \
+    E(x2)                           \
     E(xChannelSelector)             \
     E(y)                            \
+    E(y1)                           \
+    E(y2)                           \
     E(yChannelSelector)             \
     E(zoomAndPan)
 
-#define __ENUMERATE_SVG_ATTRIBUTE(name) extern FlyString name;
+#define __ENUMERATE_SVG_ATTRIBUTE(name) extern DeprecatedFlyString name;
 ENUMERATE_SVG_ATTRIBUTES(__ENUMERATE_SVG_ATTRIBUTE)
 #undef __ENUMERATE_SVG_ATTRIBUTE
+
+ErrorOr<void> initialize_strings();
 
 }

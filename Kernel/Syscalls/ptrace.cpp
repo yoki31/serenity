@@ -6,17 +6,17 @@
  */
 
 #include <AK/ScopeGuard.h>
-#include <Kernel/Memory/MemoryManager.h>
 #include <Kernel/Memory/PrivateInodeVMObject.h>
 #include <Kernel/Memory/Region.h>
 #include <Kernel/Memory/ScopedAddressSpaceSwitcher.h>
 #include <Kernel/Memory/SharedInodeVMObject.h>
 #include <Kernel/Process.h>
+#include <Kernel/Scheduler.h>
 #include <Kernel/ThreadTracer.h>
 
 namespace Kernel {
 
-static ErrorOr<FlatPtr> handle_ptrace(const Kernel::Syscall::SC_ptrace_params& params, Process& caller)
+static ErrorOr<FlatPtr> handle_ptrace(Kernel::Syscall::SC_ptrace_params const& params, Process& caller)
 {
     SpinlockLocker scheduler_lock(g_scheduler_lock);
     if (params.request == PT_TRACE_ME) {
@@ -40,8 +40,10 @@ static ErrorOr<FlatPtr> handle_ptrace(const Kernel::Syscall::SC_ptrace_params& p
 
     MutexLocker ptrace_locker(peer->process().ptrace_lock());
 
-    if ((peer->process().uid() != caller.euid())
-        || (peer->process().uid() != peer->process().euid())) // Disallow tracing setuid processes
+    auto peer_credentials = peer->process().credentials();
+    auto caller_credentials = caller.credentials();
+    if ((peer_credentials->uid() != caller_credentials->euid())
+        || (peer_credentials->uid() != peer_credentials->euid())) // Disallow tracing setuid processes
         return EACCES;
 
     if (!peer->process().is_dumpable())
@@ -54,7 +56,9 @@ static ErrorOr<FlatPtr> handle_ptrace(const Kernel::Syscall::SC_ptrace_params& p
         }
         TRY(peer_process.start_tracing_from(caller.pid()));
         SpinlockLocker lock(peer->get_lock());
-        if (peer->state() != Thread::State::Stopped) {
+        if (peer->state() == Thread::State::Stopped) {
+            peer_process.tracer()->set_regs(peer->get_register_dump_from_stack());
+        } else {
             peer->send_signal(SIGSTOP, &caller);
         }
         return 0;
@@ -101,11 +105,11 @@ static ErrorOr<FlatPtr> handle_ptrace(const Kernel::Syscall::SC_ptrace_params& p
             return EINVAL;
 
         PtraceRegisters regs {};
-        TRY(copy_from_user(&regs, (const PtraceRegisters*)params.addr));
+        TRY(copy_from_user(&regs, (PtraceRegisters const*)params.addr));
 
         auto& peer_saved_registers = peer->get_register_dump_from_stack();
         // Verify that the saved registers are in usermode context
-        if ((peer_saved_registers.cs & 0x03) != 3)
+        if (peer_saved_registers.previous_mode() != ExecutionMode::User)
             return EFAULT;
 
         tracer->set_regs(regs);
@@ -114,26 +118,36 @@ static ErrorOr<FlatPtr> handle_ptrace(const Kernel::Syscall::SC_ptrace_params& p
     }
 
     case PT_PEEK: {
-        Kernel::Syscall::SC_ptrace_peek_params peek_params {};
-        TRY(copy_from_user(&peek_params, reinterpret_cast<Kernel::Syscall::SC_ptrace_peek_params*>(params.addr)));
-        if (!Memory::is_user_address(VirtualAddress { peek_params.address }))
-            return EFAULT;
-        auto data = TRY(peer->process().peek_user_data(Userspace<const FlatPtr*> { (FlatPtr)peek_params.address }));
-        TRY(copy_to_user(peek_params.out_data, &data));
+        auto data = TRY(peer->process().peek_user_data(Userspace<FlatPtr const*> { (FlatPtr)params.addr }));
+        TRY(copy_to_user((FlatPtr*)params.data, &data));
         break;
     }
 
     case PT_POKE:
-        if (!Memory::is_user_address(VirtualAddress { params.addr }))
-            return EFAULT;
         TRY(peer->process().poke_user_data(Userspace<FlatPtr*> { (FlatPtr)params.addr }, params.data));
         return 0;
 
+    case PT_PEEKBUF: {
+        Kernel::Syscall::SC_ptrace_buf_params buf_params {};
+        TRY(copy_from_user(&buf_params, reinterpret_cast<Kernel::Syscall::SC_ptrace_buf_params*>(params.data)));
+        // This is a comparatively large allocation on the Kernel stack.
+        // However, we know that we're close to the root of the call stack, and the following calls shouldn't go too deep.
+        Array<u8, PAGE_SIZE> buf;
+        FlatPtr tracee_ptr = (FlatPtr)params.addr;
+        while (buf_params.buf.size > 0) {
+            size_t copy_this_iteration = min(buf.size(), buf_params.buf.size);
+            TRY(peer->process().peek_user_data(buf.span().slice(0, copy_this_iteration), Userspace<u8 const*> { tracee_ptr }));
+            TRY(copy_to_user((void*)buf_params.buf.data, buf.data(), copy_this_iteration));
+            tracee_ptr += copy_this_iteration;
+            buf_params.buf.data += copy_this_iteration;
+            buf_params.buf.size -= copy_this_iteration;
+        }
+        break;
+    }
+
     case PT_PEEKDEBUG: {
-        Kernel::Syscall::SC_ptrace_peek_params peek_params {};
-        TRY(copy_from_user(&peek_params, reinterpret_cast<Kernel::Syscall::SC_ptrace_peek_params*>(params.addr)));
-        auto data = TRY(peer->peek_debug_register(reinterpret_cast<uintptr_t>(peek_params.address)));
-        TRY(copy_to_user(peek_params.out_data, &data));
+        auto data = TRY(peer->peek_debug_register(reinterpret_cast<uintptr_t>(params.addr)));
+        TRY(copy_to_user((FlatPtr*)params.data, &data));
         break;
     }
     case PT_POKEDEBUG:
@@ -146,14 +160,13 @@ static ErrorOr<FlatPtr> handle_ptrace(const Kernel::Syscall::SC_ptrace_params& p
     return 0;
 }
 
-ErrorOr<FlatPtr> Process::sys$ptrace(Userspace<const Syscall::SC_ptrace_params*> user_params)
+ErrorOr<FlatPtr> Process::sys$ptrace(Userspace<Syscall::SC_ptrace_params const*> user_params)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this)
-    REQUIRE_PROMISE(ptrace);
+    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this);
+    TRY(require_promise(Pledge::ptrace));
     auto params = TRY(copy_typed_from_user(user_params));
 
-    auto result = handle_ptrace(params, *this);
-    return result.is_error() ? result.error().code() : result.value();
+    return handle_ptrace(params, *this);
 }
 
 /**
@@ -161,53 +174,64 @@ ErrorOr<FlatPtr> Process::sys$ptrace(Userspace<const Syscall::SC_ptrace_params*>
  */
 bool Process::has_tracee_thread(ProcessID tracer_pid)
 {
-    if (auto tracer = this->tracer())
+    if (auto const* tracer = this->tracer())
         return tracer->tracer_pid() == tracer_pid;
     return false;
 }
 
-ErrorOr<FlatPtr> Process::peek_user_data(Userspace<const FlatPtr*> address)
+ErrorOr<FlatPtr> Process::peek_user_data(Userspace<FlatPtr const*> address)
 {
     // This function can be called from the context of another
     // process that called PT_PEEK
     ScopedAddressSpaceSwitcher switcher(*this);
-    FlatPtr data;
-    TRY(copy_from_user(&data, address));
-    return data;
+    return TRY(copy_typed_from_user(address));
+}
+
+ErrorOr<void> Process::peek_user_data(Span<u8> destination, Userspace<u8 const*> address)
+{
+    // This function can be called from the context of another
+    // process that called PT_PEEKBUF
+    ScopedAddressSpaceSwitcher switcher(*this);
+    TRY(copy_from_user(destination.data(), address, destination.size()));
+    return {};
 }
 
 ErrorOr<void> Process::poke_user_data(Userspace<FlatPtr*> address, FlatPtr data)
 {
     Memory::VirtualRange range = { address.vaddr(), sizeof(FlatPtr) };
-    auto* region = address_space().find_region_containing(range);
-    if (!region)
-        return EFAULT;
-    ScopedAddressSpaceSwitcher switcher(*this);
-    if (region->is_shared()) {
-        // If the region is shared, we change its vmobject to a PrivateInodeVMObject
-        // to prevent the write operation from changing any shared inode data
-        VERIFY(region->vmobject().is_shared_inode());
-        auto vmobject = TRY(Memory::PrivateInodeVMObject::try_create_with_inode(static_cast<Memory::SharedInodeVMObject&>(region->vmobject()).inode()));
-        region->set_vmobject(move(vmobject));
-        region->set_shared(false);
-    }
-    const bool was_writable = region->is_writable();
-    if (!was_writable) {
-        region->set_writable(true);
-        region->remap();
-    }
-    ScopeGuard rollback([&]() {
+
+    return address_space().with([&](auto& space) -> ErrorOr<void> {
+        auto* region = space->find_region_containing(range);
+        if (!region)
+            return EFAULT;
+        ScopedAddressSpaceSwitcher switcher(*this);
+        if (region->is_shared()) {
+            // If the region is shared, we change its vmobject to a PrivateInodeVMObject
+            // to prevent the write operation from changing any shared inode data
+            VERIFY(region->vmobject().is_shared_inode());
+            auto vmobject = TRY(Memory::PrivateInodeVMObject::try_create_with_inode(static_cast<Memory::SharedInodeVMObject&>(region->vmobject()).inode()));
+            region->set_vmobject(move(vmobject));
+            region->set_shared(false);
+        }
+        bool const was_writable = region->is_writable();
         if (!was_writable) {
-            region->set_writable(false);
+            region->set_writable(true);
             region->remap();
         }
-    });
+        ScopeGuard rollback([&]() {
+            if (!was_writable) {
+                region->set_writable(false);
+                region->remap();
+            }
+        });
 
-    return copy_to_user(address, &data);
+        return copy_to_user(address, &data);
+    });
 }
 
 ErrorOr<FlatPtr> Thread::peek_debug_register(u32 register_index)
 {
+#if ARCH(X86_64)
     FlatPtr data;
     switch (register_index) {
     case 0:
@@ -232,10 +256,17 @@ ErrorOr<FlatPtr> Thread::peek_debug_register(u32 register_index)
         return EINVAL;
     }
     return data;
+#elif ARCH(AARCH64)
+    (void)register_index;
+    TODO_AARCH64();
+#else
+#    error "Unknown architecture"
+#endif
 }
 
 ErrorOr<void> Thread::poke_debug_register(u32 register_index, FlatPtr data)
 {
+#if ARCH(X86_64)
     switch (register_index) {
     case 0:
         m_debug_register_state.dr0 = data;
@@ -256,6 +287,13 @@ ErrorOr<void> Thread::poke_debug_register(u32 register_index, FlatPtr data)
         return EINVAL;
     }
     return {};
+#elif ARCH(AARCH64)
+    (void)register_index;
+    (void)data;
+    TODO_AARCH64();
+#else
+#    error "Unknown architecture"
+#endif
 }
 
 }

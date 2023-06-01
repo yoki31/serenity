@@ -6,13 +6,17 @@
 
 #pragma once
 
+#include <AK/Memory.h>
 #include <AK/OwnPtr.h>
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <LibCrypto/Authentication/GHash.h>
 #include <LibCrypto/Cipher/Mode/CTR.h>
 #include <LibCrypto/Verification.h>
+
+#ifndef KERNEL
+#    include <AK/DeprecatedString.h>
+#endif
 
 namespace Crypto {
 namespace Cipher {
@@ -40,15 +44,20 @@ public:
         m_ghash = Authentication::GHash(m_auth_key);
     }
 
-    virtual String class_name() const override
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
     {
         StringBuilder builder;
         builder.append(this->cipher().class_name());
-        builder.append("_GCM");
-        return builder.build();
+        builder.append("_GCM"sv);
+        return builder.to_deprecated_string();
     }
+#endif
 
-    virtual size_t IV_length() const override { return IVSizeInBits / 8; }
+    virtual size_t IV_length() const override
+    {
+        return IVSizeInBits / 8;
+    }
 
     // FIXME: This overload throws away the auth stuff, think up a better way to return more than a single bytebuffer.
     virtual void encrypt(ReadonlyBytes in, Bytes& out, ReadonlyBytes ivec = {}, Bytes* = nullptr) override
@@ -68,12 +77,12 @@ public:
     {
         auto iv_buf_result = ByteBuffer::copy(iv_in);
         // Not enough memory to figure out :shrug:
-        if (!iv_buf_result.has_value()) {
+        if (iv_buf_result.is_error()) {
             dbgln("GCM::encrypt: Not enough memory to allocate {} bytes for IV", iv_in.size());
             return;
         }
 
-        auto iv = iv_buf_result->bytes();
+        auto iv = iv_buf_result.value().bytes();
 
         // Increment the IV for block 0
         CTR<T>::increment(iv);
@@ -98,10 +107,10 @@ public:
     {
         auto iv_buf_result = ByteBuffer::copy(iv_in);
         // Not enough memory to figure out :shrug:
-        if (!iv_buf_result.has_value())
+        if (iv_buf_result.is_error())
             return VerificationConsistency::Inconsistent;
 
-        auto iv = iv_buf_result->bytes();
+        auto iv = iv_buf_result.value().bytes();
 
         // Increment the IV for block 0
         CTR<T>::increment(iv);
@@ -116,12 +125,11 @@ public:
         block0.apply_initialization_vector({ auth_tag.data, array_size(auth_tag.data) });
 
         auto test_consistency = [&] {
-            if (block0.block_size() != tag.size() || __builtin_memcmp(block0.bytes().data(), tag.data(), tag.size()) != 0)
+            if (block0.block_size() != tag.size() || !timing_safe_compare(block0.bytes().data(), tag.data(), tag.size()))
                 return VerificationConsistency::Inconsistent;
 
             return VerificationConsistency::Consistent;
         };
-        // FIXME: This block needs constant-time comparisons.
 
         if (in.is_empty()) {
             out = {};

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -18,17 +19,12 @@ TimelineHeader::TimelineHeader(Profile& profile, Process const& process)
     : m_profile(profile)
     , m_process(process)
 {
-    set_frame_shape(Gfx::FrameShape::Panel);
-    set_frame_shadow(Gfx::FrameShadow::Raised);
+    set_frame_style(Gfx::FrameStyle::RaisedPanel);
     set_fixed_size(200, 40);
     update_selection();
 
     m_icon = GUI::FileIconProvider::icon_for_executable(m_process.executable).bitmap_for_size(32);
-    m_text = String::formatted("{} ({})", LexicalPath::basename(m_process.executable), m_process.pid);
-}
-
-TimelineHeader::~TimelineHeader()
-{
+    m_text = DeprecatedString::formatted("{} ({})", LexicalPath::basename(m_process.executable), m_process.pid);
 }
 
 void TimelineHeader::paint_event(GUI::PaintEvent& event)
@@ -46,14 +42,14 @@ void TimelineHeader::paint_event(GUI::PaintEvent& event)
         painter.blit(icon_rect.location(), *m_icon, m_icon->rect());
 
     Gfx::IntRect text_rect {
-        icon_rect.right() + 6,
+        icon_rect.right() + 5,
         icon_rect.y(),
         width() - 32,
         32
     };
     text_rect.center_vertically_within(frame_inner_rect());
 
-    auto& font = m_selected ? painter.font().bold_variant() : painter.font();
+    auto const& font = m_selected ? painter.font().bold_variant() : painter.font();
     auto color = m_selected ? palette().selection_text() : palette().button_text();
     painter.draw_text(text_rect, m_text, font, Gfx::TextAlignment::CenterLeft, color);
 }

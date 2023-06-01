@@ -5,14 +5,19 @@ set -e
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# shellcheck source=/dev/null
+. "${DIR}/../Meta/shell_include.sh"
+
+exit_if_running_as_root "Do not run BuildQemu.sh as root, parts of your Toolchain directory will become root-owned"
+
 echo "$DIR"
 
 PREFIX="$DIR/Local/qemu"
 BUILD=$(realpath "$DIR/../Build")
 SYSROOT="$BUILD/Root"
 
-QEMU_VERSION="qemu-6.1.0"
-QEMU_MD5SUM="47f776c276a24f42108ba512a2aa3013"
+# shellcheck source=/dev/null
+source "${DIR}/../Ports/qemu/version.sh"
 
 echo PREFIX is "$PREFIX"
 echo SYSROOT is "$SYSROOT"
@@ -20,38 +25,46 @@ echo SYSROOT is "$SYSROOT"
 mkdir -p "$DIR/Tarballs"
 
 pushd "$DIR/Tarballs"
-    if [ ! -e "$QEMU_VERSION.tar.xz" ]; then
-        curl -O "https://download.qemu.org/$QEMU_VERSION.tar.xz"
+    if [ ! -e "${QEMU_ARCHIVE}" ]; then
+        curl -C - -O "${QEMU_ARCHIVE_URL}"
     else
-        echo "Skipped downloading $QEMU_VERSION"
+        echo "Skipped downloading ${QEMU_ARCHIVE}"
     fi
 
-    md5="$(md5sum $QEMU_VERSION.tar.xz | cut -f1 -d' ')"
-    echo "qemu md5='$md5'"
-    if  [ "$md5" != "$QEMU_MD5SUM" ] ; then
-        echo "qemu md5 sum mismatching, please run script again."
-        rm -f $QEMU_VERSION.tar.xz
+    if ! sha256sum --status -c <(echo "${QEMU_ARCHIVE_SHA256SUM}" "${QEMU_ARCHIVE}"); then
+        echo "qemu sha256 sum mismatching, please run script again."
+        rm -f "${QEMU_ARCHIVE}"
         exit 1
     fi
 
-    if [ ! -d "$QEMU_VERSION" ]; then
-        echo "Extracting qemu..."
-        tar -xf "$QEMU_VERSION.tar.xz"
-    else
-        echo "Skipped extracting qemu"
+    # If the source directory exists, re-extract it again in case the patches have changed.
+    if [ -d "qemu-$QEMU_VERSION" ]; then
+        rm -rf "qemu-$QEMU_VERSION"
     fi
+
+    echo "Extracting qemu..."
+    tar -xf "${QEMU_ARCHIVE}"
+
+    pushd "qemu-$QEMU_VERSION"
+        for patch in "${DIR}"/Patches/qemu/*.patch; do
+            patch -p1 < "${patch}" > /dev/null
+        done
+    popd
 popd
 
 mkdir -p "$PREFIX"
 mkdir -p "$DIR/Build/qemu"
 
-if [ -z "$MAKEJOBS" ]; then
-    MAKEJOBS=$(nproc)
-fi
+NPROC=$(get_number_of_processing_units)
+[ -z "$MAKEJOBS" ] && MAKEJOBS=${NPROC}
 
+EXTRA_ARGS=""
 if [[ $(uname) == "Darwin" ]]
 then
     UI_LIB=cocoa
+
+    # SDL causes a crash on startup: "NSWindow drag regions should only be invalidated on the Main Thread!"
+    EXTRA_ARGS="--disable-sdl"
 else
     UI_LIB=gtk
 fi
@@ -59,9 +72,11 @@ fi
 echo Using $UI_LIB based UI
 
 pushd "$DIR/Build/qemu"
-    "$DIR"/Tarballs/$QEMU_VERSION/configure --prefix="$PREFIX" \
-                                            --target-list=aarch64-softmmu,i386-softmmu,x86_64-softmmu \
-                                            --enable-$UI_LIB || exit 1
+    "$DIR"/Tarballs/qemu-"${QEMU_VERSION}"/configure --prefix="$PREFIX" \
+                                            --target-list=aarch64-softmmu,x86_64-softmmu \
+                                            --enable-$UI_LIB \
+                                            --enable-slirp \
+                                            $EXTRA_ARGS || exit 1
     make -j "$MAKEJOBS" || exit 1
     make install || exit 1
 popd

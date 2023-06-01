@@ -9,11 +9,14 @@ set(SOURCES
         main.cpp
         IndividualSampleModel.cpp
         FlameGraphView.cpp
+        FilesystemEventModel.cpp
+        Gradient.cpp
         Process.cpp
         Profile.cpp
         ProfileModel.cpp
         SamplesModel.cpp
         SignpostsModel.cpp
+        SourceModel.cpp
         TimelineContainer.cpp
         TimelineHeader.cpp
         TimelineTrack.cpp
@@ -21,4 +24,4 @@ set(SOURCES
         )
 
 serenity_app(Profiler ICON app-profiler)
-target_link_libraries(Profiler LibGUI LibDesktop LibX86 LibSymbolication LibMain)
+target_link_libraries(Profiler PRIVATE LibCore LibDebug LibFileSystem LibGfx LibGUI LibDesktop LibX86 LibSymbolication LibMain)

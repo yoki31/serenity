@@ -1,9 +1,15 @@
+#import <HTML/HTMLElement.idl>
+
+// https://html.spec.whatwg.org/multipage/semantics.html#htmlmetaelement
+[Exposed=Window]
 interface HTMLMetaElement : HTMLElement {
 
-    [Reflect] attribute DOMString name;
-    [Reflect] attribute DOMString content;
-    [Reflect=http-equiv] attribute DOMString httpEquiv;
+    [HTMLConstructor] constructor();
 
-    [Reflect] attribute DOMString scheme;
+    [CEReactions, Reflect] attribute DOMString name;
+    [CEReactions, Reflect] attribute DOMString content;
+    [CEReactions, Reflect=http-equiv] attribute DOMString httpEquiv;
+
+    [CEReactions, Reflect] attribute DOMString scheme;
 
 };

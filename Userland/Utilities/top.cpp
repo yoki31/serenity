@@ -4,14 +4,16 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/DeprecatedString.h>
 #include <AK/HashMap.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/QuickSort.h>
-#include <AK/String.h>
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/ProcessStatisticsReader.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,7 @@ struct TopOption {
 
     SortBy sort_by { SortBy::Cpu };
     int delay_time { 1 };
+    HashTable<pid_t> pids_to_filter_by;
 };
 
 struct ThreadData {
@@ -44,9 +47,8 @@ struct ThreadData {
     uid_t uid;
     gid_t gid;
     pid_t ppid;
-    unsigned nfds;
-    String name;
-    String tty;
+    DeprecatedString name;
+    DeprecatedString tty;
     size_t amount_virtual;
     size_t amount_resident;
     size_t amount_shared;
@@ -61,12 +63,12 @@ struct ThreadData {
     unsigned cpu_percent_decimal { 0 };
 
     u32 priority;
-    String username;
-    String state;
+    DeprecatedString username;
+    DeprecatedString state;
 };
 
 struct PidAndTid {
-    bool operator==(const PidAndTid& other) const
+    bool operator==(PidAndTid const& other) const
     {
         return pid == other.pid && tid == other.tid;
     }
@@ -77,7 +79,7 @@ struct PidAndTid {
 namespace AK {
 template<>
 struct Traits<PidAndTid> : public GenericTraits<PidAndTid> {
-    static unsigned hash(const PidAndTid& value) { return pair_int_hash(value.pid, value.tid); }
+    static unsigned hash(PidAndTid const& value) { return pair_int_hash(value.pid, value.tid); }
 };
 }
 
@@ -87,14 +89,15 @@ struct Snapshot {
     u64 total_time_scheduled_kernel { 0 };
 };
 
-static Snapshot get_snapshot()
+static ErrorOr<Snapshot> get_snapshot(HashTable<pid_t> const& pids)
 {
-    auto all_processes = Core::ProcessStatisticsReader::get_all();
-    if (!all_processes.has_value())
-        return {};
+    auto all_processes = TRY(Core::ProcessStatisticsReader::get_all());
 
     Snapshot snapshot;
-    for (auto& process : all_processes.value().processes) {
+    for (auto& process : all_processes.processes) {
+        if (!pids.is_empty() && !pids.contains(process.pid))
+            continue;
+
         for (auto& thread : process.threads) {
             ThreadData thread_data;
             thread_data.tid = thread.tid;
@@ -105,7 +108,6 @@ static Snapshot get_snapshot()
             thread_data.uid = process.uid;
             thread_data.gid = process.gid;
             thread_data.ppid = process.ppid;
-            thread_data.nfds = process.nfds;
             thread_data.name = process.name;
             thread_data.tty = process.tty;
             thread_data.amount_virtual = process.amount_virtual;
@@ -124,8 +126,8 @@ static Snapshot get_snapshot()
         }
     }
 
-    snapshot.total_time_scheduled = all_processes->total_time_scheduled;
-    snapshot.total_time_scheduled_kernel = all_processes->total_time_scheduled_kernel;
+    snapshot.total_time_scheduled = all_processes.total_time_scheduled;
+    snapshot.total_time_scheduled_kernel = all_processes.total_time_scheduled_kernel;
 
     return snapshot;
 }
@@ -133,16 +135,15 @@ static Snapshot get_snapshot()
 static bool g_window_size_changed = true;
 static struct winsize g_window_size;
 
-static void parse_args(int argc, char** argv, TopOption& top_option)
+static void parse_args(Main::Arguments arguments, TopOption& top_option)
 {
     Core::ArgsParser::Option sort_by_option {
-        true,
+        Core::ArgsParser::OptionArgumentMode::Required,
         "Sort by field [pid, tid, pri, user, state, virt, phys, cpu, name]",
         "sort-by",
         's',
         nullptr,
-        [&top_option](const char* s) {
-            StringView sort_by_option { s };
+        [&top_option](StringView sort_by_option) {
             if (sort_by_option == "pid"sv)
                 top_option.sort_by = TopOption::SortBy::Pid;
             else if (sort_by_option == "tid"sv)
@@ -166,60 +167,84 @@ static void parse_args(int argc, char** argv, TopOption& top_option)
             return true;
         }
     };
-
+    HashTable<pid_t> pids;
     Core::ArgsParser args_parser;
 
     args_parser.set_general_help("Display information about processes");
     args_parser.add_option(top_option.delay_time, "Delay time interval in seconds", "delay-time", 'd', nullptr);
+    args_parser.add_option(Core::ArgsParser::Option {
+        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
+        .help_string = "A comma-separated list of pids to filter by",
+        .long_name = "pids",
+        .short_name = 'p',
+        .accept_value = [&pids](auto comma_separated_pids) {
+            for (auto pid : comma_separated_pids.split_view(',')) {
+                auto maybe_integer = pid.to_int();
+                if (!maybe_integer.has_value())
+                    return false;
+
+                pids.set(maybe_integer.value());
+            }
+
+            return true;
+        },
+    });
     args_parser.add_option(move(sort_by_option));
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
+    top_option.pids_to_filter_by = move(pids);
 }
 
-int main(int argc, char** argv)
+static bool check_quit()
 {
-    if (pledge("stdio rpath tty sigaction ", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    char c = '\0';
+    read(STDIN_FILENO, &c, sizeof(c));
+    return c == 'q' || c == 'Q';
+}
 
-    if (unveil("/proc/all", "r") < 0) {
-        perror("unveil");
-        return 1;
-    }
+static int g_old_stdin;
 
-    if (unveil("/etc/passwd", "r") < 0) {
-        perror("unveil");
-        return 1;
-    }
+static void restore_stdin()
+{
+    fcntl(STDIN_FILENO, F_SETFL, g_old_stdin);
+}
 
+static void enable_nonblocking_stdin()
+{
+    g_old_stdin = fcntl(STDIN_FILENO, F_GETFL);
+    fcntl(STDIN_FILENO, F_SETFL, g_old_stdin | O_NONBLOCK);
+    atexit(restore_stdin);
+}
+
+ErrorOr<int> serenity_main(Main::Arguments arguments)
+{
+    TRY(Core::System::pledge("stdio rpath tty sigaction"));
+    TRY(Core::System::unveil("/sys/kernel/processes", "r"));
+    TRY(Core::System::unveil("/etc/passwd", "r"));
     unveil(nullptr, nullptr);
 
-    signal(SIGWINCH, [](int) {
+    TRY(Core::System::signal(SIGWINCH, [](int) {
         g_window_size_changed = true;
-    });
-
-    if (pledge("stdio rpath tty", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    }));
+    TRY(Core::System::signal(SIGINT, [](int) {
+        exit(0);
+    }));
+    TRY(Core::System::pledge("stdio rpath tty"));
 
     TopOption top_option;
-    parse_args(argc, argv, top_option);
+    parse_args(arguments, top_option);
+
+    enable_nonblocking_stdin();
 
     Vector<ThreadData*> threads;
-    auto prev = get_snapshot();
+    auto prev = TRY(get_snapshot(top_option.pids_to_filter_by));
     usleep(10000);
     for (;;) {
         if (g_window_size_changed) {
-            int rc = ioctl(STDOUT_FILENO, TIOCGWINSZ, &g_window_size);
-            if (rc < 0) {
-                perror("ioctl(TIOCGWINSZ)");
-                return 1;
-            }
+            TRY(Core::System::ioctl(STDOUT_FILENO, TIOCGWINSZ, &g_window_size));
             g_window_size_changed = false;
         }
 
-        auto current = get_snapshot();
+        auto current = TRY(get_snapshot(top_option.pids_to_filter_by));
         auto total_scheduled_diff = current.total_time_scheduled - prev.total_time_scheduled;
 
         printf("\033[3J\033[H\033[2J");
@@ -295,6 +320,11 @@ int main(int argc, char** argv)
         }
         threads.clear_with_capacity();
         prev = move(current);
-        sleep(top_option.delay_time);
+
+        for (int sleep_slice = 0; sleep_slice < top_option.delay_time * 1000; sleep_slice += 100) {
+            if (check_quit())
+                exit(0);
+            usleep(100 * 1000);
+        }
     }
 }

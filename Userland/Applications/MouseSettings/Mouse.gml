@@ -1,15 +1,12 @@
 @GUI::Frame {
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
-        margins: [10]
-        spacing: 5
+        margins: [8]
     }
 
     @GUI::GroupBox {
         title: "Cursor speed"
         fixed_height: 106
-
         layout: @GUI::VerticalBoxLayout {
             margins: [6]
             spacing: 2
@@ -20,10 +17,10 @@
                 spacing: 16
             }
 
-            @GUI::Label {
+            @GUI::ImageWidget {
                 fixed_width: 32
                 fixed_height: 32
-                name: "cursor_speed_image_label"
+                bitmap: "/res/graphics/mouse-cursor-speed.png"
             }
 
             @GUI::Label {
@@ -56,9 +53,8 @@
     }
 
     @GUI::GroupBox {
-        title: "Scroll wheel step size"
+        title: "Scroll wheel"
         fixed_height: 106
-
         layout: @GUI::VerticalBoxLayout {
             margins: [6]
             spacing: 2
@@ -69,10 +65,10 @@
                 spacing: 16
             }
 
-            @GUI::Label {
+            @GUI::ImageWidget {
                 fixed_width: 32
                 fixed_height: 32
-                name: "scroll_step_size_image_label"
+                bitmap: "/res/graphics/scroll-wheel-step-size.png"
             }
 
             @GUI::Label {
@@ -83,7 +79,7 @@
 
         @GUI::Widget {
             layout: @GUI::HorizontalBoxLayout {
-                margins: [8]
+                margins: [4, 0, 2, 8]
                 spacing: 8
             }
 
@@ -101,10 +97,18 @@
                 min: 0
                 max: 100
                 value: 50
-                fixed_width: 100
+                preferred_width: "opportunistic_grow"
             }
 
             @GUI::Widget {
+                fixed_width: 16
+            }
+
+            @GUI::CheckBox {
+                name: "natural_scroll_checkbox"
+                text: "Natural scrolling"
+                tooltip: "Content follows motion instead of the viewport,\nalso commonly referred to as \"reverse scrolling\"."
+                preferred_width: 110
             }
         }
     }
@@ -112,7 +116,6 @@
     @GUI::GroupBox {
         title: "Double-click speed"
         fixed_height: 106
-
         layout: @GUI::VerticalBoxLayout {
             margins: [6]
             spacing: 2
@@ -162,7 +165,6 @@
     @GUI::GroupBox {
         title: "Button configuration"
         fixed_height: 68
-
         layout: @GUI::VerticalBoxLayout {
             margins: [16, 8, 8]
             spacing: 2
@@ -173,24 +175,16 @@
                 spacing: 16
             }
 
-            @GUI::Label {
+            @GUI::ImageWidget {
                 fixed_width: 32
                 fixed_height: 32
-                name: "switch_buttons_image_label"
-            }
-
-            @GUI::Label {
-                text: "Switch primary and secondary buttons"
-                fixed_width: 201
-                text_alignment: "CenterLeft"
-                name: "switch_buttons_label"
+                name: "switch_buttons_image"
             }
 
             @GUI::CheckBox {
-                name: "switch_buttons_input"
-                fixed_width: 14
-
+                name: "switch_buttons_checkbox"
+                text: "Switch primary and secondary buttons"
             }
         }
-    }    
+    }
 }

@@ -19,7 +19,7 @@
 #include <LibJS/Heap/Cell.h>
 #include <LibJS/Heap/CellAllocator.h>
 #include <LibJS/Heap/Handle.h>
-#include <LibJS/Runtime/Object.h>
+#include <LibJS/Heap/MarkedVector.h>
 #include <LibJS/Runtime/WeakContainer.h>
 
 namespace JS {
@@ -33,21 +33,21 @@ public:
     ~Heap();
 
     template<typename T, typename... Args>
-    T* allocate_without_global_object(Args&&... args)
+    NonnullGCPtr<T> allocate_without_realm(Args&&... args)
     {
         auto* memory = allocate_cell(sizeof(T));
         new (memory) T(forward<Args>(args)...);
-        return static_cast<T*>(memory);
+        return *static_cast<T*>(memory);
     }
 
     template<typename T, typename... Args>
-    T* allocate(GlobalObject& global_object, Args&&... args)
+    ThrowCompletionOr<NonnullGCPtr<T>> allocate(Realm& realm, Args&&... args)
     {
         auto* memory = allocate_cell(sizeof(T));
         new (memory) T(forward<Args>(args)...);
         auto* cell = static_cast<T*>(memory);
-        cell->initialize(global_object);
-        return cell;
+        MUST_OR_THROW_OOM(memory->initialize(realm));
+        return *cell;
     }
 
     enum class CollectionType {
@@ -62,18 +62,11 @@ public:
     bool should_collect_on_every_allocation() const { return m_should_collect_on_every_allocation; }
     void set_should_collect_on_every_allocation(bool b) { m_should_collect_on_every_allocation = b; }
 
-#ifdef JS_TRACK_ZOMBIE_CELLS
-    void set_zombify_dead_cells(bool b)
-    {
-        m_zombify_dead_cells = b;
-    }
-#endif
-
     void did_create_handle(Badge<HandleImpl>, HandleImpl&);
     void did_destroy_handle(Badge<HandleImpl>, HandleImpl&);
 
-    void did_create_marked_value_list(Badge<MarkedValueList>, MarkedValueList&);
-    void did_destroy_marked_value_list(Badge<MarkedValueList>, MarkedValueList&);
+    void did_create_marked_vector(Badge<MarkedVectorBase>, MarkedVectorBase&);
+    void did_destroy_marked_vector(Badge<MarkedVectorBase>, MarkedVectorBase&);
 
     void did_create_weak_container(Badge<WeakContainer>, WeakContainer&);
     void did_destroy_weak_container(Badge<WeakContainer>, WeakContainer&);
@@ -86,12 +79,15 @@ public:
     void uproot_cell(Cell* cell);
 
 private:
+    static bool cell_must_survive_garbage_collection(Cell const&);
+
     Cell* allocate_cell(size_t);
 
     void gather_roots(HashTable<Cell*>&);
     void gather_conservative_roots(HashTable<Cell*>&);
-    void mark_live_cells(const HashTable<Cell*>& live_cells);
-    void sweep_dead_cells(bool print_report, const Core::ElapsedTimer&);
+    void mark_live_cells(HashTable<Cell*> const& live_cells);
+    void finalize_unmarked_cells();
+    void sweep_dead_cells(bool print_report, Core::ElapsedTimer const&);
 
     CellAllocator& allocator_for_size(size_t);
 
@@ -114,12 +110,10 @@ private:
     Vector<NonnullOwnPtr<CellAllocator>> m_allocators;
 
     HandleImpl::List m_handles;
-
-    MarkedValueList::List m_marked_value_lists;
-
+    MarkedVectorBase::List m_marked_vectors;
     WeakContainer::List m_weak_containers;
 
-    Vector<Cell*> m_uprooted_cells;
+    Vector<GCPtr<Cell>> m_uprooted_cells;
 
     BlockAllocator m_block_allocator;
 
@@ -127,10 +121,6 @@ private:
     bool m_should_gc_when_deferral_ends { false };
 
     bool m_collecting_garbage { false };
-
-#ifdef JS_TRACK_ZOMBIE_CELLS
-    bool m_zombify_dead_cells { false };
-#endif
 };
 
 }

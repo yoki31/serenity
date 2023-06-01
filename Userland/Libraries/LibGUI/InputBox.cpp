@@ -1,112 +1,205 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2021, Jakob-Niklas See <git@nwex.de>
+ * Copyright (c) 2021, networkException <networkexception@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <LibGUI/BoxLayout.h>
 #include <LibGUI/Button.h>
+#include <LibGUI/ImageWidget.h>
 #include <LibGUI/InputBox.h>
 #include <LibGUI/Label.h>
+#include <LibGUI/SpinBox.h>
 #include <LibGUI/TextBox.h>
-#include <LibGfx/Font.h>
 
 namespace GUI {
 
-InputBox::InputBox(Window* parent_window, String& text_value, StringView prompt, StringView title, StringView placeholder, InputType input_type)
+ErrorOr<NonnullRefPtr<InputBox>> InputBox::create(Window* parent_window, String text_value, StringView prompt, StringView title, InputType input_type, RefPtr<Gfx::Bitmap const> icon)
+{
+    VERIFY(input_type != InputType::Numeric);
+    auto box = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) InputBox(parent_window, text_value, TRY(String::from_utf8(title)), TRY(String::from_utf8(prompt)), input_type, move(icon))));
+    TRY(box->build());
+    return box;
+}
+
+ErrorOr<NonnullRefPtr<InputBox>> InputBox::create_numeric(Window* parent_window, int value, StringView title, StringView prompt, RefPtr<Gfx::Bitmap const> icon)
+{
+    auto box = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) InputBox(parent_window, value, TRY(String::from_utf8(title)), TRY(String::from_utf8(prompt)), move(icon))));
+    TRY(box->build());
+    return box;
+}
+
+InputBox::InputBox(Window* parent_window, String text_value, String title, String prompt, InputType input_type, RefPtr<Gfx::Bitmap const> icon)
     : Dialog(parent_window)
-    , m_text_value(text_value)
-    , m_prompt(prompt)
-    , m_placeholder(placeholder)
+    , m_text_value(move(text_value))
+    , m_prompt(move(prompt))
+    , m_input_type(input_type)
+    , m_icon(move(icon))
 {
-    set_title(title);
-    build(input_type);
+    set_title(move(title).to_deprecated_string());
+    set_resizable(false);
+    set_auto_shrink(true);
 }
 
-InputBox::~InputBox()
+InputBox::InputBox(Window* parent_window, int value, String title, String prompt, RefPtr<Gfx::Bitmap const> icon)
+    : Dialog(parent_window)
+    , m_numeric_value(value)
+    , m_prompt(move(prompt))
+    , m_input_type(InputType::Numeric)
+    , m_icon(move(icon))
 {
+    set_title(move(title).to_deprecated_string());
+    set_resizable(false);
+    set_auto_shrink(true);
 }
 
-int InputBox::show(Window* parent_window, String& text_value, StringView prompt, StringView title, StringView placeholder, InputType input_type)
+Dialog::ExecResult InputBox::show(Window* parent_window, String& text_value, StringView prompt, StringView title, InputType input_type, StringView placeholder, RefPtr<Gfx::Bitmap const> icon)
 {
-    auto box = InputBox::construct(parent_window, text_value, prompt, title, placeholder, input_type);
-    box->set_resizable(false);
+    return MUST(try_show(parent_window, text_value, prompt, title, input_type, placeholder, move(icon)));
+}
+
+ErrorOr<Dialog::ExecResult> InputBox::try_show(Window* parent_window, String& text_value, StringView prompt, StringView title, InputType input_type, StringView placeholder, RefPtr<Gfx::Bitmap const> icon)
+{
+    VERIFY(input_type != InputType::Numeric);
+    auto box = TRY(InputBox::create(parent_window, text_value, prompt, title, input_type, move(icon)));
     if (parent_window)
         box->set_icon(parent_window->icon());
+    box->set_placeholder(placeholder);
     auto result = box->exec();
     text_value = box->text_value();
     return result;
 }
 
-void InputBox::build(InputType input_type)
+ErrorOr<Dialog::ExecResult> InputBox::show_numeric(Window* parent_window, int& value, int min, int max, StringView title, StringView prompt, RefPtr<Gfx::Bitmap const> icon)
 {
-    auto& widget = set_main_widget<Widget>();
+    auto box = TRY(InputBox::create_numeric(parent_window, value, title, prompt, move(icon)));
+    if (parent_window)
+        box->set_icon(parent_window->icon());
+    box->set_range(min, max);
+    auto result = box->exec();
+    value = box->numeric_value();
+    return result;
+}
 
-    int text_width = widget.font().width(m_prompt);
-    int title_width = widget.font().width(title()) + 24 /* icon, plus a little padding -- not perfect */;
-    int max_width = max(text_width, title_width);
+void InputBox::set_placeholder(StringView view)
+{
+    m_text_editor->set_placeholder(view);
+}
 
-    set_rect(x(), y(), max_width + 140, 66);
+void InputBox::set_range(int min, int max)
+{
+    m_spinbox->set_range(min, max);
+}
 
-    widget.set_layout<VerticalBoxLayout>();
-    widget.set_fill_with_background_color(true);
+void InputBox::set_text_value(String value)
+{
+    if (m_text_value == value)
+        return;
+    m_text_value = move(value);
+    m_text_editor->set_text(m_text_value);
+}
 
-    widget.layout()->set_margins(6);
-    widget.layout()->set_spacing(6);
+void InputBox::set_numeric_value(int value)
+{
+    if (m_numeric_value == value)
+        return;
+    m_numeric_value = value;
+    m_spinbox->set_value(value);
+}
 
-    auto& label_editor_container = widget.add<Widget>();
-    label_editor_container.set_layout<HorizontalBoxLayout>();
+void InputBox::on_done(ExecResult result)
+{
+    if (result != ExecResult::OK)
+        return;
 
-    auto& label = label_editor_container.add<Label>(m_prompt);
-    label.set_fixed_size(text_width, 16);
+    if (m_text_editor) {
+        auto value = String::from_deprecated_string(m_text_editor->text());
+        if (!value.is_error())
+            m_text_value = value.release_value();
+    } else if (m_spinbox)
+        m_numeric_value = m_spinbox->value();
 
-    switch (input_type) {
+    if (m_input_type == InputType::NonemptyText)
+        VERIFY(!m_text_value.is_empty());
+}
+
+ErrorOr<void> InputBox::build()
+{
+    auto main_widget = TRY(set_main_widget<Widget>());
+    TRY(main_widget->try_set_layout<VerticalBoxLayout>(6, 6));
+    main_widget->set_fill_with_background_color(true);
+
+    if (!m_prompt.is_empty()) {
+        auto prompt_container = TRY(main_widget->try_add<Widget>());
+        TRY(prompt_container->try_set_layout<HorizontalBoxLayout>(0, 8));
+        if (m_icon) {
+            auto image_widget = TRY(prompt_container->try_add<ImageWidget>());
+            image_widget->set_bitmap(m_icon);
+        }
+        m_prompt_label = TRY(prompt_container->try_add<Label>());
+        m_prompt_label->set_autosize(true);
+        m_prompt_label->set_text_wrapping(Gfx::TextWrapping::DontWrap);
+        m_prompt_label->set_text(m_prompt);
+    }
+
+    switch (m_input_type) {
     case InputType::Text:
-        m_text_editor = label_editor_container.add<TextBox>();
+    case InputType::NonemptyText:
+        m_text_editor = TRY(main_widget->try_add<TextBox>());
         break;
     case InputType::Password:
-        m_text_editor = label_editor_container.add<PasswordBox>();
+        m_text_editor = TRY(main_widget->try_add<PasswordBox>());
+        break;
+    case InputType::Numeric:
+        m_spinbox = TRY(main_widget->try_add<SpinBox>());
         break;
     }
 
-    m_text_editor->set_text(m_text_value);
+    auto button_container = TRY(main_widget->try_add<Widget>());
+    TRY(button_container->try_set_layout<HorizontalBoxLayout>(0, 6));
+    TRY(button_container->add_spacer());
 
-    if (!m_placeholder.is_null())
-        m_text_editor->set_placeholder(m_placeholder);
-
-    auto& button_container_outer = widget.add<Widget>();
-    button_container_outer.set_fixed_height(22);
-    button_container_outer.set_layout<VerticalBoxLayout>();
-
-    auto& button_container_inner = button_container_outer.add<Widget>();
-    button_container_inner.set_layout<HorizontalBoxLayout>();
-    button_container_inner.layout()->set_spacing(6);
-    button_container_inner.layout()->set_margins({ 4, 0, 4, 4 });
-    button_container_inner.layout()->add_spacer();
-
-    m_ok_button = button_container_inner.add<Button>();
-    m_ok_button->set_text("OK");
+    m_ok_button = TRY(button_container->try_add<DialogButton>("OK"_short_string));
     m_ok_button->on_click = [this](auto) {
-        dbgln("GUI::InputBox: OK button clicked");
-        m_text_value = m_text_editor->text();
-        done(ExecOK);
+        if (m_spinbox)
+            m_spinbox->set_value_from_current_text();
+        done(ExecResult::OK);
     };
+    m_ok_button->set_default(true);
 
-    m_cancel_button = button_container_inner.add<Button>();
-    m_cancel_button->set_text("Cancel");
-    m_cancel_button->on_click = [this](auto) {
-        dbgln("GUI::InputBox: Cancel button clicked");
-        done(ExecCancel);
-    };
+    m_cancel_button = TRY(button_container->try_add<DialogButton>("Cancel"_short_string));
+    m_cancel_button->on_click = [this](auto) { done(ExecResult::Cancel); };
 
-    m_text_editor->on_return_pressed = [this] {
-        m_ok_button->click();
+    auto guarantee_width = [this, button_container] {
+        if (m_prompt.is_empty())
+            return;
+        auto width = button_container->calculated_min_size().value().width().as_int();
+        auto constexpr golden_ratio = 1.618;
+        button_container->set_min_width(width * golden_ratio);
     };
-    m_text_editor->on_escape_pressed = [this] {
-        m_cancel_button->click();
-    };
-    m_text_editor->set_focus(true);
+    guarantee_width();
+    on_font_change = [guarantee_width] { guarantee_width(); };
+
+    if (m_text_editor) {
+        m_text_editor->set_text(m_text_value);
+
+        if (m_input_type == InputType::NonemptyText) {
+            m_text_editor->on_change = [this] {
+                m_ok_button->set_enabled(!m_text_editor->text().is_empty());
+            };
+            m_text_editor->on_change();
+        }
+    }
+
+    if (m_spinbox)
+        m_spinbox->set_value(m_numeric_value);
+
+    auto size = main_widget->effective_min_size();
+    resize(TRY(size.width().shrink_value()), TRY(size.height().shrink_value()));
+
+    return {};
 }
 
 }

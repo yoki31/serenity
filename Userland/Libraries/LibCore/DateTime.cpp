@@ -5,6 +5,8 @@
  */
 
 #include <AK/CharacterTypes.h>
+#include <AK/DateConstants.h>
+#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
 #include <LibCore/DateTime.h>
@@ -83,174 +85,214 @@ void DateTime::set_time(int year, int month, int day, int hour, int minute, int 
     m_second = tm.tm_sec;
 }
 
-String DateTime::to_string(const String& format) const
+ErrorOr<String> DateTime::to_string(StringView format) const
 {
-    const char wday_short_names[7][4] = {
-        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
-    };
-    const char wday_long_names[7][10] = {
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
-    };
-    const char mon_short_names[12][4] = {
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-    };
-    const char mon_long_names[12][10] = {
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    };
-
     struct tm tm;
     localtime_r(&m_timestamp, &tm);
     StringBuilder builder;
-    const int format_len = format.length();
+    int const format_len = format.length();
+
+    auto format_time_zone_offset = [&](bool with_separator) -> ErrorOr<void> {
+        struct tm gmt_tm;
+        gmtime_r(&m_timestamp, &gmt_tm);
+
+        gmt_tm.tm_isdst = -1;
+        auto gmt_timestamp = mktime(&gmt_tm);
+
+        auto offset_seconds = static_cast<time_t>(difftime(m_timestamp, gmt_timestamp));
+        StringView offset_sign;
+
+        if (offset_seconds >= 0) {
+            offset_sign = "+"sv;
+        } else {
+            offset_sign = "-"sv;
+            offset_seconds *= -1;
+        }
+
+        auto offset_hours = offset_seconds / 3600;
+        auto offset_minutes = (offset_seconds % 3600) / 60;
+        auto separator = with_separator ? ":"sv : ""sv;
+
+        TRY(builder.try_appendff("{}{:02}{}{:02}", offset_sign, offset_hours, separator, offset_minutes));
+        return {};
+    };
 
     for (int i = 0; i < format_len; ++i) {
         if (format[i] != '%') {
-            builder.append(format[i]);
+            TRY(builder.try_append(format[i]));
         } else {
             if (++i == format_len)
-                return String();
+                return String {};
 
             switch (format[i]) {
             case 'a':
-                builder.append(wday_short_names[tm.tm_wday]);
+                TRY(builder.try_append(short_day_names[tm.tm_wday]));
                 break;
             case 'A':
-                builder.append(wday_long_names[tm.tm_wday]);
+                TRY(builder.try_append(long_day_names[tm.tm_wday]));
                 break;
             case 'b':
-                builder.append(mon_short_names[tm.tm_mon]);
+                TRY(builder.try_append(short_month_names[tm.tm_mon]));
                 break;
             case 'B':
-                builder.append(mon_long_names[tm.tm_mon]);
+                TRY(builder.try_append(long_month_names[tm.tm_mon]));
                 break;
             case 'C':
-                builder.appendff("{:02}", (tm.tm_year + 1900) / 100);
+                TRY(builder.try_appendff("{:02}", (tm.tm_year + 1900) / 100));
                 break;
             case 'd':
-                builder.appendff("{:02}", tm.tm_mday);
+                TRY(builder.try_appendff("{:02}", tm.tm_mday));
                 break;
             case 'D':
-                builder.appendff("{:02}/{:02}/{:02}", tm.tm_mon + 1, tm.tm_mday, (tm.tm_year + 1900) % 100);
+                TRY(builder.try_appendff("{:02}/{:02}/{:02}", tm.tm_mon + 1, tm.tm_mday, (tm.tm_year + 1900) % 100));
                 break;
             case 'e':
-                builder.appendff("{:2}", tm.tm_mday);
+                TRY(builder.try_appendff("{:2}", tm.tm_mday));
                 break;
             case 'h':
-                builder.append(mon_short_names[tm.tm_mon]);
+                TRY(builder.try_append(short_month_names[tm.tm_mon]));
                 break;
             case 'H':
-                builder.appendff("{:02}", tm.tm_hour);
+                TRY(builder.try_appendff("{:02}", tm.tm_hour));
                 break;
-            case 'I':
-                builder.appendff("{:02}", tm.tm_hour % 12);
+            case 'I': {
+                int display_hour = tm.tm_hour % 12;
+                if (display_hour == 0)
+                    display_hour = 12;
+                TRY(builder.try_appendff("{:02}", display_hour));
                 break;
+            }
             case 'j':
-                builder.appendff("{:03}", tm.tm_yday + 1);
+                TRY(builder.try_appendff("{:03}", tm.tm_yday + 1));
                 break;
+            case 'l': {
+                int display_hour = tm.tm_hour % 12;
+                if (display_hour == 0)
+                    display_hour = 12;
+                TRY(builder.try_appendff("{:2}", display_hour));
+                break;
+            }
             case 'm':
-                builder.appendff("{:02}", tm.tm_mon + 1);
+                TRY(builder.try_appendff("{:02}", tm.tm_mon + 1));
                 break;
             case 'M':
-                builder.appendff("{:02}", tm.tm_min);
+                TRY(builder.try_appendff("{:02}", tm.tm_min));
                 break;
             case 'n':
-                builder.append('\n');
+                TRY(builder.try_append('\n'));
                 break;
             case 'p':
-                builder.append(tm.tm_hour < 12 ? "a.m." : "p.m.");
+                TRY(builder.try_append(tm.tm_hour < 12 ? "AM"sv : "PM"sv));
                 break;
-            case 'r':
-                builder.appendff("{:02}:{:02}:{:02} {}", tm.tm_hour % 12, tm.tm_min, tm.tm_sec, tm.tm_hour < 12 ? "a.m." : "p.m.");
+            case 'r': {
+                int display_hour = tm.tm_hour % 12;
+                if (display_hour == 0)
+                    display_hour = 12;
+                TRY(builder.try_appendff("{:02}:{:02}:{:02} {}", display_hour, tm.tm_min, tm.tm_sec, tm.tm_hour < 12 ? "AM" : "PM"));
                 break;
+            }
             case 'R':
-                builder.appendff("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+                TRY(builder.try_appendff("{:02}:{:02}", tm.tm_hour, tm.tm_min));
                 break;
             case 'S':
-                builder.appendff("{:02}", tm.tm_sec);
+                TRY(builder.try_appendff("{:02}", tm.tm_sec));
                 break;
             case 't':
-                builder.append('\t');
+                TRY(builder.try_append('\t'));
                 break;
             case 'T':
-                builder.appendff("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec);
+                TRY(builder.try_appendff("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec));
                 break;
             case 'u':
-                builder.appendff("{}", tm.tm_wday ? tm.tm_wday : 7);
+                TRY(builder.try_appendff("{}", tm.tm_wday ? tm.tm_wday : 7));
                 break;
             case 'U': {
-                const int wday_of_year_beginning = (tm.tm_wday + 6 * tm.tm_yday) % 7;
-                const int week_number = (tm.tm_yday + wday_of_year_beginning) / 7;
-                builder.appendff("{:02}", week_number);
+                int const wday_of_year_beginning = (tm.tm_wday + 6 * tm.tm_yday) % 7;
+                int const week_number = (tm.tm_yday + wday_of_year_beginning) / 7;
+                TRY(builder.try_appendff("{:02}", week_number));
                 break;
             }
             case 'V': {
-                const int wday_of_year_beginning = (tm.tm_wday + 6 + 6 * tm.tm_yday) % 7;
+                int const wday_of_year_beginning = (tm.tm_wday + 6 + 6 * tm.tm_yday) % 7;
                 int week_number = (tm.tm_yday + wday_of_year_beginning) / 7 + 1;
                 if (wday_of_year_beginning > 3) {
                     if (tm.tm_yday >= 7 - wday_of_year_beginning)
                         --week_number;
                     else {
-                        const int days_of_last_year = days_in_year(tm.tm_year + 1900 - 1);
-                        const int wday_of_last_year_beginning = (wday_of_year_beginning + 6 * days_of_last_year) % 7;
+                        int const days_of_last_year = days_in_year(tm.tm_year + 1900 - 1);
+                        int const wday_of_last_year_beginning = (wday_of_year_beginning + 6 * days_of_last_year) % 7;
                         week_number = (days_of_last_year + wday_of_last_year_beginning) / 7 + 1;
                         if (wday_of_last_year_beginning > 3)
                             --week_number;
                     }
                 }
-                builder.appendff("{:02}", week_number);
+                TRY(builder.try_appendff("{:02}", week_number));
                 break;
             }
             case 'w':
-                builder.appendff("{}", tm.tm_wday);
+                TRY(builder.try_appendff("{}", tm.tm_wday));
                 break;
             case 'W': {
-                const int wday_of_year_beginning = (tm.tm_wday + 6 + 6 * tm.tm_yday) % 7;
-                const int week_number = (tm.tm_yday + wday_of_year_beginning) / 7;
-                builder.appendff("{:02}", week_number);
+                int const wday_of_year_beginning = (tm.tm_wday + 6 + 6 * tm.tm_yday) % 7;
+                int const week_number = (tm.tm_yday + wday_of_year_beginning) / 7;
+                TRY(builder.try_appendff("{:02}", week_number));
                 break;
             }
             case 'y':
-                builder.appendff("{:02}", (tm.tm_year + 1900) % 100);
+                TRY(builder.try_appendff("{:02}", (tm.tm_year + 1900) % 100));
                 break;
             case 'Y':
-                builder.appendff("{}", tm.tm_year + 1900);
+                TRY(builder.try_appendff("{}", tm.tm_year + 1900));
                 break;
+            case 'z':
+                TRY(format_time_zone_offset(false));
+                break;
+            case ':':
+                if (++i == format_len) {
+                    TRY(builder.try_append("%:"sv));
+                    break;
+                }
+                if (format[i] != 'z') {
+                    TRY(builder.try_append("%:"sv));
+                    TRY(builder.try_append(format[i]));
+                    break;
+                }
+                TRY(format_time_zone_offset(true));
+                break;
+            case 'Z': {
+                auto const* timezone_name = tzname[tm.tm_isdst == 0 ? 0 : 1];
+                TRY(builder.try_append({ timezone_name, strlen(timezone_name) }));
+                break;
+            }
             case '%':
-                builder.append('%');
+                TRY(builder.try_append('%'));
                 break;
             default:
-                return String();
+                TRY(builder.try_append('%'));
+                TRY(builder.try_append(format[i]));
+                break;
             }
         }
     }
 
-    return builder.build();
+    return builder.to_string();
 }
 
-Optional<DateTime> DateTime::parse(const String& format, const String& string)
+DeprecatedString DateTime::to_deprecated_string(StringView format) const
+{
+    return MUST(to_string(format)).to_deprecated_string();
+}
+
+Optional<DateTime> DateTime::parse(StringView format, DeprecatedString const& string)
 {
     unsigned format_pos = 0;
     unsigned string_pos = 0;
-    struct tm tm = {};
 
-    const StringView wday_short_names[7] = {
-        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
-    };
-    const StringView wday_long_names[7] = {
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
-    };
-    const StringView mon_short_names[12] = {
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-    };
-    const StringView mon_long_names[12] = {
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    };
+    struct tm tm = {};
+    tm.tm_isdst = -1;
 
     auto parsing_failed = false;
+    auto tm_represents_utc_time = false;
 
     auto parse_number = [&] {
         if (string_pos >= string.length()) {
@@ -298,7 +340,7 @@ Optional<DateTime> DateTime::parse(const String& format, const String& string)
         switch (format[format_pos]) {
         case 'a': {
             auto wday = 0;
-            for (auto name : wday_short_names) {
+            for (auto name : short_day_names) {
                 if (string.substring_view(string_pos).starts_with(name, AK::CaseSensitivity::CaseInsensitive)) {
                     string_pos += name.length();
                     tm.tm_wday = wday;
@@ -312,7 +354,7 @@ Optional<DateTime> DateTime::parse(const String& format, const String& string)
         }
         case 'A': {
             auto wday = 0;
-            for (auto name : wday_long_names) {
+            for (auto name : long_day_names) {
                 if (string.substring_view(string_pos).starts_with(name, AK::CaseSensitivity::CaseInsensitive)) {
                     string_pos += name.length();
                     tm.tm_wday = wday;
@@ -327,7 +369,7 @@ Optional<DateTime> DateTime::parse(const String& format, const String& string)
         case 'h':
         case 'b': {
             auto mon = 0;
-            for (auto name : mon_short_names) {
+            for (auto name : short_month_names) {
                 if (string.substring_view(string_pos).starts_with(name, AK::CaseSensitivity::CaseInsensitive)) {
                     string_pos += name.length();
                     tm.tm_mon = mon;
@@ -341,7 +383,7 @@ Optional<DateTime> DateTime::parse(const String& format, const String& string)
         }
         case 'B': {
             auto mon = 0;
-            for (auto name : mon_long_names) {
+            for (auto name : long_month_names) {
                 if (string.substring_view(string_pos).starts_with(name, AK::CaseSensitivity::CaseInsensitive)) {
                     string_pos += name.length();
                     tm.tm_mon = mon;
@@ -410,19 +452,19 @@ Optional<DateTime> DateTime::parse(const String& format, const String& string)
             }
             break;
         case 'p': {
-            auto ampm = string.substring_view(string_pos, 4);
-            if (ampm == "p.m." && tm.tm_hour < 12) {
+            auto ampm = string.substring_view(string_pos, 2);
+            if (ampm == "PM" && tm.tm_hour < 12) {
                 tm.tm_hour += 12;
             }
-            string_pos += 4;
+            string_pos += 2;
             break;
         }
         case 'r': {
-            auto ampm = string.substring_view(string_pos, 4);
-            if (ampm == "p.m." && tm.tm_hour < 12) {
+            auto ampm = string.substring_view(string_pos, 2);
+            if (ampm == "PM" && tm.tm_hour < 12) {
                 tm.tm_hour += 12;
             }
-            string_pos += 4;
+            string_pos += 2;
             break;
         }
         case 'R': {
@@ -455,6 +497,7 @@ Optional<DateTime> DateTime::parse(const String& format, const String& string)
             break;
         }
         case 'z': {
+            tm_represents_utc_time = true;
             if (string[string_pos] == 'Z') {
                 // UTC time
                 string_pos++;
@@ -506,6 +549,14 @@ Optional<DateTime> DateTime::parse(const String& format, const String& string)
         return {};
     }
 
+    // If an explicit timezone was present, the time in tm was shifted to UTC.
+    // Convert it to local time, since that is what `mktime` expects.
+    if (tm_represents_utc_time) {
+        auto utc_time = timegm(&tm);
+        localtime_r(&utc_time, &tm);
+    }
+
     return DateTime::from_timestamp(mktime(&tm));
 }
+
 }

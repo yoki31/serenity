@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2020-2021, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2021, Xavier Defrang <xavier.defrang@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,34 +9,44 @@
 #include <AK/LexicalPath.h>
 #include <AK/StringBuilder.h>
 #include <LibCore/ArgsParser.h>
+#include <LibCore/FilePermissionsMask.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio cpath rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio cpath rpath"));
 
     bool create_parents = false;
-    Vector<const char*> directories;
+    DeprecatedString mode_string;
+    Vector<DeprecatedString> directories;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(create_parents, "Create parent directories if they don't exist", "parents", 'p');
+    args_parser.add_option(mode_string, "Set new directory permissions", "mode", 'm', "mode");
     args_parser.add_positional_argument(directories, "Directories to create", "directories");
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
-    // FIXME: Support -m/--mode option
-    mode_t mode = 0755;
+    mode_t const default_mode = 0755;
+    mode_t const mask_reference_mode = 0777;
+
+    Core::FilePermissionsMask mask;
+
+    if (mode_string.is_empty()) {
+        mask.assign_permissions(default_mode);
+    } else {
+        mask = TRY(Core::FilePermissionsMask::parse(mode_string));
+    }
 
     bool has_errors = false;
 
     for (auto& directory : directories) {
         LexicalPath lexical_path(directory);
         if (!create_parents) {
-            if (mkdir(lexical_path.string().characters(), mode) < 0) {
+            if (mkdir(lexical_path.string().characters(), mask.apply(mask_reference_mode)) < 0) {
                 perror("mkdir");
                 has_errors = true;
             }
@@ -43,10 +54,17 @@ int main(int argc, char** argv)
         }
         StringBuilder path_builder;
         if (lexical_path.is_absolute())
-            path_builder.append("/");
-        for (auto& part : lexical_path.parts_view()) {
+            path_builder.append('/');
+
+        auto& parts = lexical_path.parts_view();
+        size_t num_parts = parts.size();
+
+        for (size_t idx = 0; idx < num_parts; ++idx) {
+            auto& part = parts[idx];
+
             path_builder.append(part);
-            auto path = path_builder.build();
+            auto path = path_builder.to_deprecated_string();
+
             struct stat st;
             if (stat(path.characters(), &st) < 0) {
                 if (errno != ENOENT) {
@@ -54,6 +72,10 @@ int main(int argc, char** argv)
                     has_errors = true;
                     break;
                 }
+
+                bool is_final = (idx == (num_parts - 1));
+                mode_t mode = is_final ? mask.apply(mask_reference_mode) : default_mode;
+
                 if (mkdir(path.characters(), mode) < 0) {
                     perror("mkdir");
                     has_errors = true;
@@ -66,7 +88,7 @@ int main(int argc, char** argv)
                     break;
                 }
             }
-            path_builder.append("/");
+            path_builder.append('/');
         }
     }
     return has_errors ? 1 : 0;

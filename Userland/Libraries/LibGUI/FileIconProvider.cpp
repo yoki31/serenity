@@ -1,21 +1,24 @@
 /*
  * Copyright (c) 2020-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Array.h>
+#include <AK/DeprecatedString.h>
 #include <AK/LexicalPath.h>
-#include <AK/String.h>
 #include <LibCore/ConfigFile.h>
-#include <LibCore/File.h>
 #include <LibCore/MappedFile.h>
 #include <LibCore/StandardPaths.h>
+#include <LibCore/System.h>
 #include <LibELF/Image.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibGUI/FileIconProvider.h>
 #include <LibGUI/Icon.h>
 #include <LibGUI/Painter.h>
 #include <LibGfx/Bitmap.h>
-#include <LibGfx/PNGLoader.h>
+#include <LibGfx/ImageFormats/PNGLoader.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -29,6 +32,8 @@ static Icon s_inaccessible_directory_icon;
 static Icon s_desktop_directory_icon;
 static Icon s_home_directory_icon;
 static Icon s_home_directory_open_icon;
+static Icon s_git_directory_icon;
+static Icon s_git_directory_open_icon;
 static Icon s_file_icon;
 static Icon s_symlink_icon;
 static Icon s_socket_icon;
@@ -37,8 +42,8 @@ static Icon s_filetype_image_icon;
 static RefPtr<Gfx::Bitmap> s_symlink_emblem;
 static RefPtr<Gfx::Bitmap> s_symlink_emblem_small;
 
-static HashMap<String, Icon> s_filetype_icons;
-static HashMap<String, Vector<String>> s_filetype_patterns;
+static HashMap<DeprecatedString, Icon> s_filetype_icons;
+static HashMap<DeprecatedString, Vector<DeprecatedString>> s_filetype_patterns;
 
 static void initialize_executable_icon_if_needed()
 {
@@ -46,7 +51,7 @@ static void initialize_executable_icon_if_needed()
     if (initialized)
         return;
     initialized = true;
-    s_executable_icon = Icon::default_icon("filetype-executable");
+    s_executable_icon = Icon::default_icon("filetype-executable"sv);
 }
 
 static void initialize_filetype_image_icon_if_needed()
@@ -55,7 +60,7 @@ static void initialize_filetype_image_icon_if_needed()
     if (initialized)
         return;
     initialized = true;
-    s_filetype_image_icon = Icon::default_icon("filetype-image");
+    s_filetype_image_icon = Icon::default_icon("filetype-image"sv);
 }
 
 static void initialize_if_needed()
@@ -64,27 +69,29 @@ static void initialize_if_needed()
     if (s_initialized)
         return;
 
-    auto config = Core::ConfigFile::open("/etc/FileIconProvider.ini");
+    auto config = Core::ConfigFile::open("/etc/FileIconProvider.ini").release_value_but_fixme_should_propagate_errors();
 
-    s_symlink_emblem = Gfx::Bitmap::try_load_from_file("/res/icons/symlink-emblem.png").release_value_but_fixme_should_propagate_errors();
-    s_symlink_emblem_small = Gfx::Bitmap::try_load_from_file("/res/icons/symlink-emblem-small.png").release_value_but_fixme_should_propagate_errors();
+    s_symlink_emblem = Gfx::Bitmap::load_from_file("/res/icons/symlink-emblem.png"sv).release_value_but_fixme_should_propagate_errors();
+    s_symlink_emblem_small = Gfx::Bitmap::load_from_file("/res/icons/symlink-emblem-small.png"sv).release_value_but_fixme_should_propagate_errors();
 
-    s_hard_disk_icon = Icon::default_icon("hard-disk");
-    s_directory_icon = Icon::default_icon("filetype-folder");
-    s_directory_open_icon = Icon::default_icon("filetype-folder-open");
-    s_inaccessible_directory_icon = Icon::default_icon("filetype-folder-inaccessible");
-    s_home_directory_icon = Icon::default_icon("home-directory");
-    s_home_directory_open_icon = Icon::default_icon("home-directory-open");
-    s_desktop_directory_icon = Icon::default_icon("desktop");
-    s_file_icon = Icon::default_icon("filetype-unknown");
-    s_symlink_icon = Icon::default_icon("filetype-symlink");
-    s_socket_icon = Icon::default_icon("filetype-socket");
+    s_hard_disk_icon = Icon::default_icon("hard-disk"sv);
+    s_directory_icon = Icon::default_icon("filetype-folder"sv);
+    s_directory_open_icon = Icon::default_icon("filetype-folder-open"sv);
+    s_inaccessible_directory_icon = Icon::default_icon("filetype-folder-inaccessible"sv);
+    s_home_directory_icon = Icon::default_icon("home-directory"sv);
+    s_home_directory_open_icon = Icon::default_icon("home-directory-open"sv);
+    s_git_directory_icon = Icon::default_icon("git-directory"sv);
+    s_git_directory_open_icon = Icon::default_icon("git-directory-open"sv);
+    s_desktop_directory_icon = Icon::default_icon("desktop"sv);
+    s_file_icon = Icon::default_icon("filetype-unknown"sv);
+    s_symlink_icon = Icon::default_icon("filetype-symlink"sv);
+    s_socket_icon = Icon::default_icon("filetype-socket"sv);
 
     initialize_filetype_image_icon_if_needed();
     initialize_executable_icon_if_needed();
 
     for (auto& filetype : config->keys("Icons")) {
-        s_filetype_icons.set(filetype, Icon::default_icon(String::formatted("filetype-{}", filetype)));
+        s_filetype_icons.set(filetype, Icon::default_icon(DeprecatedString::formatted("filetype-{}", filetype)));
         s_filetype_patterns.set(filetype, config->read_entry("Icons", filetype).split(','));
     }
 
@@ -121,23 +128,35 @@ Icon FileIconProvider::home_directory_open_icon()
     return s_home_directory_open_icon;
 }
 
+Icon FileIconProvider::git_directory_icon()
+{
+    initialize_if_needed();
+    return s_git_directory_icon;
+}
+
+Icon FileIconProvider::git_directory_open_icon()
+{
+    initialize_if_needed();
+    return s_git_directory_open_icon;
+}
+
 Icon FileIconProvider::filetype_image_icon()
 {
     initialize_filetype_image_icon_if_needed();
     return s_filetype_image_icon;
 }
 
-Icon FileIconProvider::icon_for_path(const String& path)
+Icon FileIconProvider::icon_for_path(StringView path)
 {
-    struct stat stat;
-    if (::stat(path.characters(), &stat) < 0)
+    auto stat_or_error = Core::System::stat(path);
+    if (stat_or_error.is_error())
         return s_file_icon;
-    return icon_for_path(path, stat.st_mode);
+    return icon_for_path(path, stat_or_error.release_value().st_mode);
 }
 
-Icon FileIconProvider::icon_for_executable(const String& path)
+Icon FileIconProvider::icon_for_executable(DeprecatedString const& path)
 {
-    static HashMap<String, Icon> app_icon_cache;
+    static HashMap<DeprecatedString, Icon> app_icon_cache;
 
     if (auto it = app_icon_cache.find(path); it != app_icon_cache.end())
         return it->value;
@@ -165,7 +184,7 @@ Icon FileIconProvider::icon_for_executable(const String& path)
         return s_executable_icon;
     }
 
-    auto image = ELF::Image((const u8*)mapped_file->data(), mapped_file->size());
+    auto image = ELF::Image((u8 const*)mapped_file->data(), mapped_file->size());
     if (!image.is_valid()) {
         app_icon_cache.set(path, s_executable_icon);
         return s_executable_icon;
@@ -174,24 +193,32 @@ Icon FileIconProvider::icon_for_executable(const String& path)
     // If any of the required sections are missing then use the defaults
     Icon icon;
     struct IconSection {
-        const char* section_name;
+        StringView section_name;
         int image_size;
     };
 
-    static const IconSection icon_sections[] = { { .section_name = "serenity_icon_s", .image_size = 16 }, { .section_name = "serenity_icon_m", .image_size = 32 } };
+    static constexpr Array<IconSection, 2> icon_sections = {
+        IconSection { .section_name = "serenity_icon_s"sv, .image_size = 16 },
+        IconSection { .section_name = "serenity_icon_m"sv, .image_size = 32 }
+    };
 
     bool had_error = false;
-    for (const auto& icon_section : icon_sections) {
+    for (auto const& icon_section : icon_sections) {
         auto section = image.lookup_section(icon_section.section_name);
 
-        RefPtr<Gfx::Bitmap> bitmap;
+        RefPtr<Gfx::Bitmap const> bitmap;
         if (!section.has_value()) {
             bitmap = s_executable_icon.bitmap_for_size(icon_section.image_size);
         } else {
             // FIXME: Use the ImageDecoder service.
-            auto frame_or_error = Gfx::PNGImageDecoderPlugin(reinterpret_cast<u8 const*>(section->raw_data()), section->size()).frame(0);
-            if (!frame_or_error.is_error()) {
-                bitmap = frame_or_error.value().image;
+            if (Gfx::PNGImageDecoderPlugin::sniff({ section->raw_data(), section->size() })) {
+                auto png_decoder = Gfx::PNGImageDecoderPlugin::create({ section->raw_data(), section->size() }).release_value_but_fixme_should_propagate_errors();
+                if (!png_decoder->initialize().is_error()) {
+                    auto frame_or_error = png_decoder->frame(0);
+                    if (!frame_or_error.is_error()) {
+                        bitmap = frame_or_error.value().image;
+                    }
+                }
             }
         }
 
@@ -201,7 +228,7 @@ Icon FileIconProvider::icon_for_executable(const String& path)
             continue;
         }
 
-        icon.set_bitmap_for_size(icon_section.image_size, std::move(bitmap));
+        icon.set_bitmap_for_size(icon_section.image_size, move(bitmap));
     }
 
     if (had_error) {
@@ -212,7 +239,7 @@ Icon FileIconProvider::icon_for_executable(const String& path)
     return icon;
 }
 
-Icon FileIconProvider::icon_for_path(const String& path, mode_t mode)
+Icon FileIconProvider::icon_for_path(StringView path, mode_t mode)
 {
     initialize_if_needed();
     if (path == "/")
@@ -222,20 +249,27 @@ Icon FileIconProvider::icon_for_path(const String& path, mode_t mode)
             return s_home_directory_icon;
         if (path == Core::StandardPaths::desktop_directory())
             return s_desktop_directory_icon;
-        if (access(path.characters(), R_OK | X_OK) < 0)
+        if (Core::System::access(path, R_OK | X_OK).is_error())
             return s_inaccessible_directory_icon;
+        if (path.ends_with(".git"sv))
+            return s_git_directory_icon;
         return s_directory_icon;
     }
     if (S_ISLNK(mode)) {
-        auto raw_symlink_target = Core::File::read_link(path);
-        if (raw_symlink_target.is_null())
+        auto raw_symlink_target_or_error = FileSystem::read_link(path);
+        if (raw_symlink_target_or_error.is_error())
             return s_symlink_icon;
+        auto raw_symlink_target = raw_symlink_target_or_error.release_value();
 
         String target_path;
         if (raw_symlink_target.starts_with('/')) {
             target_path = raw_symlink_target;
         } else {
-            target_path = Core::File::real_path_for(String::formatted("{}/{}", LexicalPath::dirname(path), raw_symlink_target));
+            auto error_or_path = FileSystem::real_path(DeprecatedString::formatted("{}/{}", LexicalPath::dirname(path), raw_symlink_target));
+            if (error_or_path.is_error())
+                return s_symlink_icon;
+
+            target_path = error_or_path.release_value();
         }
         auto target_icon = icon_for_path(target_path);
 
@@ -263,12 +297,14 @@ Icon FileIconProvider::icon_for_path(const String& path, mode_t mode)
     if (mode & (S_IXUSR | S_IXGRP | S_IXOTH))
         return icon_for_executable(path);
 
-    if (Gfx::Bitmap::is_path_a_supported_image_format(path.view()))
+    if (Gfx::Bitmap::is_path_a_supported_image_format(path))
         return s_filetype_image_icon;
 
     for (auto& filetype : s_filetype_icons.keys()) {
-        auto patterns = s_filetype_patterns.get(filetype).value();
-        for (auto& pattern : patterns) {
+        auto pattern_it = s_filetype_patterns.find(filetype);
+        if (pattern_it == s_filetype_patterns.end())
+            continue;
+        for (auto& pattern : pattern_it->value) {
             if (path.matches(pattern, CaseSensitivity::CaseInsensitive))
                 return s_filetype_icons.get(filetype).value();
         }

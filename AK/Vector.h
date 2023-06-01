@@ -13,6 +13,7 @@
 #include <AK/Forward.h>
 #include <AK/Iterator.h>
 #include <AK/Optional.h>
+#include <AK/ReverseIterator.h>
 #include <AK/Span.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Traits.h>
@@ -30,13 +31,13 @@ struct CanBePlacedInsideVectorHelper;
 template<typename StorageType>
 struct CanBePlacedInsideVectorHelper<StorageType, true> {
     template<typename U>
-    static constexpr bool value = requires(U&& u) { StorageType { &u }; };
+    static constexpr bool value = requires(U && u) { StorageType { &u }; };
 };
 
 template<typename StorageType>
 struct CanBePlacedInsideVectorHelper<StorageType, false> {
     template<typename U>
-    static constexpr bool value = requires(U&& u) { StorageType(forward<U>(u)); };
+    static constexpr bool value = requires(U && u) { StorageType(forward<U>(u)); };
 };
 }
 
@@ -46,17 +47,19 @@ private:
     static constexpr bool contains_reference = IsLvalueReference<T>;
     using StorageType = Conditional<contains_reference, RawPtr<RemoveReference<T>>, T>;
 
+    using VisibleType = RemoveReference<T>;
+
     template<typename U>
     static constexpr bool CanBePlacedInsideVector = Detail::CanBePlacedInsideVectorHelper<StorageType, contains_reference>::template value<U>;
 
 public:
     using ValueType = T;
     Vector()
-        : m_capacity(inline_capacity)
     {
     }
 
-    Vector(std::initializer_list<T> list) requires(!IsLvalueReference<T>)
+    Vector(std::initializer_list<T> list)
+    requires(!IsLvalueReference<T>)
     {
         ensure_capacity(list.size());
         for (auto& item : list)
@@ -70,10 +73,8 @@ public:
     {
         if constexpr (inline_capacity > 0) {
             if (!m_outline_buffer) {
-                for (size_t i = 0; i < m_size; ++i) {
-                    new (&inline_buffer()[i]) StorageType(move(other.inline_buffer()[i]));
-                    other.inline_buffer()[i].~StorageType();
-                }
+                TypedTransfer<T>::move(inline_buffer(), other.inline_buffer(), m_size);
+                TypedTransfer<T>::delete_(other.inline_buffer(), m_size);
             }
         }
         other.m_outline_buffer = nullptr;
@@ -82,6 +83,14 @@ public:
     }
 
     Vector(Vector const& other)
+    {
+        ensure_capacity(other.size());
+        TypedTransfer<StorageType>::copy(data(), other.data(), other.size());
+        m_size = other.size();
+    }
+
+    explicit Vector(ReadonlySpan<T> other)
+    requires(!IsLvalueReference<T>)
     {
         ensure_capacity(other.size());
         TypedTransfer<StorageType>::copy(data(), other.data(), other.size());
@@ -102,30 +111,30 @@ public:
     }
 
     Span<StorageType> span() { return { data(), size() }; }
-    Span<StorageType const> span() const { return { data(), size() }; }
+    ReadonlySpan<StorageType> span() const { return { data(), size() }; }
 
     operator Span<StorageType>() { return span(); }
-    operator Span<StorageType const>() const { return span(); }
+    operator ReadonlySpan<StorageType>() const { return span(); }
 
     bool is_empty() const { return size() == 0; }
     ALWAYS_INLINE size_t size() const { return m_size; }
     size_t capacity() const { return m_capacity; }
 
-    StorageType* data()
+    ALWAYS_INLINE StorageType* data()
     {
         if constexpr (inline_capacity > 0)
             return m_outline_buffer ? m_outline_buffer : inline_buffer();
         return m_outline_buffer;
     }
 
-    StorageType const* data() const
+    ALWAYS_INLINE StorageType const* data() const
     {
         if constexpr (inline_capacity > 0)
             return m_outline_buffer ? m_outline_buffer : inline_buffer();
         return m_outline_buffer;
     }
 
-    ALWAYS_INLINE T const& at(size_t i) const
+    ALWAYS_INLINE VisibleType const& at(size_t i) const
     {
         VERIFY(i < m_size);
         if constexpr (contains_reference)
@@ -134,7 +143,7 @@ public:
             return data()[i];
     }
 
-    ALWAYS_INLINE T& at(size_t i)
+    ALWAYS_INLINE VisibleType& at(size_t i)
     {
         VERIFY(i < m_size);
         if constexpr (contains_reference)
@@ -143,17 +152,18 @@ public:
             return data()[i];
     }
 
-    ALWAYS_INLINE T const& operator[](size_t i) const { return at(i); }
-    ALWAYS_INLINE T& operator[](size_t i) { return at(i); }
+    ALWAYS_INLINE VisibleType const& operator[](size_t i) const { return at(i); }
+    ALWAYS_INLINE VisibleType& operator[](size_t i) { return at(i); }
 
-    T const& first() const { return at(0); }
-    T& first() { return at(0); }
+    VisibleType const& first() const { return at(0); }
+    VisibleType& first() { return at(0); }
 
-    T const& last() const { return at(size() - 1); }
-    T& last() { return at(size() - 1); }
+    VisibleType const& last() const { return at(size() - 1); }
+    VisibleType& last() { return at(size() - 1); }
 
     template<typename TUnaryPredicate>
-    Optional<T> first_matching(TUnaryPredicate predicate)
+    Optional<VisibleType&> first_matching(TUnaryPredicate const& predicate)
+    requires(!contains_reference)
     {
         for (size_t i = 0; i < size(); ++i) {
             if (predicate(at(i))) {
@@ -164,7 +174,20 @@ public:
     }
 
     template<typename TUnaryPredicate>
-    Optional<T> last_matching(TUnaryPredicate predicate)
+    Optional<VisibleType const&> first_matching(TUnaryPredicate const& predicate) const
+    requires(!contains_reference)
+    {
+        for (size_t i = 0; i < size(); ++i) {
+            if (predicate(at(i))) {
+                return Optional<VisibleType const&>(at(i));
+            }
+        }
+        return {};
+    }
+
+    template<typename TUnaryPredicate>
+    Optional<VisibleType&> last_matching(TUnaryPredicate const& predicate)
+    requires(!contains_reference)
     {
         for (ssize_t i = size() - 1; i >= 0; --i) {
             if (predicate(at(i))) {
@@ -182,34 +205,39 @@ public:
         return TypedTransfer<StorageType>::compare(data(), other.data(), size());
     }
 
-    bool contains_slow(T const& value) const
+    template<typename V>
+    bool contains_slow(V const& value) const
     {
         for (size_t i = 0; i < size(); ++i) {
-            if (Traits<T>::equals(at(i), value))
+            if (Traits<VisibleType>::equals(at(i), value))
                 return true;
         }
         return false;
     }
 
-    bool contains_in_range(T const& value, size_t const start, size_t const end) const
+    bool contains_in_range(VisibleType const& value, size_t const start, size_t const end) const
     {
         VERIFY(start <= end);
         VERIFY(end < size());
         for (size_t i = start; i <= end; ++i) {
-            if (Traits<T>::equals(at(i), value))
+            if (Traits<VisibleType>::equals(at(i), value))
                 return true;
         }
         return false;
     }
 
+#ifndef KERNEL
+
     template<typename U = T>
-    void insert(size_t index, U&& value) requires(CanBePlacedInsideVector<U>)
+    void insert(size_t index, U&& value)
+    requires(CanBePlacedInsideVector<U>)
     {
         MUST(try_insert<U>(index, forward<U>(value)));
     }
 
     template<typename TUnaryPredicate, typename U = T>
-    void insert_before_matching(U&& value, TUnaryPredicate predicate, size_t first_index = 0, size_t* inserted_index = nullptr) requires(CanBePlacedInsideVector<U>)
+    void insert_before_matching(U&& value, TUnaryPredicate const& predicate, size_t first_index = 0, size_t* inserted_index = nullptr)
+    requires(CanBePlacedInsideVector<U>)
     {
         MUST(try_insert_before_matching(forward<U>(value), predicate, first_index, inserted_index));
     }
@@ -224,6 +252,8 @@ public:
         MUST(try_extend(other));
     }
 
+#endif
+
     ALWAYS_INLINE void append(T&& value)
     {
         if constexpr (contains_reference)
@@ -232,18 +262,22 @@ public:
             MUST(try_append(move(value)));
     }
 
-    ALWAYS_INLINE void append(T const& value) requires(!contains_reference)
+    ALWAYS_INLINE void append(T const& value)
+    requires(!contains_reference)
     {
         MUST(try_append(T(value)));
     }
 
+#ifndef KERNEL
     void append(StorageType const* values, size_t count)
     {
         MUST(try_append(values, count));
     }
+#endif
 
     template<typename U = T>
-    ALWAYS_INLINE void unchecked_append(U&& value) requires(CanBePlacedInsideVector<U>)
+    ALWAYS_INLINE void unchecked_append(U&& value)
+    requires(CanBePlacedInsideVector<U>)
     {
         VERIFY((size() + 1) <= capacity());
         if constexpr (contains_reference)
@@ -253,14 +287,26 @@ public:
         ++m_size;
     }
 
+    ALWAYS_INLINE void unchecked_append(StorageType const* values, size_t count)
+    {
+        if (count == 0)
+            return;
+        VERIFY((size() + count) <= capacity());
+        TypedTransfer<StorageType>::copy(slot(m_size), values, count);
+        m_size += count;
+    }
+
+#ifndef KERNEL
     template<class... Args>
-    void empend(Args&&... args) requires(!contains_reference)
+    void empend(Args&&... args)
+    requires(!contains_reference)
     {
         MUST(try_empend(forward<Args>(args)...));
     }
 
     template<typename U = T>
-    void prepend(U&& value) requires(CanBePlacedInsideVector<U>)
+    void prepend(U&& value)
+    requires(CanBePlacedInsideVector<U>)
     {
         MUST(try_insert(0, forward<U>(value)));
     }
@@ -274,6 +320,8 @@ public:
     {
         MUST(try_prepend(values, count));
     }
+
+#endif
 
     // FIXME: What about assigning from a vector with lower inline capacity?
     Vector& operator=(Vector&& other)
@@ -375,7 +423,7 @@ public:
     }
 
     template<typename TUnaryPredicate>
-    bool remove_first_matching(TUnaryPredicate predicate)
+    bool remove_first_matching(TUnaryPredicate const& predicate)
     {
         for (size_t i = 0; i < size(); ++i) {
             if (predicate(at(i))) {
@@ -387,15 +435,18 @@ public:
     }
 
     template<typename TUnaryPredicate>
-    void remove_all_matching(TUnaryPredicate predicate)
+    bool remove_all_matching(TUnaryPredicate const& predicate)
     {
+        bool something_was_removed = false;
         for (size_t i = 0; i < size();) {
             if (predicate(at(i))) {
                 remove(i);
+                something_was_removed = true;
             } else {
                 ++i;
             }
         }
+        return something_was_removed;
     }
 
     ALWAYS_INLINE T take_last()
@@ -440,7 +491,8 @@ public:
     }
 
     template<typename U = T>
-    ErrorOr<void> try_insert(size_t index, U&& value) requires(CanBePlacedInsideVector<U>)
+    ErrorOr<void> try_insert(size_t index, U&& value)
+    requires(CanBePlacedInsideVector<U>)
     {
         if (index > size())
             return Error::from_errno(EINVAL);
@@ -464,7 +516,8 @@ public:
     }
 
     template<typename TUnaryPredicate, typename U = T>
-    ErrorOr<void> try_insert_before_matching(U&& value, TUnaryPredicate predicate, size_t first_index = 0, size_t* inserted_index = nullptr) requires(CanBePlacedInsideVector<U>)
+    ErrorOr<void> try_insert_before_matching(U&& value, TUnaryPredicate const& predicate, size_t first_index = 0, size_t* inserted_index = nullptr)
+    requires(CanBePlacedInsideVector<U>)
     {
         for (size_t i = first_index; i < size(); ++i) {
             if (predicate(at(i))) {
@@ -482,7 +535,7 @@ public:
 
     ErrorOr<void> try_extend(Vector&& other)
     {
-        if (is_empty()) {
+        if (is_empty() && capacity() <= other.capacity()) {
             *this = move(other);
             return {};
         }
@@ -513,7 +566,8 @@ public:
         return {};
     }
 
-    ErrorOr<void> try_append(T const& value) requires(!contains_reference)
+    ErrorOr<void> try_append(T const& value)
+    requires(!contains_reference)
     {
         return try_append(T(value));
     }
@@ -529,7 +583,8 @@ public:
     }
 
     template<class... Args>
-    ErrorOr<void> try_empend(Args&&... args) requires(!contains_reference)
+    ErrorOr<void> try_empend(Args&&... args)
+    requires(!contains_reference)
     {
         TRY(try_grow_capacity(m_size + 1));
         new (slot(m_size)) StorageType { forward<Args>(args)... };
@@ -538,7 +593,8 @@ public:
     }
 
     template<typename U = T>
-    ErrorOr<void> try_prepend(U&& value) requires(CanBePlacedInsideVector<U>)
+    ErrorOr<void> try_prepend(U&& value)
+    requires(CanBePlacedInsideVector<U>)
     {
         return try_insert(0, forward<U>(value));
     }
@@ -609,7 +665,8 @@ public:
         return {};
     }
 
-    ErrorOr<void> try_resize(size_t new_size, bool keep_capacity = false) requires(!contains_reference)
+    ErrorOr<void> try_resize(size_t new_size, bool keep_capacity = false)
+    requires(!contains_reference)
     {
         if (new_size <= size()) {
             shrink(new_size, keep_capacity);
@@ -624,7 +681,8 @@ public:
         return {};
     }
 
-    ErrorOr<void> try_resize_and_keep_capacity(size_t new_size) requires(!contains_reference)
+    ErrorOr<void> try_resize_and_keep_capacity(size_t new_size)
+    requires(!contains_reference)
     {
         return try_resize(new_size, true);
     }
@@ -658,24 +716,54 @@ public:
         m_size = new_size;
     }
 
-    void resize(size_t new_size, bool keep_capacity = false) requires(!contains_reference)
+    void resize(size_t new_size, bool keep_capacity = false)
+    requires(!contains_reference)
     {
         MUST(try_resize(new_size, keep_capacity));
     }
 
-    void resize_and_keep_capacity(size_t new_size) requires(!contains_reference)
+    void resize_and_keep_capacity(size_t new_size)
+    requires(!contains_reference)
     {
         MUST(try_resize_and_keep_capacity(new_size));
     }
 
-    using ConstIterator = SimpleIterator<Vector const, T const>;
-    using Iterator = SimpleIterator<Vector, T>;
+    void shrink_to_fit()
+    {
+        if (size() == capacity())
+            return;
+        Vector new_vector;
+        new_vector.ensure_capacity(size());
+        for (auto& element : *this) {
+            new_vector.unchecked_append(move(element));
+        }
+        *this = move(new_vector);
+    }
+
+    using ConstIterator = SimpleIterator<Vector const, VisibleType const>;
+    using Iterator = SimpleIterator<Vector, VisibleType>;
+    using ReverseIterator = SimpleReverseIterator<Vector, VisibleType>;
+    using ReverseConstIterator = SimpleReverseIterator<Vector const, VisibleType const>;
 
     ConstIterator begin() const { return ConstIterator::begin(*this); }
     Iterator begin() { return Iterator::begin(*this); }
+    ReverseIterator rbegin() { return ReverseIterator::rbegin(*this); }
+    ReverseConstIterator rbegin() const { return ReverseConstIterator::rbegin(*this); }
 
     ConstIterator end() const { return ConstIterator::end(*this); }
     Iterator end() { return Iterator::end(*this); }
+    ReverseIterator rend() { return ReverseIterator::rend(*this); }
+    ReverseConstIterator rend() const { return ReverseConstIterator::rend(*this); }
+
+    ALWAYS_INLINE constexpr auto in_reverse()
+    {
+        return ReverseWrapper::in_reverse(*this);
+    }
+
+    ALWAYS_INLINE constexpr auto in_reverse() const
+    {
+        return ReverseWrapper::in_reverse(*this);
+    }
 
     template<typename TUnaryPredicate>
     ConstIterator find_if(TUnaryPredicate&& finder) const
@@ -689,23 +777,32 @@ public:
         return AK::find_if(begin(), end(), forward<TUnaryPredicate>(finder));
     }
 
-    ConstIterator find(T const& value) const
+    ConstIterator find(VisibleType const& value) const
     {
         return AK::find(begin(), end(), value);
     }
 
-    Iterator find(T const& value)
+    Iterator find(VisibleType const& value)
     {
         return AK::find(begin(), end(), value);
     }
 
-    Optional<size_t> find_first_index(T const& value) const
+    Optional<size_t> find_first_index(VisibleType const& value) const
     {
         if (auto const index = AK::find_index(begin(), end(), value);
             index < size()) {
             return index;
         }
         return {};
+    }
+
+    template<typename TUnaryPredicate>
+    Optional<size_t> find_first_index_if(TUnaryPredicate&& finder) const
+    {
+        auto maybe_result = AK::find_if(begin(), end(), finder);
+        if (maybe_result == end())
+            return {};
+        return maybe_result.index();
     }
 
     void reverse()
@@ -744,9 +841,25 @@ private:
     StorageType& raw_at(size_t index) { return *slot(index); }
 
     size_t m_size { 0 };
-    size_t m_capacity { 0 };
+    size_t m_capacity { inline_capacity };
 
-    alignas(StorageType) unsigned char m_inline_buffer_storage[sizeof(StorageType) * inline_capacity];
+    static constexpr size_t storage_size()
+    {
+        if constexpr (inline_capacity == 0)
+            return 0;
+        else
+            return sizeof(StorageType) * inline_capacity;
+    }
+
+    static constexpr size_t storage_alignment()
+    {
+        if constexpr (inline_capacity == 0)
+            return 1;
+        else
+            return alignof(StorageType);
+    }
+
+    alignas(storage_alignment()) unsigned char m_inline_buffer_storage[storage_size()];
     StorageType* m_outline_buffer { nullptr };
 };
 
@@ -755,4 +868,6 @@ Vector(Args... args) -> Vector<CommonType<Args...>>;
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::Vector;
+#endif

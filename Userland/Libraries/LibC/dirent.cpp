@@ -5,7 +5,6 @@
  */
 
 #include <AK/Assertions.h>
-#include <AK/Format.h>
 #include <AK/ScopeGuard.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Vector.h>
@@ -21,7 +20,8 @@
 
 extern "C" {
 
-DIR* opendir(const char* name)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/opendir.html
+DIR* opendir(char const* name)
 {
     int fd = open(name, O_RDONLY | O_DIRECTORY);
     if (fd == -1)
@@ -29,6 +29,7 @@ DIR* opendir(const char* name)
     return fdopendir(fd);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/fdopendir.html
 DIR* fdopendir(int fd)
 {
     if (fd == -1)
@@ -41,6 +42,7 @@ DIR* fdopendir(int fd)
     return dirp;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/closedir.html
 int closedir(DIR* dirp)
 {
     if (!dirp || dirp->fd == -1)
@@ -53,6 +55,7 @@ int closedir(DIR* dirp)
     return rc;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/rewinddir.html
 void rewinddir(DIR* dirp)
 {
     free(dirp->buffer);
@@ -133,6 +136,7 @@ static int allocate_dirp_buffer(DIR* dirp)
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/readdir.html
 dirent* readdir(DIR* dirp)
 {
     if (!dirp)
@@ -166,6 +170,7 @@ static bool compare_sys_struct_dirent(sys_dirent* sys_ent, struct dirent* str_en
         && strncmp(sys_ent->name, str_ent->d_name, namelen) == 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/readdir_r.html
 int readdir_r(DIR* dirp, struct dirent* entry, struct dirent** result)
 {
     if (!dirp || dirp->fd == -1) {
@@ -209,13 +214,21 @@ int readdir_r(DIR* dirp, struct dirent* entry, struct dirent** result)
     return 0;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/dirfd.html
 int dirfd(DIR* dirp)
 {
     VERIFY(dirp);
     return dirp->fd;
 }
 
-int scandir(const char* dir_name,
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/alphasort.html
+int alphasort(const struct dirent** d1, const struct dirent** d2)
+{
+    return strcoll((*d1)->d_name, (*d2)->d_name);
+}
+
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/scandir.html
+int scandir(char const* dir_name,
     struct dirent*** namelist,
     int (*select)(const struct dirent*),
     int (*compare)(const struct dirent**, const struct dirent**))
@@ -259,11 +272,14 @@ int scandir(const char* dir_name,
 
     // Sort the entries if the user provided a comparator.
     if (compare) {
-        qsort(tmp_names.data(), tmp_names.size(), sizeof(struct dirent*), (int (*)(const void*, const void*))compare);
+        qsort(tmp_names.data(), tmp_names.size(), sizeof(struct dirent*), (int (*)(void const*, void const*))compare);
     }
 
-    const int size = tmp_names.size();
+    int const size = tmp_names.size();
     auto** names = static_cast<struct dirent**>(kmalloc_array(size, sizeof(struct dirent*)));
+    if (names == nullptr) {
+        return -1;
+    }
     for (auto i = 0; i < size; i++) {
         names[i] = tmp_names[i];
     }

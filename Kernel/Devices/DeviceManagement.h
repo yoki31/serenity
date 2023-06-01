@@ -8,23 +8,22 @@
 
 #include <AK/Badge.h>
 #include <AK/Error.h>
-#include <AK/NonnullRefPtrVector.h>
 #include <AK/OwnPtr.h>
-#include <AK/RefPtr.h>
-#include <AK/Time.h>
 #include <AK/Types.h>
+#include <Kernel/API/DeviceEvent.h>
 #include <Kernel/API/TimePage.h>
 #include <Kernel/Arch/RegisterState.h>
 #include <Kernel/Devices/CharacterDevice.h>
-#include <Kernel/Devices/ConsoleDevice.h>
 #include <Kernel/Devices/Device.h>
-#include <Kernel/Devices/NullDevice.h>
+#include <Kernel/Devices/Generic/ConsoleDevice.h>
+#include <Kernel/Devices/Generic/DeviceControlDevice.h>
+#include <Kernel/Devices/Generic/NullDevice.h>
+#include <Kernel/Library/LockRefPtr.h>
 #include <Kernel/UnixTypes.h>
 
 namespace Kernel {
 
 class DeviceManagement {
-    AK_MAKE_ETERNAL;
 
 public:
     DeviceManagement();
@@ -32,17 +31,19 @@ public:
     static DeviceManagement& the();
     void attach_null_device(NullDevice const&);
 
+    void attach_device_control_device(DeviceControlDevice const&);
+
     bool is_console_device_attached() const { return !m_console_device.is_null(); }
     void attach_console_device(ConsoleDevice const&);
 
-    // FIXME: Once we have a singleton for managing many sound cards, remove this from here
-    void attach_audio_device(CharacterDevice const&);
+    Optional<DeviceEvent> dequeue_top_device_event(Badge<DeviceControlDevice>);
 
     void after_inserting_device(Badge<Device>, Device&);
     void before_device_removal(Badge<Device>, Device&);
 
     void for_each(Function<void(Device&)>);
-    Device* get_device(unsigned major, unsigned minor);
+    ErrorOr<void> try_for_each(Function<ErrorOr<void>(Device&)>);
+    Device* get_device(MajorNumber major, MinorNumber minor);
 
     NullDevice const& null_device() const;
     NullDevice& null_device();
@@ -51,19 +52,30 @@ public:
     ConsoleDevice& console_device();
 
     template<typename DeviceType, typename... Args>
-    static inline ErrorOr<NonnullRefPtr<DeviceType>> try_create_device(Args&&... args)
+    static inline ErrorOr<NonnullLockRefPtr<DeviceType>> try_create_device(Args&&... args)
+    requires(requires(Args... args) { DeviceType::try_create(args...); })
     {
-        auto device = TRY(adopt_nonnull_ref_or_enomem(new DeviceType(forward<Args>(args)...)));
-        device->after_inserting();
+        auto device = TRY(DeviceType::try_create(forward<Args>(args)...));
+        TRY(device->after_inserting());
+        return device;
+    }
+
+    template<typename DeviceType, typename... Args>
+    static inline ErrorOr<NonnullLockRefPtr<DeviceType>> try_create_device(Args&&... args)
+    {
+        auto device = TRY(adopt_nonnull_lock_ref_or_enomem(new (nothrow) DeviceType(forward<Args>(args)...)));
+        TRY(device->after_inserting());
         return device;
     }
 
 private:
-    RefPtr<NullDevice> m_null_device;
-    RefPtr<ConsoleDevice> m_console_device;
-    // FIXME: Once we have a singleton for managing many sound cards, remove this from here
-    NonnullRefPtrVector<CharacterDevice, 1> m_audio_devices;
-    MutexProtected<HashMap<u32, Device*>> m_devices;
+    LockRefPtr<NullDevice> m_null_device;
+    LockRefPtr<ConsoleDevice> m_console_device;
+    LockRefPtr<DeviceControlDevice> m_device_control_device;
+    SpinlockProtected<HashMap<u64, Device*>, LockRank::None> m_devices {};
+
+    mutable Spinlock<LockRank::None> m_event_queue_lock {};
+    CircularQueue<DeviceEvent, 100> m_event_queue;
 };
 
 }

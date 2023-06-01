@@ -6,16 +6,14 @@
 
 #pragma once
 
-#include <AK/String.h>
 #include <LibJS/Runtime/Environment.h>
 #include <LibJS/Runtime/EnvironmentCoordinate.h>
-#include <LibJS/Runtime/ExecutionContext.h>
 #include <LibJS/Runtime/PropertyKey.h>
 #include <LibJS/Runtime/Value.h>
 
 namespace JS {
 
-Reference make_private_reference(VM&, Value base_value, FlyString const& private_identifier);
+Reference make_private_reference(VM&, Value base_value, DeprecatedFlyString const& private_identifier);
 
 class Reference {
 public:
@@ -25,7 +23,7 @@ public:
         Environment,
     };
 
-    Reference() { }
+    Reference() = default;
     Reference(BaseType type, PropertyKey name, bool strict)
         : m_base_type(type)
         , m_name(move(name))
@@ -48,7 +46,7 @@ public:
         }
     }
 
-    Reference(Environment& base, FlyString referenced_name, bool strict = false, Optional<EnvironmentCoordinate> environment_coordinate = {})
+    Reference(Environment& base, DeprecatedFlyString referenced_name, bool strict = false, Optional<EnvironmentCoordinate> environment_coordinate = {})
         : m_base_type(BaseType::Environment)
         , m_base_environment(&base)
         , m_name(move(referenced_name))
@@ -122,26 +120,18 @@ public:
         return m_base_type == BaseType::Environment;
     }
 
-    // 6.2.4.8 InitializeReferencedBinding ( V, W ), https://tc39.es/ecma262/#sec-object.prototype.hasownproperty
-    ThrowCompletionOr<void> initialize_referenced_binding(GlobalObject& global_object, Value value) const
-    {
-        VERIFY(!is_unresolvable());
-        VERIFY(m_base_type == BaseType::Environment);
-        return m_base_environment->initialize_binding(global_object, m_name.as_string(), value);
-    }
+    ThrowCompletionOr<void> initialize_referenced_binding(VM&, Value value, Environment::InitializeBindingHint hint = Environment::InitializeBindingHint::Normal) const;
 
-    ThrowCompletionOr<void> put_value(GlobalObject&, Value);
-    ThrowCompletionOr<Value> get_value(GlobalObject&) const;
-    ThrowCompletionOr<bool> delete_(GlobalObject&);
-
-    String to_string() const;
+    ThrowCompletionOr<void> put_value(VM&, Value);
+    ThrowCompletionOr<Value> get_value(VM&) const;
+    ThrowCompletionOr<bool> delete_(VM&);
 
     bool is_valid_reference() const { return m_name.is_valid() || m_is_private; }
 
     Optional<EnvironmentCoordinate> environment_coordinate() const { return m_environment_coordinate; }
 
 private:
-    Completion throw_reference_error(GlobalObject&) const;
+    Completion throw_reference_error(VM&) const;
 
     BaseType m_base_type { BaseType::Unresolvable };
     union {

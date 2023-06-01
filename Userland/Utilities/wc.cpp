@@ -5,16 +5,18 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/String.h>
+#include <AK/CharacterTypes.h>
+#include <AK/DeprecatedString.h>
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
+#include <LibCore/System.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 struct Count {
-    String name;
+    DeprecatedString name;
     bool exists { true };
     unsigned lines { 0 };
     unsigned characters { 0 };
@@ -26,7 +28,7 @@ bool g_output_line = false;
 bool g_output_byte = false;
 bool g_output_word = false;
 
-static void wc_out(const Count& count)
+static void wc_out(Count const& count)
 {
     if (g_output_line)
         out("{:7} ", count.lines);
@@ -38,7 +40,7 @@ static void wc_out(const Count& count)
     outln("{:>14}", count.name);
 }
 
-static Count get_count(const String& file_specifier)
+static Count get_count(DeprecatedString const& file_specifier)
 {
     Count count;
     FILE* file_pointer = nullptr;
@@ -57,7 +59,7 @@ static Count get_count(const String& file_specifier)
     bool start_a_new_word = true;
     for (int ch = fgetc(file_pointer); ch != EOF; ch = fgetc(file_pointer)) {
         count.bytes++;
-        if (isspace(ch)) {
+        if (is_ascii_space(ch)) {
             start_a_new_word = true;
             if (ch == '\n')
                 count.lines++;
@@ -73,7 +75,7 @@ static Count get_count(const String& file_specifier)
     return count;
 }
 
-static Count get_total_count(const Vector<Count>& counts)
+static Count get_total_count(Vector<Count> const& counts)
 {
     Count total_count { "total" };
     for (auto& count : counts) {
@@ -85,40 +87,34 @@ static Count get_total_count(const Vector<Count>& counts)
     return total_count;
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath"));
 
-    Vector<const char*> file_specifiers;
+    Vector<DeprecatedString> file_specifiers;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(g_output_line, "Output line count", "lines", 'l');
     args_parser.add_option(g_output_byte, "Output byte count", "bytes", 'c');
     args_parser.add_option(g_output_word, "Output word count", "words", 'w');
     args_parser.add_positional_argument(file_specifiers, "File to process", "file", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if (!g_output_line && !g_output_byte && !g_output_word)
         g_output_line = g_output_byte = g_output_word = true;
 
     Vector<Count> counts;
-    for (const auto& file_specifier : file_specifiers)
+    for (auto const& file_specifier : file_specifiers)
         counts.append(get_count(file_specifier));
 
-    if (pledge("stdio", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio"));
 
     if (file_specifiers.is_empty())
         counts.append(get_count("-"));
     else if (file_specifiers.size() > 1)
         counts.append(get_total_count(counts));
 
-    for (const auto& count : counts) {
+    for (auto const& count : counts) {
         if (count.exists)
             wc_out(count);
     }

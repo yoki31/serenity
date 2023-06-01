@@ -1,233 +1,353 @@
 /*
  * Copyright (c) 2021, Jan de Visser <jan@de-visser.net>
+ * Copyright (c) 2023, Jelle Raaijmakers <jelle@gmta.nl>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/DeprecatedString.h>
 #include <AK/Format.h>
 #include <AK/QuickSort.h>
-#include <AK/String.h>
-#include <LibCore/IODevice.h>
+#include <LibCore/System.h>
 #include <LibSQL/Heap.h>
-#include <LibSQL/Serializer.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 
 namespace SQL {
 
-Heap::Heap(String file_name)
+Heap::Heap(DeprecatedString file_name)
 {
     set_name(move(file_name));
+}
+
+Heap::~Heap()
+{
+    if (m_file && !m_write_ahead_log.is_empty()) {
+        if (auto maybe_error = flush(); maybe_error.is_error())
+            warnln("~Heap({}): {}", name(), maybe_error.error());
+    }
+}
+
+ErrorOr<void> Heap::open()
+{
     size_t file_size = 0;
     struct stat stat_buffer;
     if (stat(name().characters(), &stat_buffer) != 0) {
         if (errno != ENOENT) {
-            perror("stat");
-            VERIFY_NOT_REACHED();
+            warnln("Heap::open({}): could not stat: {}"sv, name(), strerror(errno));
+            return Error::from_string_literal("Heap::open(): could not stat file");
         }
+    } else if (!S_ISREG(stat_buffer.st_mode)) {
+        warnln("Heap::open({}): can only use regular files"sv, name());
+        return Error::from_string_literal("Heap::open(): can only use regular files");
     } else {
         file_size = stat_buffer.st_size;
     }
-    if (file_size > 0)
-        m_next_block = m_end_of_file = file_size / BLOCKSIZE;
-
-    auto file_or_error = Core::File::open(name(), Core::OpenMode::ReadWrite);
-    if (file_or_error.is_error()) {
-        warnln("Couldn't open '{}': {}", name(), file_or_error.error());
-        VERIFY_NOT_REACHED();
+    if (file_size > 0) {
+        m_next_block = file_size / Block::SIZE;
+        m_highest_block_written = m_next_block - 1;
     }
-    m_file = file_or_error.value();
-    if (file_size > 0)
-        read_zero_block();
-    else
-        initialize_zero_block();
-    dbgln_if(SQL_DEBUG, "Heap file {} opened. Size = {}", file_name, size());
-}
 
-ErrorOr<ByteBuffer> Heap::read_block(u32 block)
-{
-    auto buffer_or_empty = m_write_ahead_log.get(block);
-    if (buffer_or_empty.has_value())
-        return buffer_or_empty.value();
+    auto file = TRY(Core::File::open(name(), Core::File::OpenMode::ReadWrite));
+    m_file = TRY(Core::InputBufferedFile::create(move(file)));
 
-    VERIFY(block < m_next_block);
-    dbgln_if(SQL_DEBUG, "Read heap block {}", block);
-    if (!seek_block(block))
-        VERIFY_NOT_REACHED();
-    auto ret = m_file->read(BLOCKSIZE);
-    if (ret.is_empty())
-        return Error::from_string_literal("Could not read block"sv);
-    dbgln_if(SQL_DEBUG, "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-        *ret.offset_pointer(0), *ret.offset_pointer(1),
-        *ret.offset_pointer(2), *ret.offset_pointer(3),
-        *ret.offset_pointer(4), *ret.offset_pointer(5),
-        *ret.offset_pointer(6), *ret.offset_pointer(7));
-    return ret;
-}
-
-bool Heap::write_block(u32 block, ByteBuffer& buffer)
-{
-    dbgln_if(SQL_DEBUG, "write_block({}): m_next_block {}", block, m_next_block);
-    VERIFY(block <= m_next_block);
-    if (!seek_block(block))
-        VERIFY_NOT_REACHED();
-    dbgln_if(SQL_DEBUG, "Write heap block {} size {}", block, buffer.size());
-    VERIFY(buffer.size() <= BLOCKSIZE);
-    auto sz = buffer.size();
-    if (sz < BLOCKSIZE) {
-        if (buffer.try_resize(BLOCKSIZE).is_error())
-            return false;
-        memset(buffer.offset_pointer((int)sz), 0, BLOCKSIZE - sz);
-    }
-    dbgln_if(SQL_DEBUG, "{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-        *buffer.offset_pointer(0), *buffer.offset_pointer(1),
-        *buffer.offset_pointer(2), *buffer.offset_pointer(3),
-        *buffer.offset_pointer(4), *buffer.offset_pointer(5),
-        *buffer.offset_pointer(6), *buffer.offset_pointer(7));
-    if (m_file->write(buffer.data(), (int)buffer.size())) {
-        if (block == m_end_of_file)
-            m_end_of_file++;
-        return true;
-    }
-    return false;
-}
-
-bool Heap::seek_block(u32 block)
-{
-    if (block == m_end_of_file) {
-        off_t pos;
-        if (!m_file->seek(0, Core::SeekMode::FromEndPosition, &pos)) {
-            warnln("Could not seek block {} from file {}, which is at the end of the file", block, name());
-            warnln("FD: {} Position: {} error: {}", m_file->fd(), pos, m_file->error_string());
-            return false;
+    if (file_size > 0) {
+        if (auto error_maybe = read_zero_block(); error_maybe.is_error()) {
+            m_file = nullptr;
+            return error_maybe.release_error();
         }
-    } else if (block > m_end_of_file) {
-        warnln("Seeking block {} of file {} which is beyond the end of the file", block, name());
-        return false;
     } else {
-        if (!m_file->seek(block * BLOCKSIZE)) {
-            warnln("Could not seek block {} of file {}. The current size is {} blocks",
-                block, name(), m_end_of_file);
-            return false;
-        }
+        TRY(initialize_zero_block());
     }
-    return true;
+
+    // FIXME: We should more gracefully handle version incompatibilities. For now, we drop the database.
+    if (m_version != VERSION) {
+        dbgln_if(SQL_DEBUG, "Heap file {} opened has incompatible version {}. Deleting for version {}.", name(), m_version, VERSION);
+        m_file = nullptr;
+
+        TRY(Core::System::unlink(name()));
+        return open();
+    }
+
+    // Perform a heap scan to find all free blocks
+    // FIXME: this is very inefficient; store free blocks in a persistent heap structure
+    for (Block::Index index = 1; index <= m_highest_block_written; ++index) {
+        auto block_data = TRY(read_raw_block(index));
+        auto size_in_bytes = *reinterpret_cast<u32*>(block_data.data());
+        if (size_in_bytes == 0)
+            TRY(m_free_block_indices.try_append(index));
+    }
+
+    dbgln_if(SQL_DEBUG, "Heap file {} opened; number of blocks = {}; free blocks = {}", name(), m_highest_block_written, m_free_block_indices.size());
+    return {};
 }
 
-u32 Heap::new_record_pointer()
+ErrorOr<size_t> Heap::file_size_in_bytes() const
 {
-    if (m_free_list) {
-        auto block_or_error = read_block(m_free_list);
-        if (block_or_error.is_error()) {
-            warnln("FREE LIST CORRUPTION");
-            VERIFY_NOT_REACHED();
-        }
-        auto new_pointer = m_free_list;
-        memcpy(&m_free_list, block_or_error.value().offset_pointer(0), sizeof(u32));
-        update_zero_block();
-        return new_pointer;
-    }
+    TRY(m_file->seek(0, SeekMode::FromEndPosition));
+    return TRY(m_file->tell());
+}
+
+bool Heap::has_block(Block::Index index) const
+{
+    return (index <= m_highest_block_written || m_write_ahead_log.contains(index))
+        && !m_free_block_indices.contains_slow(index);
+}
+
+Block::Index Heap::request_new_block_index()
+{
+    if (!m_free_block_indices.is_empty())
+        return m_free_block_indices.take_last();
     return m_next_block++;
 }
 
-void Heap::flush()
+ErrorOr<ByteBuffer> Heap::read_storage(Block::Index index)
 {
-    Vector<u32> blocks;
-    for (auto& wal_entry : m_write_ahead_log) {
-        blocks.append(wal_entry.key);
+    dbgln_if(SQL_DEBUG, "{}({})", __FUNCTION__, index);
+
+    // Reconstruct the data storage from a potential chain of blocks
+    ByteBuffer data;
+    while (index > 0) {
+        auto block = TRY(read_block(index));
+        dbgln_if(SQL_DEBUG, "  -> {} bytes", block.size_in_bytes());
+        TRY(data.try_append(block.data().bytes().slice(0, block.size_in_bytes())));
+        index = block.next_block();
     }
-    quick_sort(blocks);
-    for (auto& block : blocks) {
-        auto buffer_or_empty = m_write_ahead_log.get(block);
-        if (buffer_or_empty->is_empty()) {
-            VERIFY_NOT_REACHED();
+    return data;
+}
+
+ErrorOr<void> Heap::write_storage(Block::Index index, ReadonlyBytes data)
+{
+    dbgln_if(SQL_DEBUG, "{}({}, {} bytes)", __FUNCTION__, index, data.size());
+    VERIFY(index > 0);
+    VERIFY(data.size() > 0);
+
+    // Split up the storage across multiple blocks if necessary, creating a chain
+    u32 remaining_size = static_cast<u32>(data.size());
+    u32 offset_in_data = 0;
+    Block::Index existing_next_block_index = 0;
+    while (remaining_size > 0) {
+        auto block_data_size = AK::min(remaining_size, Block::DATA_SIZE);
+        remaining_size -= block_data_size;
+
+        ByteBuffer block_data;
+        if (has_block(index)) {
+            auto existing_block = TRY(read_block(index));
+            block_data = existing_block.data();
+            TRY(block_data.try_resize(block_data_size));
+            existing_next_block_index = existing_block.next_block();
+        } else {
+            block_data = TRY(ByteBuffer::create_uninitialized(block_data_size));
+            existing_next_block_index = 0;
         }
-        dbgln_if(SQL_DEBUG, "Flushing block {} to {}", block, name());
-        write_block(block, buffer_or_empty.value());
+
+        Block::Index next_block_index = existing_next_block_index;
+        if (next_block_index == 0 && remaining_size > 0)
+            next_block_index = request_new_block_index();
+        else if (remaining_size == 0)
+            next_block_index = 0;
+
+        block_data.bytes().overwrite(0, data.offset(offset_in_data), block_data_size);
+        TRY(write_block({ index, block_data_size, next_block_index, move(block_data) }));
+
+        index = next_block_index;
+        offset_in_data += block_data_size;
+    }
+
+    // Free remaining blocks in existing chain, if any
+    if (existing_next_block_index > 0)
+        TRY(free_storage(existing_next_block_index));
+
+    return {};
+}
+
+ErrorOr<ByteBuffer> Heap::read_raw_block(Block::Index index)
+{
+    VERIFY(m_file);
+    VERIFY(index < m_next_block);
+
+    if (auto wal_entry = m_write_ahead_log.get(index); wal_entry.has_value())
+        return wal_entry.value();
+
+    TRY(m_file->seek(index * Block::SIZE, SeekMode::SetPosition));
+    auto buffer = TRY(ByteBuffer::create_uninitialized(Block::SIZE));
+    TRY(m_file->read_until_filled(buffer));
+    return buffer;
+}
+
+ErrorOr<Block> Heap::read_block(Block::Index index)
+{
+    dbgln_if(SQL_DEBUG, "Read heap block {}", index);
+
+    auto buffer = TRY(read_raw_block(index));
+    auto size_in_bytes = *reinterpret_cast<u32*>(buffer.offset_pointer(0));
+    auto next_block = *reinterpret_cast<Block::Index*>(buffer.offset_pointer(sizeof(u32)));
+    auto data = TRY(buffer.slice(Block::HEADER_SIZE, Block::DATA_SIZE));
+
+    return Block { index, size_in_bytes, next_block, move(data) };
+}
+
+ErrorOr<void> Heap::write_raw_block(Block::Index index, ReadonlyBytes data)
+{
+    dbgln_if(SQL_DEBUG, "Write raw block {}", index);
+
+    VERIFY(m_file);
+    VERIFY(data.size() == Block::SIZE);
+
+    TRY(m_file->seek(index * Block::SIZE, SeekMode::SetPosition));
+    TRY(m_file->write_until_depleted(data));
+
+    if (index > m_highest_block_written)
+        m_highest_block_written = index;
+
+    return {};
+}
+
+ErrorOr<void> Heap::write_raw_block_to_wal(Block::Index index, ByteBuffer&& data)
+{
+    dbgln_if(SQL_DEBUG, "{}(): adding raw block {} to WAL", __FUNCTION__, index);
+    VERIFY(index < m_next_block);
+    VERIFY(data.size() == Block::SIZE);
+
+    TRY(m_write_ahead_log.try_set(index, move(data)));
+
+    return {};
+}
+
+ErrorOr<void> Heap::write_block(Block const& block)
+{
+    VERIFY(block.index() < m_next_block);
+    VERIFY(block.next_block() < m_next_block);
+    VERIFY(block.size_in_bytes() > 0);
+    VERIFY(block.data().size() <= Block::DATA_SIZE);
+
+    auto size_in_bytes = block.size_in_bytes();
+    auto next_block = block.next_block();
+
+    auto heap_data = TRY(ByteBuffer::create_zeroed(Block::SIZE));
+    heap_data.overwrite(0, &size_in_bytes, sizeof(size_in_bytes));
+    heap_data.overwrite(sizeof(size_in_bytes), &next_block, sizeof(next_block));
+
+    block.data().bytes().copy_to(heap_data.bytes().slice(Block::HEADER_SIZE));
+
+    return write_raw_block_to_wal(block.index(), move(heap_data));
+}
+
+ErrorOr<void> Heap::free_storage(Block::Index index)
+{
+    dbgln_if(SQL_DEBUG, "{}({})", __FUNCTION__, index);
+    VERIFY(index > 0);
+
+    while (index > 0) {
+        auto block = TRY(read_block(index));
+        TRY(free_block(block));
+        index = block.next_block();
+    }
+    return {};
+}
+
+ErrorOr<void> Heap::free_block(Block const& block)
+{
+    auto index = block.index();
+    dbgln_if(SQL_DEBUG, "{}({})", __FUNCTION__, index);
+
+    VERIFY(index > 0);
+    VERIFY(has_block(index));
+
+    // Zero out freed blocks to facilitate a free block scan upon opening the database later
+    auto zeroed_data = TRY(ByteBuffer::create_zeroed(Block::SIZE));
+    TRY(write_raw_block_to_wal(index, move(zeroed_data)));
+
+    return m_free_block_indices.try_append(index);
+}
+
+ErrorOr<void> Heap::flush()
+{
+    VERIFY(m_file);
+    auto indices = m_write_ahead_log.keys();
+    quick_sort(indices);
+    for (auto index : indices) {
+        dbgln_if(SQL_DEBUG, "Flushing block {}", index);
+        auto& data = m_write_ahead_log.get(index).value();
+        TRY(write_raw_block(index, data));
     }
     m_write_ahead_log.clear();
-    dbgln_if(SQL_DEBUG, "WAL flushed. Heap size = {}", size());
+    dbgln_if(SQL_DEBUG, "WAL flushed; new number of blocks = {}", m_highest_block_written);
+    return {};
 }
 
-constexpr static const char* FILE_ID = "SerenitySQL ";
-constexpr static int VERSION_OFFSET = 12;
-constexpr static int SCHEMAS_ROOT_OFFSET = 16;
-constexpr static int TABLES_ROOT_OFFSET = 20;
-constexpr static int TABLE_COLUMNS_ROOT_OFFSET = 24;
-constexpr static int FREE_LIST_OFFSET = 28;
-constexpr static int USER_VALUES_OFFSET = 32;
+constexpr static auto FILE_ID = "SerenitySQL "sv;
+constexpr static auto VERSION_OFFSET = FILE_ID.length();
+constexpr static auto SCHEMAS_ROOT_OFFSET = VERSION_OFFSET + sizeof(u32);
+constexpr static auto TABLES_ROOT_OFFSET = SCHEMAS_ROOT_OFFSET + sizeof(u32);
+constexpr static auto TABLE_COLUMNS_ROOT_OFFSET = TABLES_ROOT_OFFSET + sizeof(u32);
+constexpr static auto USER_VALUES_OFFSET = TABLE_COLUMNS_ROOT_OFFSET + sizeof(u32);
 
-void Heap::read_zero_block()
+ErrorOr<void> Heap::read_zero_block()
 {
-    char file_id[256];
-    auto bytes_or_error = read_block(0);
-    if (bytes_or_error.is_error())
-        VERIFY_NOT_REACHED();
-    auto buffer = bytes_or_error.value();
-    memcpy(file_id, buffer.offset_pointer(0), strlen(FILE_ID));
-    file_id[strlen(FILE_ID)] = 0;
-    if (strncmp(file_id, FILE_ID, strlen(FILE_ID)) != 0) {
-        warnln("Corrupt zero page in {}", name());
-        VERIFY_NOT_REACHED();
-    }
     dbgln_if(SQL_DEBUG, "Read zero block from {}", name());
-    memcpy(&m_version, buffer.offset_pointer(VERSION_OFFSET), sizeof(u32));
-    dbgln_if(SQL_DEBUG, "Version: {}.{}", (m_version & 0xFFFF0000) >> 16, (m_version & 0x0000FFFF));
-    memcpy(&m_schemas_root, buffer.offset_pointer(SCHEMAS_ROOT_OFFSET), sizeof(u32));
-    dbgln_if(SQL_DEBUG, "Schemas root node: {}", m_tables_root);
-    memcpy(&m_tables_root, buffer.offset_pointer(TABLES_ROOT_OFFSET), sizeof(u32));
-    dbgln_if(SQL_DEBUG, "Tables root node: {}", m_tables_root);
-    memcpy(&m_table_columns_root, buffer.offset_pointer(TABLE_COLUMNS_ROOT_OFFSET), sizeof(u32));
-    dbgln_if(SQL_DEBUG, "Table columns root node: {}", m_table_columns_root);
-    memcpy(&m_free_list, buffer.offset_pointer(FREE_LIST_OFFSET), sizeof(u32));
-    dbgln_if(SQL_DEBUG, "Free list: {}", m_free_list);
-    memcpy(m_user_values.data(), buffer.offset_pointer(USER_VALUES_OFFSET), m_user_values.size() * sizeof(u32));
-    for (auto ix = 0u; ix < m_user_values.size(); ix++) {
-        if (m_user_values[ix]) {
-            dbgln_if(SQL_DEBUG, "User value {}: {}", ix, m_user_values[ix]);
-        }
+
+    auto block = TRY(read_raw_block(0));
+    auto file_id_buffer = TRY(block.slice(0, FILE_ID.length()));
+    auto file_id = StringView(file_id_buffer);
+    if (file_id != FILE_ID) {
+        warnln("{}: Zero page corrupt. This is probably not a {} heap file"sv, name(), FILE_ID);
+        return Error::from_string_literal("Heap()::read_zero_block(): Zero page corrupt. This is probably not a SerenitySQL heap file");
     }
+
+    memcpy(&m_version, block.offset_pointer(VERSION_OFFSET), sizeof(u32));
+    dbgln_if(SQL_DEBUG, "Version: {}.{}", (m_version & 0xFFFF0000) >> 16, (m_version & 0x0000FFFF));
+
+    memcpy(&m_schemas_root, block.offset_pointer(SCHEMAS_ROOT_OFFSET), sizeof(u32));
+    dbgln_if(SQL_DEBUG, "Schemas root node: {}", m_schemas_root);
+
+    memcpy(&m_tables_root, block.offset_pointer(TABLES_ROOT_OFFSET), sizeof(u32));
+    dbgln_if(SQL_DEBUG, "Tables root node: {}", m_tables_root);
+
+    memcpy(&m_table_columns_root, block.offset_pointer(TABLE_COLUMNS_ROOT_OFFSET), sizeof(u32));
+    dbgln_if(SQL_DEBUG, "Table columns root node: {}", m_table_columns_root);
+
+    memcpy(m_user_values.data(), block.offset_pointer(USER_VALUES_OFFSET), m_user_values.size() * sizeof(u32));
+    for (auto ix = 0u; ix < m_user_values.size(); ix++) {
+        if (m_user_values[ix])
+            dbgln_if(SQL_DEBUG, "User value {}: {}", ix, m_user_values[ix]);
+    }
+    return {};
 }
 
-void Heap::update_zero_block()
+ErrorOr<void> Heap::update_zero_block()
 {
     dbgln_if(SQL_DEBUG, "Write zero block to {}", name());
     dbgln_if(SQL_DEBUG, "Version: {}.{}", (m_version & 0xFFFF0000) >> 16, (m_version & 0x0000FFFF));
     dbgln_if(SQL_DEBUG, "Schemas root node: {}", m_schemas_root);
     dbgln_if(SQL_DEBUG, "Tables root node: {}", m_tables_root);
     dbgln_if(SQL_DEBUG, "Table Columns root node: {}", m_table_columns_root);
-    dbgln_if(SQL_DEBUG, "Free list: {}", m_free_list);
     for (auto ix = 0u; ix < m_user_values.size(); ix++) {
-        if (m_user_values[ix]) {
+        if (m_user_values[ix] > 0)
             dbgln_if(SQL_DEBUG, "User value {}: {}", ix, m_user_values[ix]);
-        }
     }
 
-    // FIXME: Handle an OOM failure here.
-    auto buffer = ByteBuffer::create_zeroed(BLOCKSIZE).release_value();
-    buffer.overwrite(0, FILE_ID, strlen(FILE_ID));
-    buffer.overwrite(VERSION_OFFSET, &m_version, sizeof(u32));
-    buffer.overwrite(SCHEMAS_ROOT_OFFSET, &m_schemas_root, sizeof(u32));
-    buffer.overwrite(TABLES_ROOT_OFFSET, &m_tables_root, sizeof(u32));
-    buffer.overwrite(TABLE_COLUMNS_ROOT_OFFSET, &m_table_columns_root, sizeof(u32));
-    buffer.overwrite(FREE_LIST_OFFSET, &m_free_list, sizeof(u32));
-    buffer.overwrite(USER_VALUES_OFFSET, m_user_values.data(), m_user_values.size() * sizeof(u32));
+    auto buffer = TRY(ByteBuffer::create_zeroed(Block::SIZE));
+    auto buffer_bytes = buffer.bytes();
+    buffer_bytes.overwrite(0, FILE_ID.characters_without_null_termination(), FILE_ID.length());
+    buffer_bytes.overwrite(VERSION_OFFSET, &m_version, sizeof(u32));
+    buffer_bytes.overwrite(SCHEMAS_ROOT_OFFSET, &m_schemas_root, sizeof(u32));
+    buffer_bytes.overwrite(TABLES_ROOT_OFFSET, &m_tables_root, sizeof(u32));
+    buffer_bytes.overwrite(TABLE_COLUMNS_ROOT_OFFSET, &m_table_columns_root, sizeof(u32));
+    buffer_bytes.overwrite(USER_VALUES_OFFSET, m_user_values.data(), m_user_values.size() * sizeof(u32));
 
-    add_to_wal(0, buffer);
+    return write_raw_block_to_wal(0, move(buffer));
 }
 
-void Heap::initialize_zero_block()
+ErrorOr<void> Heap::initialize_zero_block()
 {
-    m_version = 0x00000001;
+    m_version = VERSION;
     m_schemas_root = 0;
     m_tables_root = 0;
     m_table_columns_root = 0;
     m_next_block = 1;
-    m_free_list = 0;
-    for (auto& user : m_user_values) {
+    for (auto& user : m_user_values)
         user = 0u;
-    }
-    update_zero_block();
+    return update_zero_block();
 }
 
 }

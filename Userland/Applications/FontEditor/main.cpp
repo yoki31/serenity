@@ -4,72 +4,68 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include "FontEditor.h"
+#include "MainWidget.h"
 #include <AK/URL.h>
+#include <LibConfig/Client.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/System.h>
 #include <LibDesktop/Launcher.h>
+#include <LibFileSystemAccessClient/Client.h>
 #include <LibGUI/Application.h>
 #include <LibGUI/Icon.h>
-#include <LibGUI/Menubar.h>
-#include <LibGUI/MessageBox.h>
 #include <LibGUI/Window.h>
-#include <LibGfx/BitmapFont.h>
-#include <LibGfx/FontDatabase.h>
 #include <LibMain/Main.h>
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    TRY(Core::System::pledge("stdio recvfd sendfd thread rpath unix cpath wpath", nullptr));
+    TRY(Core::System::pledge("stdio recvfd sendfd thread rpath unix cpath wpath"));
 
-    auto app = TRY(GUI::Application::try_create(arguments));
+    auto app = TRY(GUI::Application::create(arguments));
+    app->set_config_domain(TRY("FontEditor"_string));
 
-    TRY(Desktop::Launcher::add_allowed_handler_with_only_specific_urls("/bin/Help", { URL::create_with_file_protocol("/usr/share/man/man1/FontEditor.md") }));
+    FontEditor::g_resources = FontEditor::Resources::create();
+
+    TRY(Desktop::Launcher::add_allowed_handler_with_only_specific_urls("/bin/Help", { URL::create_with_file_scheme("/usr/share/man/man1/Applications/FontEditor.md") }));
     TRY(Desktop::Launcher::seal_allowlist());
 
-    TRY(Core::System::pledge("stdio recvfd sendfd thread rpath cpath wpath", nullptr));
+    Config::pledge_domain("FontEditor");
 
-    const char* path = nullptr;
+    TRY(Core::System::unveil("/tmp/session/%sid/portal/filesystemaccess", "rw"));
+    TRY(Core::System::unveil("/res", "r"));
+    TRY(Core::System::unveil(nullptr, nullptr));
+
+    StringView path;
     Core::ArgsParser args_parser;
     args_parser.add_positional_argument(path, "The font file for editing.", "file", Core::ArgsParser::Required::No);
     args_parser.parse(arguments);
 
-    RefPtr<Gfx::BitmapFont> edited_font;
-    if (path == nullptr) {
-        auto bitmap_font = static_ptr_cast<Gfx::BitmapFont>(Gfx::FontDatabase::default_font().clone());
-        edited_font = static_ptr_cast<Gfx::BitmapFont>(bitmap_font->unmasked_character_set());
-    } else {
-        auto bitmap_font = Gfx::BitmapFont::load_from_file(path);
-        if (!bitmap_font) {
-            String message = String::formatted("Couldn't load font: {}\n", path);
-            GUI::MessageBox::show(nullptr, message, "Font Editor", GUI::MessageBox::Type::Error);
-            return 1;
-        }
-        edited_font = static_ptr_cast<Gfx::BitmapFont>(bitmap_font->unmasked_character_set());
-        if (!edited_font) {
-            String message = String::formatted("Couldn't load font: {}\n", path);
-            GUI::MessageBox::show(nullptr, message, "Font Editor", GUI::MessageBox::Type::Error);
-            return 1;
-        }
-    }
-
-    auto app_icon = GUI::Icon::default_icon("app-font-editor");
+    auto app_icon = TRY(GUI::Icon::try_create_default_icon("app-font-editor"sv));
 
     auto window = TRY(GUI::Window::try_create());
     window->set_icon(app_icon.bitmap_for_size(16));
-    window->resize(440, 470);
+    window->resize(640, 470);
 
-    auto& font_editor = window->set_main_widget<FontEditorWidget>(path, move(edited_font));
-
-    font_editor.initialize_menubar(*window);
+    auto font_editor = TRY(window->set_main_widget<FontEditor::MainWidget>());
+    TRY(font_editor->initialize_menubar(*window));
+    font_editor->reset();
 
     window->on_close_request = [&]() -> GUI::Window::CloseRequestDecision {
-        if (font_editor.request_close())
+        if (font_editor->request_close())
             return GUI::Window::CloseRequestDecision::Close;
         return GUI::Window::CloseRequestDecision::StayOpen;
     };
 
     window->show();
+
+    auto default_path = TRY(String::from_deprecated_string(Config::read_string("FontEditor"sv, "Defaults"sv, "Font"sv, {})));
+    auto path_to_load = path.is_empty() ? default_path : path;
+    if (!path_to_load.is_empty()) {
+        auto response = FileSystemAccessClient::Client::the().request_file_read_only_approved(window, path_to_load);
+        if (!response.is_error()) {
+            if (auto result = font_editor->open_file(path, response.value().release_stream()); result.is_error())
+                font_editor->show_error(result.release_error(), "Opening"sv, path_to_load);
+        }
+    }
 
     return app->exec();
 }

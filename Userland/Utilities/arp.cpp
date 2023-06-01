@@ -9,14 +9,15 @@
 #include <AK/JsonObject.h>
 #include <AK/MACAddress.h>
 #include <AK/QuickSort.h>
-#include <AK/String.h>
 #include <AK/Types.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/File.h>
 #include <LibCore/System.h>
 #include <LibMain/Main.h>
+#include <arpa/inet.h>
 #include <net/if_arp.h>
 #include <net/route.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -25,22 +26,28 @@
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    TRY(Core::System::pledge("stdio rpath tty", nullptr));
-    TRY(Core::System::unveil("/proc/net/arp", "r"));
-    TRY(Core::System::unveil(nullptr, nullptr));
+    TRY(Core::System::pledge("stdio rpath tty inet unix"));
 
     static bool flag_set;
     static bool flag_delete;
-    const char* value_ipv4_address = nullptr;
-    const char* value_hw_address = nullptr;
+    static bool flag_numeric;
+    StringView value_ipv4_address;
+    StringView value_hw_address;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("Display or modify the system ARP cache");
     args_parser.add_option(flag_set, "Set an ARP table entry", "set", 's');
     args_parser.add_option(flag_delete, "Delete an ARP table entry", "delete", 'd');
+    args_parser.add_option(flag_numeric, "Display numerical addresses. Don't resolve hostnames", "numeric", 'n');
     args_parser.add_positional_argument(value_ipv4_address, "IPv4 protocol address", "address", Core::ArgsParser::Required::No);
     args_parser.add_positional_argument(value_hw_address, "Hardware address", "hwaddress", Core::ArgsParser::Required::No);
     args_parser.parse(arguments);
+
+    TRY(Core::System::unveil("/sys/kernel/net/arp", "r"));
+    if (!flag_numeric)
+        TRY(Core::System::unveil("/tmp/portal/lookup", "rw"));
+
+    TRY(Core::System::unveil(nullptr, nullptr));
 
     enum class Alignment {
         Left,
@@ -48,10 +55,10 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     };
 
     struct Column {
-        String title;
+        StringView title;
         Alignment alignment { Alignment::Left };
         int width { 0 };
-        String buffer;
+        StringView buffer;
     };
 
     Vector<Column> columns;
@@ -64,8 +71,8 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
         return columns.size() - 1;
     };
 
-    proto_address_column = add_column("Address", Alignment::Left, 15);
-    hw_address_column = add_column("HWaddress", Alignment::Left, 15);
+    proto_address_column = add_column("Address"sv, Alignment::Left, 15);
+    hw_address_column = add_column("HWaddress"sv, Alignment::Left, 15);
 
     auto print_column = [](auto& column, auto& string) {
         if (!column.width) {
@@ -84,25 +91,32 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     outln();
 
     if (!flag_set && !flag_delete) {
-        auto file = Core::File::construct("/proc/net/arp");
-        if (!file->open(Core::OpenMode::ReadOnly)) {
-            warnln("Failed to open {}: {}", file->name(), file->error_string());
-            return 1;
-        }
-
-        auto file_contents = file->read_all();
-        auto json = JsonValue::from_string(file_contents).release_value_but_fixme_should_propagate_errors();
+        auto file = TRY(Core::File::open("/sys/kernel/net/arp"sv, Core::File::OpenMode::Read));
+        auto file_contents = TRY(file->read_until_eof());
+        auto json = TRY(JsonValue::from_string(file_contents));
 
         Vector<JsonValue> sorted_regions = json.as_array().values();
         quick_sort(sorted_regions, [](auto& a, auto& b) {
-            return a.as_object().get("ip_address").to_string() < b.as_object().get("ip_address").to_string();
+            return a.as_object().get_deprecated_string("ip_address"sv).value_or({}) < b.as_object().get_deprecated_string("ip_address"sv).value_or({});
         });
 
         for (auto& value : sorted_regions) {
             auto& if_object = value.as_object();
 
-            auto ip_address = if_object.get("ip_address").to_string();
-            auto mac_address = if_object.get("mac_address").to_string();
+            auto ip_address = if_object.get_deprecated_string("ip_address"sv).value_or({});
+
+            if (!flag_numeric) {
+                auto from_string = IPv4Address::from_string(ip_address);
+                auto addr = from_string.value().to_in_addr_t();
+                auto* hostent = gethostbyaddr(&addr, sizeof(in_addr), AF_INET);
+                if (hostent != nullptr) {
+                    StringView host_name { hostent->h_name, strlen(hostent->h_name) };
+                    if (!host_name.is_empty())
+                        ip_address = host_name;
+                }
+            }
+
+            auto mac_address = if_object.get_deprecated_string("mac_address"sv).value_or({});
 
             if (proto_address_column != -1)
                 columns[proto_address_column].buffer = ip_address;
@@ -116,7 +130,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     }
 
     if (flag_set || flag_delete) {
-        if (!value_ipv4_address || !value_hw_address) {
+        if (value_ipv4_address.is_empty() || value_hw_address.is_empty()) {
             warnln("No protocol address or hardware address specified.");
             return 1;
         }
@@ -133,11 +147,7 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
             return 1;
         }
 
-        int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-        if (fd < 0) {
-            perror("socket");
-            return 1;
-        }
+        int fd = TRY(Core::System::socket(AF_INET, SOCK_DGRAM, IPPROTO_IP));
 
         struct arpreq arp_req;
         memset(&arp_req, 0, sizeof(arp_req));
@@ -147,19 +157,10 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
 
         *(MACAddress*)&arp_req.arp_ha.sa_data[0] = hw_address.value();
 
-        int rc = 0;
         if (flag_set)
-            rc = ioctl(fd, SIOCSARP, &arp_req);
-        if (flag_delete) {
-            int rc2 = ioctl(fd, SIOCDARP, &arp_req);
-            if (!rc2)
-                rc = rc2;
-        }
-
-        if (rc < 0) {
-            perror("ioctl");
-            return 1;
-        }
+            TRY(Core::System::ioctl(fd, SIOCSARP, &arp_req));
+        if (flag_delete)
+            TRY(Core::System::ioctl(fd, SIOCDARP, &arp_req));
     }
 
     return 0;

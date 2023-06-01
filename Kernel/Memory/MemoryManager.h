@@ -1,40 +1,32 @@
 /*
- * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2022, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/Badge.h>
 #include <AK/Concepts.h>
 #include <AK/HashTable.h>
-#include <AK/NonnullOwnPtrVector.h>
-#include <AK/NonnullRefPtrVector.h>
-#include <AK/String.h>
-#include <Kernel/Arch/x86/PageFault.h>
-#include <Kernel/Arch/x86/TrapFrame.h>
+#include <AK/IntrusiveRedBlackTree.h>
 #include <Kernel/Forward.h>
 #include <Kernel/Locking/Spinlock.h>
 #include <Kernel/Memory/AllocationStrategy.h>
 #include <Kernel/Memory/PhysicalPage.h>
 #include <Kernel/Memory/PhysicalRegion.h>
 #include <Kernel/Memory/Region.h>
+#include <Kernel/Memory/RegionTree.h>
 #include <Kernel/Memory/VMObject.h>
+
+struct KmallocGlobalData;
 
 namespace Kernel::Memory {
 
-constexpr bool page_round_up_would_wrap(FlatPtr x)
-{
-    return x > (explode_byte(0xFF) & ~0xFFF);
-}
+class PageDirectoryEntry;
+class PageTableEntry;
 
-constexpr FlatPtr page_round_up(FlatPtr x)
-{
-    FlatPtr rounded = (((FlatPtr)(x)) + PAGE_SIZE - 1) & (~(PAGE_SIZE - 1));
-    // Rounding up >0xfffff000 wraps back to 0. That's never what we want.
-    VERIFY(x == 0 || rounded != 0);
-    return rounded;
-}
+ErrorOr<FlatPtr> page_round_up(FlatPtr x);
 
 constexpr FlatPtr page_round_down(FlatPtr x)
 {
@@ -48,19 +40,19 @@ inline FlatPtr virtual_to_low_physical(FlatPtr virtual_)
 
 enum class UsedMemoryRangeType {
     LowMemory = 0,
-    Prekernel,
     Kernel,
     BootModule,
     PhysicalPages,
+    __Count
 };
 
 static constexpr StringView UserMemoryRangeTypeNames[] {
-    "Low memory",
-    "Prekernel",
-    "Kernel",
-    "Boot module",
-    "Physical Pages"
+    "Low memory"sv,
+    "Kernel"sv,
+    "Boot module"sv,
+    "Physical Pages"sv
 };
+static_assert(array_size(UserMemoryRangeTypeNames) == to_underlying(UsedMemoryRangeType::__Count));
 
 struct UsedMemoryRange {
     UsedMemoryRangeType type {};
@@ -93,15 +85,9 @@ struct PhysicalMemoryRange {
 struct MemoryManagerData {
     static ProcessorSpecificDataID processor_specific_data_id() { return ProcessorSpecificDataID::MemoryManager; }
 
-    Spinlock m_quickmap_in_use;
-    u32 m_quickmap_prev_flags;
-
-    PhysicalAddress m_last_quickmap_pd;
-    PhysicalAddress m_last_quickmap_pt;
+    Spinlock<LockRank::None> m_quickmap_in_use {};
+    InterruptsState m_quickmap_previous_interrupts_state;
 };
-
-// NOLINTNEXTLINE(readability-redundant-declaration) FIXME: Why do we declare this here *and* in Thread.h?
-extern RecursiveSpinlock s_mm_lock;
 
 // This class represents a set of committed physical pages.
 // When you ask MemoryManager to commit pages for you, you get one of these in return.
@@ -136,11 +122,12 @@ private:
 };
 
 class MemoryManager {
-    AK_MAKE_ETERNAL
     friend class PageDirectory;
     friend class AnonymousVMObject;
     friend class Region;
+    friend class RegionTree;
     friend class VMObject;
+    friend struct ::KmallocGlobalData;
 
 public:
     static MemoryManager& the();
@@ -158,13 +145,13 @@ public:
     void set_page_writable_direct(VirtualAddress, bool);
 
     void protect_readonly_after_init_memory();
+    void unmap_prekernel();
     void unmap_text_after_init();
-    void unmap_ksyms_after_init();
+    void protect_ksyms_after_init();
 
     static void enter_process_address_space(Process&);
     static void enter_address_space(AddressSpace&);
 
-    bool validate_user_stack_no_lock(AddressSpace&, VirtualAddress) const;
     bool validate_user_stack(AddressSpace&, VirtualAddress) const;
 
     enum class ShouldZeroFill {
@@ -172,35 +159,33 @@ public:
         Yes
     };
 
-    ErrorOr<CommittedPhysicalPageSet> commit_user_physical_pages(size_t page_count);
-    void uncommit_user_physical_pages(Badge<CommittedPhysicalPageSet>, size_t page_count);
+    ErrorOr<CommittedPhysicalPageSet> commit_physical_pages(size_t page_count);
+    void uncommit_physical_pages(Badge<CommittedPhysicalPageSet>, size_t page_count);
 
-    NonnullRefPtr<PhysicalPage> allocate_committed_user_physical_page(Badge<CommittedPhysicalPageSet>, ShouldZeroFill = ShouldZeroFill::Yes);
-    RefPtr<PhysicalPage> allocate_user_physical_page(ShouldZeroFill = ShouldZeroFill::Yes, bool* did_purge = nullptr);
-    RefPtr<PhysicalPage> allocate_supervisor_physical_page();
-    NonnullRefPtrVector<PhysicalPage> allocate_contiguous_supervisor_physical_pages(size_t size);
+    NonnullRefPtr<PhysicalPage> allocate_committed_physical_page(Badge<CommittedPhysicalPageSet>, ShouldZeroFill = ShouldZeroFill::Yes);
+    ErrorOr<NonnullRefPtr<PhysicalPage>> allocate_physical_page(ShouldZeroFill = ShouldZeroFill::Yes, bool* did_purge = nullptr);
+    ErrorOr<Vector<NonnullRefPtr<PhysicalPage>>> allocate_contiguous_physical_pages(size_t size);
     void deallocate_physical_page(PhysicalAddress);
 
     ErrorOr<NonnullOwnPtr<Region>> allocate_contiguous_kernel_region(size_t, StringView name, Region::Access access, Region::Cacheable = Region::Cacheable::Yes);
+    ErrorOr<NonnullOwnPtr<Memory::Region>> allocate_dma_buffer_page(StringView name, Memory::Region::Access access, RefPtr<Memory::PhysicalPage>& dma_buffer_page);
+    ErrorOr<NonnullOwnPtr<Memory::Region>> allocate_dma_buffer_page(StringView name, Memory::Region::Access access);
+    ErrorOr<NonnullOwnPtr<Memory::Region>> allocate_dma_buffer_pages(size_t size, StringView name, Memory::Region::Access access, Vector<NonnullRefPtr<Memory::PhysicalPage>>& dma_buffer_pages);
+    ErrorOr<NonnullOwnPtr<Memory::Region>> allocate_dma_buffer_pages(size_t size, StringView name, Memory::Region::Access access);
     ErrorOr<NonnullOwnPtr<Region>> allocate_kernel_region(size_t, StringView name, Region::Access access, AllocationStrategy strategy = AllocationStrategy::Reserve, Region::Cacheable = Region::Cacheable::Yes);
     ErrorOr<NonnullOwnPtr<Region>> allocate_kernel_region(PhysicalAddress, size_t, StringView name, Region::Access access, Region::Cacheable = Region::Cacheable::Yes);
     ErrorOr<NonnullOwnPtr<Region>> allocate_kernel_region_with_vmobject(VMObject&, size_t, StringView name, Region::Access access, Region::Cacheable = Region::Cacheable::Yes);
-    ErrorOr<NonnullOwnPtr<Region>> allocate_kernel_region_with_vmobject(VirtualRange const&, VMObject&, StringView name, Region::Access access, Region::Cacheable = Region::Cacheable::Yes);
+    ErrorOr<NonnullOwnPtr<Region>> allocate_unbacked_region_anywhere(size_t size, size_t alignment);
+    ErrorOr<NonnullOwnPtr<Region>> create_identity_mapped_region(PhysicalAddress, size_t);
 
     struct SystemMemoryInfo {
-        PhysicalSize user_physical_pages { 0 };
-        PhysicalSize user_physical_pages_used { 0 };
-        PhysicalSize user_physical_pages_committed { 0 };
-        PhysicalSize user_physical_pages_uncommitted { 0 };
-        PhysicalSize super_physical_pages { 0 };
-        PhysicalSize super_physical_pages_used { 0 };
+        PhysicalSize physical_pages { 0 };
+        PhysicalSize physical_pages_used { 0 };
+        PhysicalSize physical_pages_committed { 0 };
+        PhysicalSize physical_pages_uncommitted { 0 };
     };
 
-    SystemMemoryInfo get_system_memory_info()
-    {
-        SpinlockLocker lock(s_mm_lock);
-        return m_system_memory_info;
-    }
+    SystemMemoryInfo get_system_memory_info();
 
     template<IteratorFunction<VMObject&> Callback>
     static void for_each_vmobject(Callback callback)
@@ -224,8 +209,7 @@ public:
     }
 
     static Region* find_user_region_from_vaddr(AddressSpace&, VirtualAddress);
-    static Region* find_user_region_from_vaddr_no_lock(AddressSpace&, VirtualAddress);
-    static void validate_syscall_preconditions(AddressSpace&, RegisterState const&);
+    static void validate_syscall_preconditions(Process&, RegisterState const&);
 
     void dump_kernel_regions();
 
@@ -234,13 +218,22 @@ public:
 
     PageDirectory& kernel_page_directory() { return *m_kernel_page_directory; }
 
-    Vector<UsedMemoryRange> const& used_memory_ranges() { return m_used_memory_ranges; }
-    bool is_allowed_to_mmap_to_userspace(PhysicalAddress, VirtualRange const&) const;
+    template<typename Callback>
+    void for_each_used_memory_range(Callback callback)
+    {
+        m_global_data.template with([&](auto& global_data) {
+            for (auto& range : global_data.used_memory_ranges)
+                callback(range);
+        });
+    }
+    bool is_allowed_to_read_physical_memory_for_userspace(PhysicalAddress, size_t read_length) const;
 
     PhysicalPageEntry& get_physical_page_entry(PhysicalAddress);
     PhysicalAddress get_physical_address(PhysicalPage const&);
 
     void copy_physical_page(PhysicalPage&, u8 page_buffer[PAGE_SIZE]);
+
+    IterationDecision for_each_physical_memory_range(Function<IterationDecision(PhysicalMemoryRange const&)>);
 
 private:
     MemoryManager();
@@ -249,19 +242,14 @@ private:
     void initialize_physical_pages();
     void register_reserved_ranges();
 
-    void register_region(Region&);
-    void unregister_region(Region&);
+    void unregister_kernel_region(Region&);
 
     void protect_kernel_image();
     void parse_memory_map();
     static void flush_tlb_local(VirtualAddress, size_t page_count = 1);
     static void flush_tlb(PageDirectory const*, VirtualAddress, size_t page_count = 1);
 
-    static Region* kernel_region_from_vaddr(VirtualAddress);
-
-    static Region* find_region_from_vaddr(VirtualAddress);
-
-    RefPtr<PhysicalPage> find_free_user_physical_page(bool);
+    RefPtr<PhysicalPage> find_free_physical_page(bool);
 
     ALWAYS_INLINE u8* quickmap_page(PhysicalPage& page)
     {
@@ -275,25 +263,40 @@ private:
 
     PageTableEntry* pte(PageDirectory&, VirtualAddress);
     PageTableEntry* ensure_pte(PageDirectory&, VirtualAddress);
-    void release_pte(PageDirectory&, VirtualAddress, bool);
+    enum class IsLastPTERelease {
+        Yes,
+        No
+    };
+    void release_pte(PageDirectory&, VirtualAddress, IsLastPTERelease);
 
-    RefPtr<PageDirectory> m_kernel_page_directory;
-
+    // NOTE: These are outside of GlobalData as they are only assigned on startup,
+    //       and then never change. Atomic ref-counting covers that case without
+    //       the need for additional synchronization.
+    LockRefPtr<PageDirectory> m_kernel_page_directory;
     RefPtr<PhysicalPage> m_shared_zero_page;
     RefPtr<PhysicalPage> m_lazy_committed_page;
 
-    SystemMemoryInfo m_system_memory_info;
-
-    NonnullOwnPtrVector<PhysicalRegion> m_user_physical_regions;
-    OwnPtr<PhysicalRegion> m_super_physical_region;
-    OwnPtr<PhysicalRegion> m_physical_pages_region;
+    // NOTE: These are outside of GlobalData as they are initialized on startup,
+    //       and then never change.
     PhysicalPageEntry* m_physical_page_entries { nullptr };
     size_t m_physical_page_entries_count { 0 };
 
-    Region::ListInMemoryManager m_kernel_regions;
-    Vector<UsedMemoryRange> m_used_memory_ranges;
-    Vector<PhysicalMemoryRange> m_physical_memory_ranges;
-    Vector<ContiguousReservedMemoryRange> m_reserved_memory_ranges;
+    struct GlobalData {
+        GlobalData();
+
+        SystemMemoryInfo system_memory_info;
+
+        Vector<NonnullOwnPtr<PhysicalRegion>> physical_regions;
+        OwnPtr<PhysicalRegion> physical_pages_region;
+
+        RegionTree region_tree;
+
+        Vector<UsedMemoryRange> used_memory_ranges;
+        Vector<PhysicalMemoryRange> physical_memory_ranges;
+        Vector<ContiguousReservedMemoryRange> reserved_memory_ranges;
+    };
+
+    SpinlockProtected<GlobalData, LockRank::None> m_global_data;
 };
 
 inline bool is_user_address(VirtualAddress vaddr)
@@ -325,6 +328,17 @@ inline bool PhysicalPage::is_shared_zero_page() const
 inline bool PhysicalPage::is_lazy_committed_page() const
 {
     return this == &MM.lazy_committed_page();
+}
+
+inline ErrorOr<Memory::VirtualRange> expand_range_to_page_boundaries(FlatPtr address, size_t size)
+{
+    if ((address + size) < address)
+        return EINVAL;
+
+    auto base = VirtualAddress { address }.page_base();
+    auto end = TRY(Memory::page_round_up(address + size));
+
+    return Memory::VirtualRange { base, end - base.get() };
 }
 
 }

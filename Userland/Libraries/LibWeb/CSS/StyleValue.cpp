@@ -1,18 +1,64 @@
 /*
- * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2021, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2018-2023, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2021-2023, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2021, Tobias Christiansen <tobyase@serenityos.org>
+ * Copyright (c) 2022-2023, MacDue <macdue@dueutil.tech>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/ByteBuffer.h>
-#include <LibGfx/Palette.h>
+#include <LibGfx/Font/FontStyleMapping.h>
 #include <LibWeb/CSS/StyleValue.h>
-#include <LibWeb/DOM/Document.h>
-#include <LibWeb/HTML/BrowsingContext.h>
-#include <LibWeb/Loader/LoadRequest.h>
-#include <LibWeb/Loader/ResourceLoader.h>
-#include <LibWeb/Page/Page.h>
+#include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BackgroundRepeatStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BackgroundSizeStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BackgroundStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BorderRadiusShorthandStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BorderStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CompositeStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ConicGradientStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ContentStyleValue.h>
+#include <LibWeb/CSS/StyleValues/CustomIdentStyleValue.h>
+#include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
+#include <LibWeb/CSS/StyleValues/EdgeStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FilterValueListStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FlexFlowStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FlexStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FontStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FrequencyStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridAreaShorthandStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridTemplateAreaStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridTrackPlacementShorthandStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridTrackPlacementStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridTrackSizeListShorthandStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
+#include <LibWeb/CSS/StyleValues/IdentifierStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/InheritStyleValue.h>
+#include <LibWeb/CSS/StyleValues/InitialStyleValue.h>
+#include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
+#include <LibWeb/CSS/StyleValues/LinearGradientStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ListStyleStyleValue.h>
+#include <LibWeb/CSS/StyleValues/NumericStyleValue.h>
+#include <LibWeb/CSS/StyleValues/OverflowStyleValue.h>
+#include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
+#include <LibWeb/CSS/StyleValues/PositionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/RadialGradientStyleValue.h>
+#include <LibWeb/CSS/StyleValues/RectStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ResolutionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
+#include <LibWeb/CSS/StyleValues/StringStyleValue.h>
+#include <LibWeb/CSS/StyleValues/StyleValueList.h>
+#include <LibWeb/CSS/StyleValues/TextDecorationStyleValue.h>
+#include <LibWeb/CSS/StyleValues/TimeStyleValue.h>
+#include <LibWeb/CSS/StyleValues/TransformationStyleValue.h>
+#include <LibWeb/CSS/StyleValues/URLStyleValue.h>
+#include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
+#include <LibWeb/CSS/StyleValues/UnsetStyleValue.h>
 
 namespace Web::CSS {
 
@@ -21,8 +67,16 @@ StyleValue::StyleValue(Type type)
 {
 }
 
-StyleValue::~StyleValue()
+AbstractImageStyleValue const& StyleValue::as_abstract_image() const
 {
+    VERIFY(is_abstract_image());
+    return static_cast<AbstractImageStyleValue const&>(*this);
+}
+
+AngleStyleValue const& StyleValue::as_angle() const
+{
+    VERIFY(is_angle());
+    return static_cast<AngleStyleValue const&>(*this);
 }
 
 BackgroundStyleValue const& StyleValue::as_background() const
@@ -55,10 +109,16 @@ BorderRadiusStyleValue const& StyleValue::as_border_radius() const
     return static_cast<BorderRadiusStyleValue const&>(*this);
 }
 
-BoxShadowStyleValue const& StyleValue::as_box_shadow() const
+BorderRadiusShorthandStyleValue const& StyleValue::as_border_radius_shorthand() const
 {
-    VERIFY(is_box_shadow());
-    return static_cast<BoxShadowStyleValue const&>(*this);
+    VERIFY(is_border_radius_shorthand());
+    return static_cast<BorderRadiusShorthandStyleValue const&>(*this);
+}
+
+ShadowStyleValue const& StyleValue::as_shadow() const
+{
+    VERIFY(is_shadow());
+    return static_cast<ShadowStyleValue const&>(*this);
 }
 
 CalculatedStyleValue const& StyleValue::as_calculated() const
@@ -73,10 +133,46 @@ ColorStyleValue const& StyleValue::as_color() const
     return static_cast<ColorStyleValue const&>(*this);
 }
 
-CustomStyleValue const& StyleValue::as_custom_property() const
+CompositeStyleValue const& StyleValue::as_composite() const
 {
-    VERIFY(is_custom_property());
-    return static_cast<CustomStyleValue const&>(*this);
+    VERIFY(is_composite());
+    return static_cast<CompositeStyleValue const&>(*this);
+}
+
+ConicGradientStyleValue const& StyleValue::as_conic_gradient() const
+{
+    VERIFY(is_conic_gradient());
+    return static_cast<ConicGradientStyleValue const&>(*this);
+}
+
+ContentStyleValue const& StyleValue::as_content() const
+{
+    VERIFY(is_content());
+    return static_cast<ContentStyleValue const&>(*this);
+}
+
+CustomIdentStyleValue const& StyleValue::as_custom_ident() const
+{
+    VERIFY(is_custom_ident());
+    return static_cast<CustomIdentStyleValue const&>(*this);
+}
+
+DisplayStyleValue const& StyleValue::as_display() const
+{
+    VERIFY(is_display());
+    return static_cast<DisplayStyleValue const&>(*this);
+}
+
+EdgeStyleValue const& StyleValue::as_edge() const
+{
+    VERIFY(is_edge());
+    return static_cast<EdgeStyleValue const&>(*this);
+}
+
+FilterValueListStyleValue const& StyleValue::as_filter_value_list() const
+{
+    VERIFY(is_filter_value_list());
+    return static_cast<FilterValueListStyleValue const&>(*this);
 }
 
 FlexStyleValue const& StyleValue::as_flex() const
@@ -95,6 +191,36 @@ FontStyleValue const& StyleValue::as_font() const
 {
     VERIFY(is_font());
     return static_cast<FontStyleValue const&>(*this);
+}
+
+FrequencyStyleValue const& StyleValue::as_frequency() const
+{
+    VERIFY(is_frequency());
+    return static_cast<FrequencyStyleValue const&>(*this);
+}
+
+GridTrackPlacementShorthandStyleValue const& StyleValue::as_grid_track_placement_shorthand() const
+{
+    VERIFY(is_grid_track_placement_shorthand());
+    return static_cast<GridTrackPlacementShorthandStyleValue const&>(*this);
+}
+
+GridAreaShorthandStyleValue const& StyleValue::as_grid_area_shorthand() const
+{
+    VERIFY(is_grid_area_shorthand());
+    return static_cast<GridAreaShorthandStyleValue const&>(*this);
+}
+
+GridTemplateAreaStyleValue const& StyleValue::as_grid_template_area() const
+{
+    VERIFY(is_grid_template_area());
+    return static_cast<GridTemplateAreaStyleValue const&>(*this);
+}
+
+GridTrackPlacementStyleValue const& StyleValue::as_grid_track_placement() const
+{
+    VERIFY(is_grid_track_placement());
+    return static_cast<GridTrackPlacementStyleValue const&>(*this);
 }
 
 IdentifierStyleValue const& StyleValue::as_identifier() const
@@ -127,6 +253,24 @@ LengthStyleValue const& StyleValue::as_length() const
     return static_cast<LengthStyleValue const&>(*this);
 }
 
+GridTrackSizeListStyleValue const& StyleValue::as_grid_track_size_list() const
+{
+    VERIFY(is_grid_track_size_list());
+    return static_cast<GridTrackSizeListStyleValue const&>(*this);
+}
+
+GridTrackSizeListShorthandStyleValue const& StyleValue::as_grid_track_size_list_shorthand() const
+{
+    VERIFY(is_grid_track_size_list_shorthand());
+    return static_cast<GridTrackSizeListShorthandStyleValue const&>(*this);
+}
+
+LinearGradientStyleValue const& StyleValue::as_linear_gradient() const
+{
+    VERIFY(is_linear_gradient());
+    return static_cast<LinearGradientStyleValue const&>(*this);
+}
+
 ListStyleStyleValue const& StyleValue::as_list_style() const
 {
     VERIFY(is_list_style());
@@ -145,10 +289,34 @@ OverflowStyleValue const& StyleValue::as_overflow() const
     return static_cast<OverflowStyleValue const&>(*this);
 }
 
+PercentageStyleValue const& StyleValue::as_percentage() const
+{
+    VERIFY(is_percentage());
+    return static_cast<PercentageStyleValue const&>(*this);
+}
+
 PositionStyleValue const& StyleValue::as_position() const
 {
     VERIFY(is_position());
     return static_cast<PositionStyleValue const&>(*this);
+}
+
+RadialGradientStyleValue const& StyleValue::as_radial_gradient() const
+{
+    VERIFY(is_radial_gradient());
+    return static_cast<RadialGradientStyleValue const&>(*this);
+}
+
+RectStyleValue const& StyleValue::as_rect() const
+{
+    VERIFY(is_rect());
+    return static_cast<RectStyleValue const&>(*this);
+}
+
+ResolutionStyleValue const& StyleValue::as_resolution() const
+{
+    VERIFY(is_resolution());
+    return static_cast<ResolutionStyleValue const&>(*this);
 }
 
 StringStyleValue const& StyleValue::as_string() const
@@ -163,10 +331,22 @@ TextDecorationStyleValue const& StyleValue::as_text_decoration() const
     return static_cast<TextDecorationStyleValue const&>(*this);
 }
 
+TimeStyleValue const& StyleValue::as_time() const
+{
+    VERIFY(is_time());
+    return static_cast<TimeStyleValue const&>(*this);
+}
+
 TransformationStyleValue const& StyleValue::as_transformation() const
 {
     VERIFY(is_transformation());
     return static_cast<TransformationStyleValue const&>(*this);
+}
+
+UnresolvedStyleValue const& StyleValue::as_unresolved() const
+{
+    VERIFY(is_unresolved());
+    return static_cast<UnresolvedStyleValue const&>(*this);
 }
 
 UnsetStyleValue const& StyleValue::as_unset() const
@@ -175,321 +355,83 @@ UnsetStyleValue const& StyleValue::as_unset() const
     return static_cast<UnsetStyleValue const&>(*this);
 }
 
+URLStyleValue const& StyleValue::as_url() const
+{
+    VERIFY(is_url());
+    return static_cast<URLStyleValue const&>(*this);
+}
+
 StyleValueList const& StyleValue::as_value_list() const
 {
     VERIFY(is_value_list());
     return static_cast<StyleValueList const&>(*this);
 }
 
-BackgroundStyleValue::BackgroundStyleValue(
-    NonnullRefPtr<StyleValue> color,
-    NonnullRefPtr<StyleValue> image,
-    NonnullRefPtr<StyleValue> position,
-    NonnullRefPtr<StyleValue> size,
-    NonnullRefPtr<StyleValue> repeat,
-    NonnullRefPtr<StyleValue> attachment,
-    NonnullRefPtr<StyleValue> origin,
-    NonnullRefPtr<StyleValue> clip)
-    : StyleValue(Type::Background)
-    , m_color(color)
-    , m_image(image)
-    , m_position(position)
-    , m_size(size)
-    , m_repeat(repeat)
-    , m_attachment(attachment)
-    , m_origin(origin)
-    , m_clip(clip)
+ErrorOr<ValueComparingNonnullRefPtr<StyleValue const>> StyleValue::absolutized(CSSPixelRect const&, Length::FontMetrics const&, Length::FontMetrics const&) const
 {
-    auto layer_count = [](auto style_value) -> size_t {
-        if (style_value->is_value_list())
-            return style_value->as_value_list().size();
-        else
-            return 1;
-    };
-
-    m_layer_count = max(layer_count(m_image), layer_count(m_position));
-    m_layer_count = max(m_layer_count, layer_count(m_size));
-    m_layer_count = max(m_layer_count, layer_count(m_repeat));
-    m_layer_count = max(m_layer_count, layer_count(m_attachment));
-    m_layer_count = max(m_layer_count, layer_count(m_origin));
-    m_layer_count = max(m_layer_count, layer_count(m_clip));
-
-    VERIFY(!m_color->is_value_list());
+    return *this;
 }
 
-String BackgroundStyleValue::to_string() const
+bool StyleValue::has_auto() const
 {
-    if (m_layer_count == 1) {
-        return String::formatted("{} {} {} {} {} {} {} {}", m_color->to_string(), m_image->to_string(), m_position->to_string(), m_size->to_string(), m_repeat->to_string(), m_attachment->to_string(), m_origin->to_string(), m_clip->to_string());
-    }
-
-    auto get_layer_value_string = [](NonnullRefPtr<StyleValue> const& style_value, size_t index) {
-        if (style_value->is_value_list())
-            return style_value->as_value_list().value_at(index, true)->to_string();
-        return style_value->to_string();
-    };
-
-    StringBuilder builder;
-    for (size_t i = 0; i < m_layer_count; i++) {
-        if (i)
-            builder.append(", ");
-        if (i == m_layer_count - 1)
-            builder.appendff("{} ", m_color->to_string());
-        builder.appendff("{} {} {} {} {} {} {}", get_layer_value_string(m_image, i), get_layer_value_string(m_position, i), get_layer_value_string(m_size, i), get_layer_value_string(m_repeat, i), get_layer_value_string(m_attachment, i), get_layer_value_string(m_origin, i), get_layer_value_string(m_clip, i));
-    }
-
-    return builder.to_string();
+    return is_identifier() && as_identifier().id() == ValueID::Auto;
 }
 
-String IdentifierStyleValue::to_string() const
+ValueID StyleValue::to_identifier() const
 {
-    return CSS::string_from_value_id(m_id);
+    if (is_identifier())
+        return as_identifier().id();
+    return ValueID::Invalid;
 }
 
-bool IdentifierStyleValue::has_color() const
+int StyleValue::to_font_weight() const
 {
-    switch (m_id) {
-    case ValueID::Currentcolor:
-    case ValueID::LibwebLink:
-    case ValueID::LibwebPaletteActiveLink:
-    case ValueID::LibwebPaletteActiveWindowBorder1:
-    case ValueID::LibwebPaletteActiveWindowBorder2:
-    case ValueID::LibwebPaletteActiveWindowTitle:
-    case ValueID::LibwebPaletteBase:
-    case ValueID::LibwebPaletteBaseText:
-    case ValueID::LibwebPaletteButton:
-    case ValueID::LibwebPaletteButtonText:
-    case ValueID::LibwebPaletteDesktopBackground:
-    case ValueID::LibwebPaletteFocusOutline:
-    case ValueID::LibwebPaletteHighlightWindowBorder1:
-    case ValueID::LibwebPaletteHighlightWindowBorder2:
-    case ValueID::LibwebPaletteHighlightWindowTitle:
-    case ValueID::LibwebPaletteHoverHighlight:
-    case ValueID::LibwebPaletteInactiveSelection:
-    case ValueID::LibwebPaletteInactiveSelectionText:
-    case ValueID::LibwebPaletteInactiveWindowBorder1:
-    case ValueID::LibwebPaletteInactiveWindowBorder2:
-    case ValueID::LibwebPaletteInactiveWindowTitle:
-    case ValueID::LibwebPaletteLink:
-    case ValueID::LibwebPaletteMenuBase:
-    case ValueID::LibwebPaletteMenuBaseText:
-    case ValueID::LibwebPaletteMenuSelection:
-    case ValueID::LibwebPaletteMenuSelectionText:
-    case ValueID::LibwebPaletteMenuStripe:
-    case ValueID::LibwebPaletteMovingWindowBorder1:
-    case ValueID::LibwebPaletteMovingWindowBorder2:
-    case ValueID::LibwebPaletteMovingWindowTitle:
-    case ValueID::LibwebPaletteRubberBandBorder:
-    case ValueID::LibwebPaletteRubberBandFill:
-    case ValueID::LibwebPaletteRuler:
-    case ValueID::LibwebPaletteRulerActiveText:
-    case ValueID::LibwebPaletteRulerBorder:
-    case ValueID::LibwebPaletteRulerInactiveText:
-    case ValueID::LibwebPaletteSelection:
-    case ValueID::LibwebPaletteSelectionText:
-    case ValueID::LibwebPaletteSyntaxComment:
-    case ValueID::LibwebPaletteSyntaxControlKeyword:
-    case ValueID::LibwebPaletteSyntaxIdentifier:
-    case ValueID::LibwebPaletteSyntaxKeyword:
-    case ValueID::LibwebPaletteSyntaxNumber:
-    case ValueID::LibwebPaletteSyntaxOperator:
-    case ValueID::LibwebPaletteSyntaxPreprocessorStatement:
-    case ValueID::LibwebPaletteSyntaxPreprocessorValue:
-    case ValueID::LibwebPaletteSyntaxPunctuation:
-    case ValueID::LibwebPaletteSyntaxString:
-    case ValueID::LibwebPaletteSyntaxType:
-    case ValueID::LibwebPaletteTextCursor:
-    case ValueID::LibwebPaletteThreedHighlight:
-    case ValueID::LibwebPaletteThreedShadow1:
-    case ValueID::LibwebPaletteThreedShadow2:
-    case ValueID::LibwebPaletteVisitedLink:
-    case ValueID::LibwebPaletteWindow:
-    case ValueID::LibwebPaletteWindowText:
-        return true;
-    default:
-        return false;
-    }
-}
-
-Color IdentifierStyleValue::to_color(Layout::NodeWithStyle const& node) const
-{
-    if (id() == CSS::ValueID::Currentcolor) {
-        if (!node.has_style())
-            return Color::Black;
-        return node.computed_values().color();
-    }
-
-    auto& document = node.document();
-    if (id() == CSS::ValueID::LibwebLink)
-        return document.link_color();
-
-    VERIFY(document.page());
-    auto palette = document.page()->palette();
-    switch (id()) {
-    case CSS::ValueID::LibwebPaletteDesktopBackground:
-        return palette.color(ColorRole::DesktopBackground);
-    case CSS::ValueID::LibwebPaletteActiveWindowBorder1:
-        return palette.color(ColorRole::ActiveWindowBorder1);
-    case CSS::ValueID::LibwebPaletteActiveWindowBorder2:
-        return palette.color(ColorRole::ActiveWindowBorder2);
-    case CSS::ValueID::LibwebPaletteActiveWindowTitle:
-        return palette.color(ColorRole::ActiveWindowTitle);
-    case CSS::ValueID::LibwebPaletteInactiveWindowBorder1:
-        return palette.color(ColorRole::InactiveWindowBorder1);
-    case CSS::ValueID::LibwebPaletteInactiveWindowBorder2:
-        return palette.color(ColorRole::InactiveWindowBorder2);
-    case CSS::ValueID::LibwebPaletteInactiveWindowTitle:
-        return palette.color(ColorRole::InactiveWindowTitle);
-    case CSS::ValueID::LibwebPaletteMovingWindowBorder1:
-        return palette.color(ColorRole::MovingWindowBorder1);
-    case CSS::ValueID::LibwebPaletteMovingWindowBorder2:
-        return palette.color(ColorRole::MovingWindowBorder2);
-    case CSS::ValueID::LibwebPaletteMovingWindowTitle:
-        return palette.color(ColorRole::MovingWindowTitle);
-    case CSS::ValueID::LibwebPaletteHighlightWindowBorder1:
-        return palette.color(ColorRole::HighlightWindowBorder1);
-    case CSS::ValueID::LibwebPaletteHighlightWindowBorder2:
-        return palette.color(ColorRole::HighlightWindowBorder2);
-    case CSS::ValueID::LibwebPaletteHighlightWindowTitle:
-        return palette.color(ColorRole::HighlightWindowTitle);
-    case CSS::ValueID::LibwebPaletteMenuStripe:
-        return palette.color(ColorRole::MenuStripe);
-    case CSS::ValueID::LibwebPaletteMenuBase:
-        return palette.color(ColorRole::MenuBase);
-    case CSS::ValueID::LibwebPaletteMenuBaseText:
-        return palette.color(ColorRole::MenuBaseText);
-    case CSS::ValueID::LibwebPaletteMenuSelection:
-        return palette.color(ColorRole::MenuSelection);
-    case CSS::ValueID::LibwebPaletteMenuSelectionText:
-        return palette.color(ColorRole::MenuSelectionText);
-    case CSS::ValueID::LibwebPaletteWindow:
-        return palette.color(ColorRole::Window);
-    case CSS::ValueID::LibwebPaletteWindowText:
-        return palette.color(ColorRole::WindowText);
-    case CSS::ValueID::LibwebPaletteButton:
-        return palette.color(ColorRole::Button);
-    case CSS::ValueID::LibwebPaletteButtonText:
-        return palette.color(ColorRole::ButtonText);
-    case CSS::ValueID::LibwebPaletteBase:
-        return palette.color(ColorRole::Base);
-    case CSS::ValueID::LibwebPaletteBaseText:
-        return palette.color(ColorRole::BaseText);
-    case CSS::ValueID::LibwebPaletteThreedHighlight:
-        return palette.color(ColorRole::ThreedHighlight);
-    case CSS::ValueID::LibwebPaletteThreedShadow1:
-        return palette.color(ColorRole::ThreedShadow1);
-    case CSS::ValueID::LibwebPaletteThreedShadow2:
-        return palette.color(ColorRole::ThreedShadow2);
-    case CSS::ValueID::LibwebPaletteHoverHighlight:
-        return palette.color(ColorRole::HoverHighlight);
-    case CSS::ValueID::LibwebPaletteSelection:
-        return palette.color(ColorRole::Selection);
-    case CSS::ValueID::LibwebPaletteSelectionText:
-        return palette.color(ColorRole::SelectionText);
-    case CSS::ValueID::LibwebPaletteInactiveSelection:
-        return palette.color(ColorRole::InactiveSelection);
-    case CSS::ValueID::LibwebPaletteInactiveSelectionText:
-        return palette.color(ColorRole::InactiveSelectionText);
-    case CSS::ValueID::LibwebPaletteRubberBandFill:
-        return palette.color(ColorRole::RubberBandFill);
-    case CSS::ValueID::LibwebPaletteRubberBandBorder:
-        return palette.color(ColorRole::RubberBandBorder);
-    case CSS::ValueID::LibwebPaletteLink:
-        return palette.color(ColorRole::Link);
-    case CSS::ValueID::LibwebPaletteActiveLink:
-        return palette.color(ColorRole::ActiveLink);
-    case CSS::ValueID::LibwebPaletteVisitedLink:
-        return palette.color(ColorRole::VisitedLink);
-    case CSS::ValueID::LibwebPaletteRuler:
-        return palette.color(ColorRole::Ruler);
-    case CSS::ValueID::LibwebPaletteRulerBorder:
-        return palette.color(ColorRole::RulerBorder);
-    case CSS::ValueID::LibwebPaletteRulerActiveText:
-        return palette.color(ColorRole::RulerActiveText);
-    case CSS::ValueID::LibwebPaletteRulerInactiveText:
-        return palette.color(ColorRole::RulerInactiveText);
-    case CSS::ValueID::LibwebPaletteTextCursor:
-        return palette.color(ColorRole::TextCursor);
-    case CSS::ValueID::LibwebPaletteFocusOutline:
-        return palette.color(ColorRole::FocusOutline);
-    case CSS::ValueID::LibwebPaletteSyntaxComment:
-        return palette.color(ColorRole::SyntaxComment);
-    case CSS::ValueID::LibwebPaletteSyntaxNumber:
-        return palette.color(ColorRole::SyntaxNumber);
-    case CSS::ValueID::LibwebPaletteSyntaxString:
-        return palette.color(ColorRole::SyntaxString);
-    case CSS::ValueID::LibwebPaletteSyntaxType:
-        return palette.color(ColorRole::SyntaxType);
-    case CSS::ValueID::LibwebPaletteSyntaxPunctuation:
-        return palette.color(ColorRole::SyntaxPunctuation);
-    case CSS::ValueID::LibwebPaletteSyntaxOperator:
-        return palette.color(ColorRole::SyntaxOperator);
-    case CSS::ValueID::LibwebPaletteSyntaxKeyword:
-        return palette.color(ColorRole::SyntaxKeyword);
-    case CSS::ValueID::LibwebPaletteSyntaxControlKeyword:
-        return palette.color(ColorRole::SyntaxControlKeyword);
-    case CSS::ValueID::LibwebPaletteSyntaxIdentifier:
-        return palette.color(ColorRole::SyntaxIdentifier);
-    case CSS::ValueID::LibwebPaletteSyntaxPreprocessorStatement:
-        return palette.color(ColorRole::SyntaxPreprocessorStatement);
-    case CSS::ValueID::LibwebPaletteSyntaxPreprocessorValue:
-        return palette.color(ColorRole::SyntaxPreprocessorValue);
-    default:
-        return {};
-    }
-}
-
-ImageStyleValue::ImageStyleValue(AK::URL const& url)
-    : StyleValue(Type::Image)
-    , m_url(url)
-{
-}
-
-void ImageStyleValue::load_bitmap(DOM::Document& document)
-{
-    if (m_bitmap)
-        return;
-
-    m_document = &document;
-    auto request = LoadRequest::create_for_url_on_page(m_url, document.page());
-    set_resource(ResourceLoader::the().load_resource(Resource::Type::Image, request));
-}
-
-void ImageStyleValue::resource_did_load()
-{
-    if (!m_document)
-        return;
-    m_bitmap = resource()->bitmap();
-    // FIXME: Do less than a full repaint if possible?
-    if (m_document && m_document->browsing_context())
-        m_document->browsing_context()->set_needs_display({});
-}
-
-// https://www.w3.org/TR/css-color-4/#serializing-sRGB-values
-String ColorStyleValue::to_string() const
-{
-    if (m_color.alpha() == 1)
-        return String::formatted("rgb({}, {}, {})", m_color.red(), m_color.green(), m_color.blue());
-    return String::formatted("rgba({}, {}, {}, {})", m_color.red(), m_color.green(), m_color.blue(), (float)(m_color.alpha()) / 255.0f);
-}
-
-String PositionStyleValue::to_string() const
-{
-    auto to_string = [](PositionEdge edge) {
-        switch (edge) {
-        case PositionEdge::Left:
-            return "left";
-        case PositionEdge::Right:
-            return "right";
-        case PositionEdge::Top:
-            return "top";
-        case PositionEdge::Bottom:
-            return "bottom";
+    if (is_identifier()) {
+        switch (static_cast<IdentifierStyleValue const&>(*this).id()) {
+        case CSS::ValueID::Normal:
+            return Gfx::FontWeight::Regular;
+        case CSS::ValueID::Bold:
+            return Gfx::FontWeight::Bold;
+        case CSS::ValueID::Lighter:
+            // FIXME: This should be relative to the parent.
+            return Gfx::FontWeight::Regular;
+        case CSS::ValueID::Bolder:
+            // FIXME: This should be relative to the parent.
+            return Gfx::FontWeight::Bold;
+        default:
+            return Gfx::FontWeight::Regular;
         }
-        VERIFY_NOT_REACHED();
-    };
+    }
+    if (is_numeric() && as_numeric().has_integer()) {
+        return as_numeric().integer();
+    }
+    if (is_calculated()) {
+        auto maybe_weight = const_cast<CalculatedStyleValue&>(as_calculated()).resolve_integer();
+        if (maybe_weight.has_value())
+            return maybe_weight.value();
+    }
+    return Gfx::FontWeight::Regular;
+}
 
-    return String::formatted("{} {} {} {}", to_string(m_edge_x), m_offset_x.to_string(), to_string(m_edge_y), m_offset_y.to_string());
+int StyleValue::to_font_slope() const
+{
+    // FIXME: Implement oblique <angle>
+    if (is_identifier()) {
+        switch (static_cast<IdentifierStyleValue const&>(*this).id()) {
+        case CSS::ValueID::Italic: {
+            static int italic_slope = Gfx::name_to_slope("Italic"sv);
+            return italic_slope;
+        }
+        case CSS::ValueID::Oblique:
+            static int oblique_slope = Gfx::name_to_slope("Oblique"sv);
+            return oblique_slope;
+        case CSS::ValueID::Normal:
+        default:
+            break;
+        }
+    }
+    static int normal_slope = Gfx::name_to_slope("Normal"sv);
+    return normal_slope;
 }
 
 }

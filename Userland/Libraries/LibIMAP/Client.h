@@ -16,23 +16,31 @@ template<typename T>
 using Promise = Core::Promise<T>;
 
 class Client {
+    AK_MAKE_NONCOPYABLE(Client);
     friend class Parser;
 
 public:
-    Client(StringView host, unsigned port, bool start_with_tls);
+    static ErrorOr<NonnullOwnPtr<Client>> connect_tls(StringView host, u16 port);
+    static ErrorOr<NonnullOwnPtr<Client>> connect_plaintext(StringView host, u16 port);
 
-    RefPtr<Promise<Empty>> connect();
+    Client(Client&&);
+
+    RefPtr<Promise<Empty>> connection_promise()
+    {
+        return m_connect_pending;
+    }
+
     RefPtr<Promise<Optional<Response>>> send_command(Command&&);
     RefPtr<Promise<Optional<Response>>> send_simple_command(CommandType);
-    void send_raw(StringView data);
+    ErrorOr<void> send_raw(StringView data);
     RefPtr<Promise<Optional<SolidResponse>>> login(StringView username, StringView password);
     RefPtr<Promise<Optional<SolidResponse>>> list(StringView reference_name, StringView mailbox_name);
     RefPtr<Promise<Optional<SolidResponse>>> lsub(StringView reference_name, StringView mailbox_name);
     RefPtr<Promise<Optional<SolidResponse>>> select(StringView string);
     RefPtr<Promise<Optional<SolidResponse>>> examine(StringView string);
-    RefPtr<Promise<Optional<SolidResponse>>> search(Optional<String> charset, Vector<SearchKey>&& search_keys, bool uid);
+    RefPtr<Promise<Optional<SolidResponse>>> search(Optional<DeprecatedString> charset, Vector<SearchKey>&& search_keys, bool uid);
     RefPtr<Promise<Optional<SolidResponse>>> fetch(FetchCommand request, bool uid);
-    RefPtr<Promise<Optional<SolidResponse>>> store(StoreMethod, Sequence, bool silent, Vector<String> const& flags, bool uid);
+    RefPtr<Promise<Optional<SolidResponse>>> store(StoreMethod, Sequence, bool silent, Vector<DeprecatedString> const& flags, bool uid);
     RefPtr<Promise<Optional<SolidResponse>>> copy(Sequence sequence_set, StringView name, bool uid);
     RefPtr<Promise<Optional<SolidResponse>>> create_mailbox(StringView name);
     RefPtr<Promise<Optional<SolidResponse>>> delete_mailbox(StringView name);
@@ -43,39 +51,38 @@ public:
     RefPtr<Promise<Optional<ContinueRequest>>> idle();
     RefPtr<Promise<Optional<SolidResponse>>> finish_idle();
     RefPtr<Promise<Optional<SolidResponse>>> status(StringView mailbox, Vector<StatusItemType> const& types);
-    RefPtr<Promise<Optional<SolidResponse>>> append(StringView mailbox, Message&& message, Optional<Vector<String>> flags = {}, Optional<Core::DateTime> date_time = {});
+    RefPtr<Promise<Optional<SolidResponse>>> append(StringView mailbox, Message&& message, Optional<Vector<DeprecatedString>> flags = {}, Optional<Core::DateTime> date_time = {});
 
+    bool is_open();
     void close();
 
     Function<void(ResponseData&&)> unrequested_response_callback;
 
 private:
+    Client(StringView host, u16 port, NonnullOwnPtr<Core::Socket>);
+    void setup_callbacks();
+
+    ErrorOr<void> on_ready_to_receive();
+
+    ErrorOr<void> handle_parsed_response(ParseStatus&& parse_status);
+    ErrorOr<void> send_next_command();
+
     StringView m_host;
-    unsigned m_port;
-    RefPtr<Core::Socket> m_socket;
-    RefPtr<TLS::TLSv12> m_tls_socket;
+    u16 m_port;
 
-    void on_ready_to_receive();
-    void on_tls_ready_to_receive();
+    NonnullOwnPtr<Core::Socket> m_socket;
+    RefPtr<Promise<Empty>> m_connect_pending {};
 
-    bool m_tls;
     int m_current_command = 1;
-
-    bool connect_tls();
-    bool connect_plaintext();
 
     // Sent but response not received
     Vector<RefPtr<Promise<Optional<Response>>>> m_pending_promises;
     // Not yet sent
     Vector<Command> m_command_queue {};
 
-    RefPtr<Promise<Empty>> m_connect_pending {};
-
     ByteBuffer m_buffer;
-    Parser m_parser;
+    Parser m_parser {};
 
     bool m_expecting_response { false };
-    void handle_parsed_response(ParseStatus&& parse_status);
-    void send_next_command();
 };
 }

@@ -5,6 +5,7 @@
  */
 
 #include <AK/Assertions.h>
+#include <bits/pthread_cancel.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,26 +15,32 @@
 
 extern "C" {
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/socket.html
 int socket(int domain, int type, int protocol)
 {
     int rc = syscall(SC_socket, domain, type, protocol);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int bind(int sockfd, const sockaddr* addr, socklen_t addrlen)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/bind.html
+int bind(int sockfd, sockaddr const* addr, socklen_t addrlen)
 {
     int rc = syscall(SC_bind, sockfd, addr, addrlen);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/listen.html
 int listen(int sockfd, int backlog)
 {
     int rc = syscall(SC_listen, sockfd, backlog);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/accept.html
 int accept(int sockfd, sockaddr* addr, socklen_t* addrlen)
 {
+    __pthread_maybe_cancel();
+
     return accept4(sockfd, addr, addrlen, 0);
 }
 
@@ -44,44 +51,59 @@ int accept4(int sockfd, sockaddr* addr, socklen_t* addrlen, int flags)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int connect(int sockfd, const sockaddr* addr, socklen_t addrlen)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/connect.html
+int connect(int sockfd, sockaddr const* addr, socklen_t addrlen)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_connect, sockfd, addr, addrlen);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/shutdown.html
 int shutdown(int sockfd, int how)
 {
     int rc = syscall(SC_shutdown, sockfd, how);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/sendmsg.html
 ssize_t sendmsg(int sockfd, const struct msghdr* msg, int flags)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_sendmsg, sockfd, msg, flags);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-ssize_t sendto(int sockfd, const void* data, size_t data_length, int flags, const struct sockaddr* addr, socklen_t addr_length)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/sendto.html
+ssize_t sendto(int sockfd, void const* data, size_t data_length, int flags, const struct sockaddr* addr, socklen_t addr_length)
 {
     iovec iov = { const_cast<void*>(data), data_length };
     msghdr msg = { const_cast<struct sockaddr*>(addr), addr_length, &iov, 1, nullptr, 0, 0 };
     return sendmsg(sockfd, &msg, flags);
 }
 
-ssize_t send(int sockfd, const void* data, size_t data_length, int flags)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/send.html
+ssize_t send(int sockfd, void const* data, size_t data_length, int flags)
 {
     return sendto(sockfd, data, data_length, flags, nullptr, 0);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/recvmsg.html
 ssize_t recvmsg(int sockfd, struct msghdr* msg, int flags)
 {
+    __pthread_maybe_cancel();
+
     int rc = syscall(SC_recvmsg, sockfd, msg, flags);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/recvfrom.html
 ssize_t recvfrom(int sockfd, void* buffer, size_t buffer_length, int flags, struct sockaddr* addr, socklen_t* addr_length)
 {
+    __pthread_maybe_cancel();
+
     if (!addr_length && addr) {
         errno = EINVAL;
         return -1;
@@ -98,11 +120,13 @@ ssize_t recvfrom(int sockfd, void* buffer, size_t buffer_length, int flags, stru
     return rc;
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/recv.html
 ssize_t recv(int sockfd, void* buffer, size_t buffer_length, int flags)
 {
     return recvfrom(sockfd, buffer, buffer_length, flags, nullptr, nullptr);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getsockopt.html
 int getsockopt(int sockfd, int level, int option, void* value, socklen_t* value_size)
 {
     Syscall::SC_getsockopt_params params { sockfd, level, option, value, value_size };
@@ -110,13 +134,15 @@ int getsockopt(int sockfd, int level, int option, void* value, socklen_t* value_
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int setsockopt(int sockfd, int level, int option, const void* value, socklen_t value_size)
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/setsockopt.html
+int setsockopt(int sockfd, int level, int option, void const* value, socklen_t value_size)
 {
     Syscall::SC_setsockopt_params params { value, sockfd, level, option, value_size };
     int rc = syscall(SC_setsockopt, &params);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getsockname.html
 int getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen)
 {
     Syscall::SC_getsockname_params params { sockfd, addr, addrlen };
@@ -124,6 +150,7 @@ int getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/getpeername.html
 int getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen)
 {
     Syscall::SC_getpeername_params params { sockfd, addr, addrlen };
@@ -131,6 +158,7 @@ int getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/socketpair.html
 int socketpair(int domain, int type, int protocol, int sv[2])
 {
     Syscall::SC_socketpair_params params { domain, type, protocol, sv };

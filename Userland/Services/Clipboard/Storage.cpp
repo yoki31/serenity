@@ -10,21 +10,11 @@ namespace Clipboard {
 
 Storage& Storage::the()
 {
-    static Storage* s_the;
-    if (!s_the)
-        s_the = new Storage;
-    return *s_the;
+    static Storage s_the;
+    return s_the;
 }
 
-Storage::Storage()
-{
-}
-
-Storage::~Storage()
-{
-}
-
-void Storage::set_data(Core::AnonymousBuffer data, const String& mime_type, const HashMap<String, String>& metadata)
+void Storage::set_data(Core::AnonymousBuffer data, DeprecatedString const& mime_type, HashMap<DeprecatedString, DeprecatedString> const& metadata)
 {
     m_buffer = move(data);
     m_data_size = data.size();

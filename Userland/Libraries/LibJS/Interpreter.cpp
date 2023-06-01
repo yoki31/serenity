@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2020-2021, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2020-2022, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2022, Luke Wilde <lukew@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -21,10 +22,9 @@ namespace JS {
 
 NonnullOwnPtr<Interpreter> Interpreter::create_with_existing_realm(Realm& realm)
 {
-    auto& global_object = realm.global_object();
-    DeferGC defer_gc(global_object.heap());
-    auto interpreter = adopt_own(*new Interpreter(global_object.vm()));
-    interpreter->m_global_object = make_handle(&global_object);
+    auto& vm = realm.vm();
+    DeferGC defer_gc(vm.heap());
+    auto interpreter = adopt_own(*new Interpreter(vm));
     interpreter->m_realm = make_handle(&realm);
     return interpreter;
 }
@@ -34,57 +34,113 @@ Interpreter::Interpreter(VM& vm)
 {
 }
 
-Interpreter::~Interpreter()
+// 16.1.6 ScriptEvaluation ( scriptRecord ), https://tc39.es/ecma262/#sec-runtime-semantics-scriptevaluation
+ThrowCompletionOr<Value> Interpreter::run(Script& script_record, JS::GCPtr<Environment> lexical_environment_override)
 {
-}
-
-void Interpreter::run(GlobalObject& global_object, const Program& program)
-{
-    // FIXME: Why does this receive a GlobalObject? Interpreter has one already, and this might not be in sync with the Realm's GlobalObject.
-
     auto& vm = this->vm();
-    VERIFY(!vm.exception());
 
     VM::InterpreterExecutionScope scope(*this);
 
-    vm.set_last_value(Badge<Interpreter> {}, {});
+    // 1. Let globalEnv be scriptRecord.[[Realm]].[[GlobalEnv]].
+    auto& global_environment = script_record.realm().global_environment();
 
-    ExecutionContext execution_context(heap());
-    execution_context.current_node = &program;
-    execution_context.this_value = &global_object;
-    static FlyString global_execution_context_name = "(global execution context)";
-    execution_context.function_name = global_execution_context_name;
-    execution_context.lexical_environment = &realm().global_environment();
-    execution_context.variable_environment = &realm().global_environment();
-    execution_context.realm = &realm();
-    execution_context.is_strict_mode = program.is_strict_mode();
-    MUST(vm.push_execution_context(execution_context, global_object));
-    auto value = program.execute(*this, global_object);
-    vm.set_last_value(Badge<Interpreter> {}, value.value_or(js_undefined()));
+    // 2. Let scriptContext be a new ECMAScript code execution context.
+    ExecutionContext script_context(vm.heap());
 
-    // FIXME: We unconditionally stop the unwind here this should be done using completions leaving
-    //        the VM in a cleaner state after executing. For example it does still store the exception.
-    vm.stop_unwind();
+    // 3. Set the Function of scriptContext to null.
+    // NOTE: This was done during execution context construction.
+
+    // 4. Set the Realm of scriptContext to scriptRecord.[[Realm]].
+    script_context.realm = &script_record.realm();
+
+    // 5. Set the ScriptOrModule of scriptContext to scriptRecord.
+    script_context.script_or_module = NonnullGCPtr<Script>(script_record);
+
+    // 6. Set the VariableEnvironment of scriptContext to globalEnv.
+    script_context.variable_environment = &global_environment;
+
+    // 7. Set the LexicalEnvironment of scriptContext to globalEnv.
+    script_context.lexical_environment = &global_environment;
+
+    // Non-standard: Override the lexical environment if requested.
+    if (lexical_environment_override)
+        script_context.lexical_environment = lexical_environment_override;
+
+    // 8. Set the PrivateEnvironment of scriptContext to null.
+
+    // NOTE: This isn't in the spec, but we require it.
+    script_context.is_strict_mode = script_record.parse_node().is_strict_mode();
+
+    // FIXME: 9. Suspend the currently running execution context.
+
+    // 10. Push scriptContext onto the execution context stack; scriptContext is now the running execution context.
+    TRY(vm.push_execution_context(script_context, {}));
+
+    // 11. Let script be scriptRecord.[[ECMAScriptCode]].
+    auto& script = script_record.parse_node();
+
+    // 12. Let result be Completion(GlobalDeclarationInstantiation(script, globalEnv)).
+    auto instantiation_result = script.global_declaration_instantiation(*this, global_environment);
+    Completion result = instantiation_result.is_throw_completion() ? instantiation_result.throw_completion() : normal_completion({});
+
+    // 13. If result.[[Type]] is normal, then
+    if (result.type() == Completion::Type::Normal) {
+        // a. Set result to the result of evaluating script.
+        result = script.execute(*this);
+    }
+
+    // 14. If result.[[Type]] is normal and result.[[Value]] is empty, then
+    if (result.type() == Completion::Type::Normal && !result.value().has_value()) {
+        // a. Set result to NormalCompletion(undefined).
+        result = normal_completion(js_undefined());
+    }
+
+    // FIXME: 15. Suspend scriptContext and remove it from the execution context stack.
+    vm.pop_execution_context();
+
+    // 16. Assert: The execution context stack is not empty.
+    VERIFY(!vm.execution_context_stack().is_empty());
+
+    // FIXME: 17. Resume the context that is now on the top of the execution context stack as the running execution context.
 
     // At this point we may have already run any queued promise jobs via on_call_stack_emptied,
     // in which case this is a no-op.
+    // FIXME: These three should be moved out of Interpreter::run and give the host an option to run these, as it's up to the host when these get run.
+    //        https://tc39.es/ecma262/#sec-jobs for jobs and https://tc39.es/ecma262/#_ref_3508 for ClearKeptObjects
+    //        finish_execution_generation is particularly an issue for LibWeb, as the HTML spec wants to run it specifically after performing a microtask checkpoint.
+    //        The promise and registry cleanup queues don't cause LibWeb an issue, as LibWeb overrides the hooks that push onto these queues.
     vm.run_queued_promise_jobs();
 
     vm.run_queued_finalization_registry_cleanup_jobs();
 
-    vm.pop_execution_context();
-
     vm.finish_execution_generation();
+
+    // 18. Return ? result.
+    if (result.is_abrupt()) {
+        VERIFY(result.type() == Completion::Type::Throw);
+        return result.release_error();
+    }
+
+    VERIFY(result.value().has_value());
+    return *result.value();
 }
 
-GlobalObject& Interpreter::global_object()
+ThrowCompletionOr<Value> Interpreter::run(SourceTextModule& module)
 {
-    return static_cast<GlobalObject&>(*m_global_object.cell());
-}
+    // FIXME: This is not a entry point as defined in the spec, but is convenient.
+    //        To avoid work we use link_and_eval_module however that can already be
+    //        dangerous if the vm loaded other modules.
+    auto& vm = this->vm();
 
-const GlobalObject& Interpreter::global_object() const
-{
-    return static_cast<const GlobalObject&>(*m_global_object.cell());
+    VM::InterpreterExecutionScope scope(*this);
+
+    TRY(vm.link_and_eval_module({}, module));
+
+    vm.run_queued_promise_jobs();
+
+    vm.run_queued_finalization_registry_cleanup_jobs();
+
+    return js_undefined();
 }
 
 Realm& Interpreter::realm()
@@ -92,9 +148,9 @@ Realm& Interpreter::realm()
     return static_cast<Realm&>(*m_realm.cell());
 }
 
-const Realm& Interpreter::realm() const
+Realm const& Interpreter::realm() const
 {
-    return static_cast<const Realm&>(*m_realm.cell());
+    return static_cast<Realm const&>(*m_realm.cell());
 }
 
 }

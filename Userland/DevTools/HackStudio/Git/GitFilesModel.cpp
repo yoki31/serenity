@@ -8,12 +8,12 @@
 
 namespace HackStudio {
 
-NonnullRefPtr<GitFilesModel> GitFilesModel::create(Vector<LexicalPath>&& files)
+NonnullRefPtr<GitFilesModel> GitFilesModel::create(Vector<DeprecatedString>&& files)
 {
     return adopt_ref(*new GitFilesModel(move(files)));
 }
 
-GitFilesModel::GitFilesModel(Vector<LexicalPath>&& files)
+GitFilesModel::GitFilesModel(Vector<DeprecatedString>&& files)
     : m_files(move(files))
 {
 }
@@ -21,7 +21,7 @@ GitFilesModel::GitFilesModel(Vector<LexicalPath>&& files)
 GUI::Variant GitFilesModel::data(const GUI::ModelIndex& index, GUI::ModelRole role) const
 {
     if (role == GUI::ModelRole::Display) {
-        return m_files.at(index.row()).string();
+        return m_files.at(index.row());
     }
     return {};
 }

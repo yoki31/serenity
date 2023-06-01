@@ -21,6 +21,20 @@ public:
     [[nodiscard]] static ErrorOr<NonnullOwnPtr<KString>> try_create(StringView);
     [[nodiscard]] static NonnullOwnPtr<KString> must_create(StringView);
 
+    [[nodiscard]] static ErrorOr<NonnullOwnPtr<KString>> vformatted(StringView fmtstr, AK::TypeErasedFormatParams&);
+
+    template<typename... Parameters>
+    [[nodiscard]] static ErrorOr<NonnullOwnPtr<KString>> formatted(CheckedFormatString<Parameters...>&& fmtstr, Parameters const&... parameters)
+    {
+        AK::VariadicFormatParams<AK::AllowDebugOnlyFormatters::No, Parameters...> variadic_format_parameters { parameters... };
+        return vformatted(fmtstr.view(), variadic_format_parameters);
+    }
+
+    [[nodiscard]] static ErrorOr<NonnullOwnPtr<KString>> number(Arithmetic auto value)
+    {
+        return formatted("{}", value);
+    }
+
     void operator delete(void*);
 
     ErrorOr<NonnullOwnPtr<KString>> try_clone() const;
@@ -29,6 +43,7 @@ public:
     [[nodiscard]] size_t length() const { return m_length; }
     [[nodiscard]] char const* characters() const { return m_characters; }
     [[nodiscard]] StringView view() const { return { characters(), length() }; }
+    [[nodiscard]] ReadonlyBytes bytes() const { return { characters(), length() }; }
 
 private:
     explicit KString(size_t length)
@@ -76,6 +91,7 @@ struct Traits<NonnullOwnPtr<Kernel::KString>> : public GenericTraits<NonnullOwnP
     using ConstPeekType = Kernel::KString const*;
     static unsigned hash(NonnullOwnPtr<Kernel::KString> const& p) { return string_hash(p->characters(), p->length()); }
     static bool equals(NonnullOwnPtr<Kernel::KString> const& a, NonnullOwnPtr<Kernel::KString> const& b) { return a->view() == b->view(); }
+    static bool equals(StringView a, NonnullOwnPtr<Kernel::KString> const& b) { return a == b->view(); }
 };
 
 template<>
@@ -97,6 +113,19 @@ struct Traits<OwnPtr<Kernel::KString>> : public GenericTraits<OwnPtr<Kernel::KSt
 
         return a->view() == b->view();
     }
+    static bool equals(StringView a, OwnPtr<Kernel::KString> const& b)
+    {
+        if (!b)
+            return a.is_null();
+        return a == b->view();
+    }
 };
+
+namespace Detail {
+template<>
+inline constexpr bool IsHashCompatible<StringView, NonnullOwnPtr<Kernel::KString>> = true;
+template<>
+inline constexpr bool IsHashCompatible<StringView, OwnPtr<Kernel::KString>> = true;
+}
 
 }

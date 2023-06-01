@@ -18,73 +18,80 @@ using namespace TextEditor;
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    TRY(Core::System::pledge("stdio recvfd sendfd thread rpath cpath wpath unix", nullptr));
+    TRY(Core::System::pledge("stdio recvfd sendfd thread rpath cpath wpath unix"));
 
-    auto app = TRY(GUI::Application::try_create(arguments));
+    auto app = TRY(GUI::Application::create(arguments));
 
-    Config::pledge_domains("TextEditor");
+    Config::pledge_domain("TextEditor");
 
-    char const* preview_mode = "auto";
-    char const* file_to_edit = nullptr;
+    app->set_config_domain(TRY("TextEditor"_string));
+
+    auto preview_mode = "auto"sv;
+    StringView file_to_edit;
     Core::ArgsParser parser;
     parser.add_option(preview_mode, "Preview mode, one of 'none', 'html', 'markdown', 'auto'", "preview-mode", '\0', "mode");
     parser.add_positional_argument(file_to_edit, "File to edit, with optional starting line and column number", "file[:line[:column]]", Core::ArgsParser::Required::No);
     parser.parse(arguments);
 
     TRY(Core::System::unveil("/res", "r"));
-    TRY(Core::System::unveil("/tmp/portal/launch", "rw"));
-    TRY(Core::System::unveil("/tmp/portal/webcontent", "rw"));
-    TRY(Core::System::unveil("/tmp/portal/filesystemaccess", "rw"));
+    TRY(Core::System::unveil("/tmp/session/%sid/portal/launch", "rw"));
+    TRY(Core::System::unveil("/tmp/session/%sid/portal/webcontent", "rw"));
+    TRY(Core::System::unveil("/tmp/session/%sid/portal/filesystemaccess", "rw"));
     TRY(Core::System::unveil(nullptr, nullptr));
 
-    StringView preview_mode_view = preview_mode;
-
-    auto app_icon = GUI::Icon::default_icon("app-text-editor");
+    auto app_icon = GUI::Icon::default_icon("app-text-editor"sv);
 
     auto window = TRY(GUI::Window::try_create());
     window->resize(640, 400);
 
-    auto& text_widget = window->set_main_widget<MainWidget>();
+    auto text_widget = TRY(window->set_main_widget<MainWidget>());
 
-    text_widget.editor().set_focus(true);
+    text_widget->editor().set_focus(true);
 
     window->on_close_request = [&]() -> GUI::Window::CloseRequestDecision {
-        if (text_widget.request_close())
+        if (text_widget->request_close())
             return GUI::Window::CloseRequestDecision::Close;
         return GUI::Window::CloseRequestDecision::StayOpen;
     };
 
-    if (preview_mode_view == "auto") {
-        text_widget.set_auto_detect_preview_mode(true);
-    } else if (preview_mode_view == "markdown") {
-        text_widget.set_preview_mode(MainWidget::PreviewMode::Markdown);
-    } else if (preview_mode_view == "html") {
-        text_widget.set_preview_mode(MainWidget::PreviewMode::HTML);
-    } else if (preview_mode_view == "none") {
-        text_widget.set_preview_mode(MainWidget::PreviewMode::None);
+    if (preview_mode == "auto") {
+        text_widget->set_auto_detect_preview_mode(true);
+    } else if (preview_mode == "markdown") {
+        text_widget->set_preview_mode(MainWidget::PreviewMode::Markdown);
+    } else if (preview_mode == "html") {
+        text_widget->set_preview_mode(MainWidget::PreviewMode::HTML);
+    } else if (preview_mode == "none") {
+        text_widget->set_preview_mode(MainWidget::PreviewMode::None);
     } else {
         warnln("Invalid mode '{}'", preview_mode);
         return 1;
     }
 
-    text_widget.initialize_menubar(*window);
+    TRY(text_widget->initialize_menubar(*window));
+    text_widget->update_title();
 
     window->show();
     window->set_icon(app_icon.bitmap_for_size(16));
 
-    if (file_to_edit) {
-        FileArgument parsed_argument(file_to_edit);
-        auto response = FileSystemAccessClient::Client::the().request_file_read_only_approved(window->window_id(), parsed_argument.filename());
+    if (!file_to_edit.is_empty()) {
+        auto filename = TRY(String::from_utf8(file_to_edit));
+        FileArgument parsed_argument(filename);
 
-        if (response.error == 0) {
-            if (!text_widget.read_file_and_close(*response.fd, *response.chosen_file))
-                return 1;
-            text_widget.editor().set_cursor_and_focus_line(parsed_argument.line().value_or(1) - 1, parsed_argument.column().value_or(0));
+        FileSystemAccessClient::Client::the().set_silence_errors(FileSystemAccessClient::ErrorFlag::NoEntries);
+        auto response = FileSystemAccessClient::Client::the().request_file_read_only_approved(window, parsed_argument.filename().to_deprecated_string());
+
+        if (response.is_error()) {
+            if (response.error().code() == ENOENT)
+                text_widget->open_nonexistent_file(parsed_argument.filename().to_deprecated_string());
         } else {
-            text_widget.open_nonexistent_file(parsed_argument.filename());
+            TRY(text_widget->read_file(response.value().filename(), response.value().stream()));
+            text_widget->editor().set_cursor_and_focus_line(parsed_argument.line().value_or(1) - 1, parsed_argument.column().value_or(0));
         }
+
+        text_widget->update_title();
+        FileSystemAccessClient::Client::the().set_silence_errors(FileSystemAccessClient::ErrorFlag::None);
     }
-    text_widget.update_title();
+    text_widget->update_statusbar();
 
     return app->exec();
 }

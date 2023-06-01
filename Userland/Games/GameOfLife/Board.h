@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2021, Andres Crucitti <dasc495@gmail.com>
  * Copyright (c) 2021, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -14,7 +15,7 @@
 class Board {
 public:
     Board(size_t rows, size_t columns);
-    ~Board();
+    ~Board() = default;
 
     size_t columns() const { return m_columns; }
     size_t rows() const { return m_rows; }
@@ -22,7 +23,7 @@ public:
     void toggle_cell(size_t row, size_t column);
     void set_cell(size_t row, size_t column, bool on);
     bool cell(size_t row, size_t column) const;
-    const Vector<Vector<bool>>& cells() const { return m_cells; }
+    Vector<Vector<bool>> const& cells() const { return m_cells; }
 
     void run_generation();
     bool is_stalled() const { return m_stalled; }

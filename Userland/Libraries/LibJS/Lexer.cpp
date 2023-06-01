@@ -16,15 +16,15 @@
 
 namespace JS {
 
-HashMap<FlyString, TokenType> Lexer::s_keywords;
-HashMap<String, TokenType> Lexer::s_three_char_tokens;
-HashMap<String, TokenType> Lexer::s_two_char_tokens;
+HashMap<DeprecatedFlyString, TokenType> Lexer::s_keywords;
+HashMap<DeprecatedString, TokenType> Lexer::s_three_char_tokens;
+HashMap<DeprecatedString, TokenType> Lexer::s_two_char_tokens;
 HashMap<char, TokenType> Lexer::s_single_char_tokens;
 
 Lexer::Lexer(StringView source, StringView filename, size_t line_number, size_t line_column)
     : m_source(source)
-    , m_current_token(TokenType::Eof, {}, StringView(nullptr), StringView(nullptr), filename, 0, 0, 0)
-    , m_filename(filename)
+    , m_current_token(TokenType::Eof, {}, {}, {}, filename, 0, 0, 0)
+    , m_filename(String::from_utf8(filename).release_value_but_fixme_should_propagate_errors())
     , m_line_number(line_number)
     , m_line_column(line_column)
     , m_parsed_identifiers(adopt_ref(*new ParsedIdentifiers))
@@ -159,7 +159,7 @@ void Lexer::consume()
 
     if (is_line_terminator()) {
         if constexpr (LEXER_DEBUG) {
-            String type;
+            DeprecatedString type;
             if (m_current_char == '\n')
                 type = "LINE FEED";
             else if (m_current_char == '\r')
@@ -194,7 +194,7 @@ void Lexer::consume()
     } else if (is_unicode_character()) {
         size_t char_size = 1;
         if ((m_current_char & 64) == 0) {
-            // invalid char
+            m_hit_invalid_unicode = m_position;
         } else if ((m_current_char & 32) == 0) {
             char_size = 2;
         } else if ((m_current_char & 16) == 0) {
@@ -206,7 +206,18 @@ void Lexer::consume()
         VERIFY(char_size >= 1);
         --char_size;
 
-        m_position += char_size;
+        for (size_t i = m_position; i < m_position + char_size; i++) {
+            if (i >= m_source.length() || (m_source[i] & 0b11000000) != 0b10000000) {
+                m_hit_invalid_unicode = m_position;
+                break;
+            }
+        }
+
+        if (m_hit_invalid_unicode.has_value())
+            m_position = m_source.length();
+        else
+            m_position += char_size;
+
         if (did_reach_eof())
             return;
 
@@ -347,14 +358,17 @@ ALWAYS_INLINE bool Lexer::is_unicode_character() const
     return (m_current_char & 128) != 0;
 }
 
-u32 Lexer::current_code_point() const
+ALWAYS_INLINE u32 Lexer::current_code_point() const
 {
     static constexpr const u32 REPLACEMENT_CHARACTER = 0xFFFD;
     if (m_position == 0)
         return REPLACEMENT_CHARACTER;
-    Utf8View utf_8_view { m_source.substring_view(m_position - 1) };
-    if (utf_8_view.is_empty())
+    auto substring = m_source.substring_view(m_position - 1);
+    if (substring.is_empty())
         return REPLACEMENT_CHARACTER;
+    if (is_ascii(substring[0]))
+        return substring[0];
+    Utf8View utf_8_view { substring };
     return *utf_8_view.begin();
 }
 
@@ -498,6 +512,7 @@ bool Lexer::slash_means_division() const
         || type == TokenType::NumericLiteral
         || type == TokenType::ParenClose
         || type == TokenType::PlusPlus
+        || type == TokenType::PrivateIdentifier
         || type == TokenType::RegexLiteral
         || type == TokenType::StringLiteral
         || type == TokenType::TemplateLiteralEnd
@@ -529,6 +544,7 @@ Token Lexer::next()
                     consume();
                 } while (!is_eof() && !is_line_terminator());
             } else if (is_block_comment_start()) {
+                size_t start_line_number = m_line_number;
                 consume();
                 do {
                     consume();
@@ -539,6 +555,9 @@ Token Lexer::next()
                 if (is_eof())
                     unterminated_comment = true;
                 consume(); // consume /
+
+                if (start_line_number != m_line_number)
+                    line_has_token_yet = false;
             } else {
                 break;
             }
@@ -553,9 +572,9 @@ Token Lexer::next()
     // This is being used to communicate info about invalid tokens to the parser, which then
     // can turn that into more specific error messages - instead of us having to make up a
     // bunch of Invalid* tokens (bad numeric literals, unterminated comments etc.)
-    String token_message;
+    DeprecatedString token_message;
 
-    Optional<FlyString> identifier;
+    Optional<DeprecatedFlyString> identifier;
     size_t identifier_length = 0;
 
     if (m_current_token.type() == TokenType::RegexLiteral && !is_eof() && is_ascii_alpha(m_current_char) && !did_consume_whitespace_or_comments) {
@@ -591,8 +610,15 @@ Token Lexer::next()
             consume();
             m_template_states.last().in_expr = true;
         } else {
+            // TemplateCharacter ::
+            //     $ [lookahead ≠ {]
+            //     \ TemplateEscapeSequence
+            //     \ NotEscapeSequence
+            //     LineContinuation
+            //     LineTerminatorSequence
+            //     SourceCharacter but not one of ` or \ or $ or LineTerminator
             while (!match('$', '{') && m_current_char != '`' && !is_eof()) {
-                if (match('\\', '$') || match('\\', '`'))
+                if (match('\\', '$') || match('\\', '`') || match('\\', '\\'))
                     consume();
                 consume();
             }
@@ -654,7 +680,7 @@ Token Lexer::next()
             if (m_current_char == '.') {
                 // decimal
                 consume();
-                while (is_ascii_digit(m_current_char) || match_numeric_literal_separator_followed_by(is_ascii_digit))
+                while (is_ascii_digit(m_current_char))
                     consume();
                 if (m_current_char == 'e' || m_current_char == 'E')
                     is_invalid_numeric_literal = !consume_exponent();
@@ -688,7 +714,7 @@ Token Lexer::next()
                 // octal without '0o' prefix. Forbidden in 'strict mode'
                 do {
                     consume();
-                } while (is_ascii_digit(m_current_char) || match_numeric_literal_separator_followed_by(is_ascii_digit));
+                } while (is_ascii_digit(m_current_char));
             }
         } else {
             // 1...9 or period
@@ -700,11 +726,15 @@ Token Lexer::next()
             } else {
                 if (m_current_char == '.') {
                     consume();
-                    while (is_ascii_digit(m_current_char) || match_numeric_literal_separator_followed_by(is_ascii_digit))
+                    if (m_current_char == '_')
+                        is_invalid_numeric_literal = true;
+
+                    while (is_ascii_digit(m_current_char) || match_numeric_literal_separator_followed_by(is_ascii_digit)) {
                         consume();
+                    }
                 }
                 if (m_current_char == 'e' || m_current_char == 'E')
-                    is_invalid_numeric_literal = !consume_exponent();
+                    is_invalid_numeric_literal = is_invalid_numeric_literal || !consume_exponent();
             }
         }
         if (is_invalid_numeric_literal) {
@@ -804,15 +834,29 @@ Token Lexer::next()
         }
     }
 
-    m_current_token = Token(
-        token_type,
-        token_message,
-        m_source.substring_view(trivia_start - 1, value_start - trivia_start),
-        m_source.substring_view(value_start - 1, m_position - value_start),
-        m_filename,
-        value_start_line_number,
-        value_start_column_number,
-        m_position);
+    if (m_hit_invalid_unicode.has_value()) {
+        value_start = m_hit_invalid_unicode.value() - 1;
+        m_current_token = Token(TokenType::Invalid, "Invalid unicode codepoint in source"_string.release_value_but_fixme_should_propagate_errors(),
+            ""sv, // Since the invalid unicode can occur anywhere in the current token the trivia is not correct
+            m_source.substring_view(value_start + 1, min(4u, m_source.length() - value_start - 2)),
+            m_filename,
+            m_line_number,
+            m_line_column - 1,
+            value_start + 1);
+        m_hit_invalid_unicode.clear();
+        // Do not produce any further tokens.
+        VERIFY(is_eof());
+    } else {
+        m_current_token = Token(
+            token_type,
+            String::from_deprecated_string(token_message).release_value_but_fixme_should_propagate_errors(),
+            m_source.substring_view(trivia_start - 1, value_start - trivia_start),
+            m_source.substring_view(value_start - 1, m_position - value_start),
+            m_filename,
+            value_start_line_number,
+            value_start_column_number,
+            value_start - 1);
+    }
 
     if (identifier.has_value())
         m_current_token.set_identifier_value(identifier.release_value());
@@ -849,13 +893,13 @@ Token Lexer::force_slash_as_regex()
 
     m_current_token = Token(
         token_type,
-        "",
+        String {},
         m_current_token.trivia(),
         m_source.substring_view(value_start - 1, m_position - value_start),
         m_filename,
         m_current_token.line_number(),
         m_current_token.line_column(),
-        m_position);
+        value_start - 1);
 
     if constexpr (LEXER_DEBUG) {
         dbgln("------------------------------");

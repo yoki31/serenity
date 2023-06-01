@@ -6,11 +6,12 @@
 
 #include <AK/Assertions.h>
 #include <AK/Format.h>
+#include <LibMain/Main.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static void assert_env(const char* name, const char* value)
+static void assert_env(char const* name, char const* value)
 {
     char* result = getenv(name);
     if (!result) {
@@ -29,7 +30,7 @@ static void test_getenv_preexisting()
     assert_env("HOME", "/home/anon");
 }
 
-static void test_puttenv()
+static void test_putenv()
 {
     char* to_put = strdup("PUTENVTEST=HELLOPUTENV");
     int rc = putenv(to_put);
@@ -41,7 +42,7 @@ static void test_puttenv()
     // Do not free `to_put`!
 }
 
-static void test_settenv()
+static void test_setenv()
 {
     int rc = setenv("SETENVTEST", "HELLO SETENV!", 0);
     if (rc) {
@@ -66,7 +67,7 @@ static void test_settenv()
     assert_env("SETENVTEST", "Goodbye, friend!");
 }
 
-static void test_settenv_overwrite_empty()
+static void test_setenv_overwrite_empty()
 {
     int rc = setenv("EMPTYTEST", "Forcefully overwrite non-existing envvar", 1);
     if (rc) {
@@ -76,7 +77,7 @@ static void test_settenv_overwrite_empty()
     assert_env("EMPTYTEST", "Forcefully overwrite non-existing envvar");
 }
 
-int main(int, char**)
+ErrorOr<int> serenity_main(Main::Arguments)
 {
 #define RUNTEST(x)                   \
     {                                \
@@ -85,9 +86,9 @@ int main(int, char**)
         outln("Success!");           \
     }
     RUNTEST(test_getenv_preexisting);
-    RUNTEST(test_puttenv);
-    RUNTEST(test_settenv);
-    RUNTEST(test_settenv_overwrite_empty);
+    RUNTEST(test_putenv);
+    RUNTEST(test_setenv);
+    RUNTEST(test_setenv_overwrite_empty);
     outln("PASS");
 
     return 0;

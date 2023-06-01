@@ -1,30 +1,29 @@
 /*
- * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2018-2022, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/BuiltinWrappers.h>
 #include <AK/ScopeGuard.h>
 #include <AK/Singleton.h>
 #include <AK/Time.h>
-#include <Kernel/Arch/x86/InterruptDisabler.h>
+#include <Kernel/Arch/TrapFrame.h>
 #include <Kernel/Debug.h>
+#include <Kernel/InterruptDisabler.h>
 #include <Kernel/Panic.h>
 #include <Kernel/PerformanceManager.h>
 #include <Kernel/Process.h>
-#include <Kernel/RTC.h>
 #include <Kernel/Scheduler.h>
 #include <Kernel/Sections.h>
 #include <Kernel/Time/TimeManagement.h>
-
-// Remove this once SMP is stable and can be enabled by default
-#define SCHEDULE_ON_ALL_PROCESSORS 0
+#include <Kernel/kstdio.h>
 
 namespace Kernel {
 
-RecursiveSpinlock g_scheduler_lock;
+RecursiveSpinlock<LockRank::None> g_scheduler_lock {};
 
-static u32 time_slice_for(const Thread& thread)
+static u32 time_slice_for(Thread const& thread)
 {
     // One time slice unit == 4ms (assuming 250 ticks/second)
     if (thread.is_idle_thread())
@@ -47,13 +46,9 @@ struct ThreadReadyQueues {
     Array<ThreadReadyQueue, count> queues;
 };
 
-static Singleton<SpinlockProtected<ThreadReadyQueues>> g_ready_queues;
+static Singleton<SpinlockProtected<ThreadReadyQueues, LockRank::None>> g_ready_queues;
 
-static SpinlockProtected<TotalTimeScheduled> g_total_time_scheduled;
-
-// The Scheduler::current_time function provides a current time for scheduling purposes,
-// which may not necessarily relate to wall time
-u64 (*Scheduler::current_time)();
+static SpinlockProtected<TotalTimeScheduled, LockRank::None> g_total_time_scheduled {};
 
 static void dump_thread_list(bool = false);
 
@@ -76,7 +71,7 @@ Thread& Scheduler::pull_next_runnable_thread()
     return g_ready_queues->with([&](auto& ready_queues) -> Thread& {
         auto priority_mask = ready_queues.mask;
         while (priority_mask != 0) {
-            auto priority = __builtin_ffsl(priority_mask);
+            auto priority = bit_scan_forward(priority_mask);
             VERIFY(priority > 0);
             auto& ready_queue = ready_queues.queues[--priority];
             for (auto& thread : ready_queue.thread_list) {
@@ -104,7 +99,10 @@ Thread& Scheduler::pull_next_runnable_thread()
             }
             priority_mask &= ~(1u << priority);
         }
-        return *Processor::idle_thread();
+
+        auto* idle_thread = Processor::idle_thread();
+        idle_thread->set_active(true);
+        return *idle_thread;
     });
 }
 
@@ -115,7 +113,7 @@ Thread* Scheduler::peek_next_runnable_thread()
     return g_ready_queues->with([&](auto& ready_queues) -> Thread* {
         auto priority_mask = ready_queues.mask;
         while (priority_mask != 0) {
-            auto priority = __builtin_ffsl(priority_mask);
+            auto priority = bit_scan_forward(priority_mask);
             VERIFY(priority > 0);
             auto& ready_queue = ready_queues.queues[--priority];
             for (auto& thread : ready_queue.thread_list) {
@@ -196,13 +194,13 @@ UNMAP_AFTER_INIT void Scheduler::start()
     idle_thread.did_schedule();
     idle_thread.set_initialized(true);
     processor.init_context(idle_thread, false);
-    idle_thread.set_state(Thread::Running);
+    idle_thread.set_state(Thread::State::Running);
     VERIFY(idle_thread.affinity() == (1u << processor.id()));
     processor.initialize_context_switching(idle_thread);
     VERIFY_NOT_REACHED();
 }
 
-bool Scheduler::pick_next()
+void Scheduler::pick_next()
 {
     VERIFY_INTERRUPTS_DISABLED();
 
@@ -227,10 +225,10 @@ bool Scheduler::pick_next()
 
     auto& thread_to_schedule = pull_next_runnable_thread();
     if constexpr (SCHEDULER_DEBUG) {
-        dbgln("Scheduler[{}]: Switch to {} @ {:#04x}:{:p}",
+        dbgln("Scheduler[{}]: Switch to {} @ {:p}",
             Processor::current_id(),
             thread_to_schedule,
-            thread_to_schedule.regs().cs, thread_to_schedule.regs().ip());
+            thread_to_schedule.regs().ip());
     }
 
     // We need to leave our first critical section before switching context,
@@ -238,14 +236,14 @@ bool Scheduler::pick_next()
     critical.leave();
 
     thread_to_schedule.set_ticks_left(time_slice_for(thread_to_schedule));
-    return context_switch(&thread_to_schedule);
+    context_switch(&thread_to_schedule);
 }
 
-bool Scheduler::yield()
+void Scheduler::yield()
 {
     InterruptDisabler disabler;
 
-    auto current_thread = Thread::current();
+    auto const* current_thread = Thread::current();
     dbgln_if(SCHEDULER_DEBUG, "Scheduler[{}]: yielding thread {} in_irq={}", Processor::current_id(), *current_thread, Processor::current_in_irq());
     VERIFY(current_thread != nullptr);
     if (Processor::current_in_irq() || Processor::in_critical()) {
@@ -253,50 +251,41 @@ bool Scheduler::yield()
         // a critical section where we don't want to switch contexts, then
         // delay until exiting the trap or critical section
         Processor::current().invoke_scheduler_async();
-        return false;
+        return;
     }
 
-    if (!Scheduler::pick_next())
-        return false;
-
-    if constexpr (SCHEDULER_DEBUG)
-        dbgln("Scheduler[{}]: yield returns to thread {} in_irq={}", Processor::current_id(), *current_thread, Processor::current_in_irq());
-    return true;
+    Scheduler::pick_next();
 }
 
-bool Scheduler::context_switch(Thread* thread)
+void Scheduler::context_switch(Thread* thread)
 {
-    if (Memory::s_mm_lock.is_locked_by_current_processor()) {
-        PANIC("In context switch while holding Memory::s_mm_lock");
-    }
-
     thread->did_schedule();
 
-    auto from_thread = Thread::current();
-    if (from_thread == thread)
-        return false;
+    auto* from_thread = Thread::current();
+    VERIFY(from_thread);
 
-    if (from_thread) {
-        // If the last process hasn't blocked (still marked as running),
-        // mark it as runnable for the next round.
-        if (from_thread->state() == Thread::Running)
-            from_thread->set_state(Thread::Runnable);
+    if (from_thread == thread)
+        return;
+
+    // If the last process hasn't blocked (still marked as running),
+    // mark it as runnable for the next round.
+    if (from_thread->state() == Thread::State::Running)
+        from_thread->set_state(Thread::State::Runnable);
 
 #ifdef LOG_EVERY_CONTEXT_SWITCH
-        const auto msg = "Scheduler[{}]: {} -> {} [prio={}] {:#04x}:{:p}";
+    auto const msg = "Scheduler[{}]: {} -> {} [prio={}] {:p}";
 
-        dbgln(msg,
-            Processor::current_id(), from_thread->tid().value(),
-            thread->tid().value(), thread->priority(), thread->regs().cs, thread->regs().ip());
+    dbgln(msg,
+        Processor::current_id(), from_thread->tid().value(),
+        thread->tid().value(), thread->priority(), thread->regs().ip());
 #endif
-    }
 
     auto& proc = Processor::current();
     if (!thread->is_initialized()) {
         proc.init_context(*thread, false);
         thread->set_initialized(true);
     }
-    thread->set_state(Thread::Running);
+    thread->set_state(Thread::State::Running);
 
     PerformanceManager::add_context_switch_perf_event(*from_thread, *thread);
 
@@ -304,55 +293,45 @@ bool Scheduler::context_switch(Thread* thread)
 
     // NOTE: from_thread at this point reflects the thread we were
     // switched from, and thread reflects Thread::current()
-    enter_current(*from_thread, false);
+    enter_current(*from_thread);
     VERIFY(thread == Thread::current());
 
-    if (thread->process().is_user_process() && thread->previous_mode() != Thread::PreviousMode::KernelMode && thread->current_trap()) {
-        auto& regs = thread->get_register_dump_from_stack();
-        auto iopl = get_iopl_from_eflags(regs.flags());
-        if (iopl != 0) {
-            PANIC("Switched to thread {} with non-zero IOPL={}", Thread::current()->tid().value(), iopl);
-        }
+    {
+        SpinlockLocker lock(thread->get_lock());
+        thread->dispatch_one_pending_signal();
     }
-
-    return true;
 }
 
-void Scheduler::enter_current(Thread& prev_thread, bool is_first)
+void Scheduler::enter_current(Thread& prev_thread)
 {
     VERIFY(g_scheduler_lock.is_locked_by_current_processor());
 
     // We already recorded the scheduled time when entering the trap, so this merely accounts for the kernel time since then
-    auto scheduler_time = Scheduler::current_time();
+    auto scheduler_time = TimeManagement::scheduler_current_time();
     prev_thread.update_time_scheduled(scheduler_time, true, true);
     auto* current_thread = Thread::current();
     current_thread->update_time_scheduled(scheduler_time, true, false);
 
-    prev_thread.set_active(false);
-    if (prev_thread.state() == Thread::Dying) {
+    // NOTE: When doing an exec(), we will context switch from and to the same thread!
+    //       In that case, we must not mark the previous thread as inactive.
+    if (&prev_thread != current_thread)
+        prev_thread.set_active(false);
+
+    if (prev_thread.state() == Thread::State::Dying) {
         // If the thread we switched from is marked as dying, then notify
         // the finalizer. Note that as soon as we leave the scheduler lock
         // the finalizer may free from_thread!
         notify_finalizer();
-    } else if (!is_first) {
-        // Check if we have any signals we should deliver (even if we don't
-        // end up switching to another thread).
-        if (!current_thread->is_in_block() && current_thread->previous_mode() != Thread::PreviousMode::KernelMode && current_thread->current_trap()) {
-            SpinlockLocker lock(current_thread->get_lock());
-            if (current_thread->state() == Thread::Running && current_thread->pending_signals_for_state()) {
-                current_thread->dispatch_one_pending_signal();
-            }
-        }
     }
 }
 
-void Scheduler::leave_on_first_switch(u32 flags)
+void Scheduler::leave_on_first_switch(InterruptsState previous_interrupts_state)
 {
     // This is called when a thread is switched into for the first time.
     // At this point, enter_current has already be called, but because
     // Scheduler::context_switch is not in the call stack we need to
     // clean up and release locks manually here
-    g_scheduler_lock.unlock(flags);
+    g_scheduler_lock.unlock(previous_interrupts_state);
 
     VERIFY(Processor::current_in_scheduler());
     Processor::set_current_in_scheduler(false);
@@ -371,7 +350,7 @@ void Scheduler::prepare_after_exec()
 void Scheduler::prepare_for_idle_loop()
 {
     // This is called when the CPU finished setting up the idle loop
-    // and is about to run it. We need to acquire he scheduler lock
+    // and is about to run it. We need to acquire the scheduler lock
     VERIFY(!g_scheduler_lock.is_locked_by_current_processor());
     g_scheduler_lock.lock();
 
@@ -385,39 +364,18 @@ Process* Scheduler::colonel()
     return s_colonel_process;
 }
 
-static u64 current_time_tsc()
-{
-    return read_tsc();
-}
-
-static u64 current_time_monotonic()
-{
-    // We always need a precise timestamp here, we cannot rely on a coarse timestamp
-    return (u64)TimeManagement::the().monotonic_time(TimePrecision::Precise).to_nanoseconds();
-}
-
 UNMAP_AFTER_INIT void Scheduler::initialize()
 {
     VERIFY(Processor::is_initialized()); // sanity check
+    VERIFY(TimeManagement::is_initialized());
 
-    // Figure out a good scheduling time source
-    if (Processor::current().has_feature(CPUFeature::TSC)) {
-        // TODO: only use if TSC is running at a constant frequency?
-        current_time = current_time_tsc;
-    } else {
-        // TODO: Using HPET is rather slow, can we use any other time source that may be faster?
-        current_time = current_time_monotonic;
-    }
-
-    RefPtr<Thread> idle_thread;
     g_finalizer_wait_queue = new WaitQueue;
 
     g_finalizer_has_work.store(false, AK::MemoryOrder::memory_order_release);
-    s_colonel_process = Process::create_kernel_process(idle_thread, KString::must_create("colonel"), idle_loop, nullptr, 1, Process::RegisterProcess::No).leak_ref();
-    VERIFY(s_colonel_process);
-    VERIFY(idle_thread);
+    auto [colonel_process, idle_thread] = MUST(Process::create_kernel_process(KString::must_create("colonel"sv), idle_loop, nullptr, 1, Process::RegisterProcess::No));
+    s_colonel_process = &colonel_process.leak_ref();
     idle_thread->set_priority(THREAD_PRIORITY_MIN);
-    idle_thread->set_name(KString::must_create("idle thread #0"));
+    idle_thread->set_name(KString::must_create("Idle Task #0"sv));
 
     set_idle_thread(idle_thread);
 }
@@ -436,7 +394,7 @@ UNMAP_AFTER_INIT Thread* Scheduler::create_ap_idle_thread(u32 cpu)
     VERIFY(Processor::is_bootstrap_processor());
 
     VERIFY(s_colonel_process);
-    Thread* idle_thread = s_colonel_process->create_kernel_thread(idle_loop, nullptr, THREAD_PRIORITY_MIN, KString::must_create(String::formatted("idle thread #{}", cpu)), 1 << cpu, false);
+    Thread* idle_thread = MUST(s_colonel_process->create_kernel_thread(idle_loop, nullptr, THREAD_PRIORITY_MIN, MUST(KString::formatted("idle thread #{}", cpu)), 1 << cpu, false));
     VERIFY(idle_thread);
     return idle_thread;
 }
@@ -450,12 +408,12 @@ void Scheduler::add_time_scheduled(u64 time_to_add, bool is_kernel)
     });
 }
 
-void Scheduler::timer_tick(const RegisterState& regs)
+void Scheduler::timer_tick(RegisterState const& regs)
 {
     VERIFY_INTERRUPTS_DISABLED();
     VERIFY(Processor::current_in_irq());
 
-    auto current_thread = Processor::current_thread();
+    auto* current_thread = Processor::current_thread();
     if (!current_thread)
         return;
 
@@ -463,22 +421,17 @@ void Scheduler::timer_tick(const RegisterState& regs)
     VERIFY(current_thread->current_trap());
     VERIFY(current_thread->current_trap()->regs == &regs);
 
-#if !SCHEDULE_ON_ALL_PROCESSORS
-    if (!Processor::is_bootstrap_processor())
-        return; // TODO: This prevents scheduling on other CPUs!
-#endif
-
     if (current_thread->process().is_kernel_process()) {
         // Because the previous mode when entering/exiting kernel threads never changes
         // we never update the time scheduled. So we need to update it manually on the
         // timer interrupt
-        current_thread->update_time_scheduled(current_time(), true, false);
+        current_thread->update_time_scheduled(TimeManagement::scheduler_current_time(), true, false);
     }
 
-    if (current_thread->previous_mode() == Thread::PreviousMode::UserMode && current_thread->should_die() && !current_thread->is_blocked()) {
+    if (current_thread->previous_mode() == ExecutionMode::User && current_thread->should_die() && !current_thread->is_blocked()) {
         SpinlockLocker scheduler_lock(g_scheduler_lock);
         dbgln_if(SCHEDULER_DEBUG, "Scheduler[{}]: Terminating user mode thread {}", Processor::current_id(), *current_thread);
-        current_thread->set_state(Thread::Dying);
+        current_thread->set_state(Thread::State::Dying);
         Processor::current().invoke_scheduler_async();
         return;
     }
@@ -515,7 +468,7 @@ void Scheduler::invoke_async()
 
 void Scheduler::notify_finalizer()
 {
-    if (g_finalizer_has_work.exchange(true, AK::MemoryOrder::memory_order_acq_rel) == false)
+    if (!g_finalizer_has_work.exchange(true, AK::MemoryOrder::memory_order_acq_rel))
         g_finalizer_wait_queue->wake_all();
 }
 
@@ -523,20 +476,14 @@ void Scheduler::idle_loop(void*)
 {
     auto& proc = Processor::current();
     dbgln("Scheduler[{}]: idle loop running", proc.id());
-    VERIFY(are_interrupts_enabled());
+    VERIFY(Processor::are_interrupts_enabled());
 
     for (;;) {
         proc.idle_begin();
-        asm("hlt");
-
+        proc.wait_for_interrupt();
         proc.idle_end();
         VERIFY_INTERRUPTS_ENABLED();
-#if SCHEDULE_ON_ALL_PROCESSORS
         yield();
-#else
-        if (Processor::current_id() == 0)
-            yield();
-#endif
     }
 }
 
@@ -560,12 +507,6 @@ void dump_thread_list(bool with_stack_traces)
 {
     dbgln("Scheduler thread list for processor {}:", Processor::current_id());
 
-    auto get_cs = [](Thread& thread) -> u16 {
-        if (!thread.current_trap())
-            return thread.regs().cs;
-        return thread.get_register_dump_from_stack().cs;
-    };
-
     auto get_eip = [](Thread& thread) -> u32 {
         if (!thread.current_trap())
             return thread.regs().ip();
@@ -573,28 +514,46 @@ void dump_thread_list(bool with_stack_traces)
     };
 
     Thread::for_each([&](Thread& thread) {
+        auto color = thread.process().is_kernel_process() ? "\x1b[34;1m"sv : "\x1b[33;1m"sv;
         switch (thread.state()) {
-        case Thread::Dying:
-            dmesgln("  {:14} {:30} @ {:04x}:{:08x} Finalizable: {}, (nsched: {})",
-                thread.state_string(),
+        case Thread::State::Dying:
+            dmesgln("  {}{:30}\x1b[0m @ {:08x} is {:14} (Finalizable: {}, nsched: {})",
+                color,
                 thread,
-                get_cs(thread),
                 get_eip(thread),
+                thread.state_string(),
                 thread.is_finalizable(),
                 thread.times_scheduled());
             break;
         default:
-            dmesgln("  {:14} Pr:{:2} {:30} @ {:04x}:{:08x} (nsched: {})",
+            dmesgln("  {}{:30}\x1b[0m @ {:08x} is {:14} (Pr:{:2}, nsched: {})",
+                color,
+                thread,
+                get_eip(thread),
                 thread.state_string(),
                 thread.priority(),
-                thread,
-                get_cs(thread),
-                get_eip(thread),
                 thread.times_scheduled());
             break;
         }
-        if (with_stack_traces)
-            dbgln("{}", thread.backtrace());
+        if (thread.state() == Thread::State::Blocked && thread.blocking_mutex()) {
+            dmesgln("    Blocking on Mutex {:#x} ({})", thread.blocking_mutex(), thread.blocking_mutex()->name());
+        }
+        if (thread.state() == Thread::State::Blocked && thread.blocker()) {
+            dmesgln("    Blocking on Blocker {:#x}", thread.blocker());
+        }
+#if LOCK_DEBUG
+        thread.for_each_held_lock([](auto const& entry) {
+            dmesgln("    Holding lock {:#x} ({}) at {}", entry.lock, entry.lock->name(), entry.lock_location);
+        });
+#endif
+        if (with_stack_traces) {
+            auto trace_or_error = thread.backtrace();
+            if (!trace_or_error.is_error()) {
+                auto trace = trace_or_error.release_value();
+                dbgln("Backtrace:");
+                kernelputstr(trace->characters(), trace->length());
+            }
+        }
         return IterationDecision::Continue;
     });
 }

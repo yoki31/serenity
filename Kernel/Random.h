@@ -10,7 +10,7 @@
 #include <AK/Assertions.h>
 #include <AK/ByteBuffer.h>
 #include <AK/Types.h>
-#include <Kernel/Locking/Lockable.h>
+#include <Kernel/Arch/Processor.h>
 #include <Kernel/Locking/Mutex.h>
 #include <Kernel/StdLib.h>
 #include <LibCrypto/Cipher/AES.h>
@@ -30,9 +30,9 @@ public:
     using HashType = HashT;
     using DigestType = typename HashT::DigestType;
 
-    // FIXME: Do something other than VERIFY()'ing inside Optional in case of OOM.
+    // FIXME: Do something other than VERIFY()'ing in case of OOM.
     FortunaPRNG()
-        : m_counter(ByteBuffer::create_zeroed(BlockType::block_size()).release_value())
+        : m_counter(ByteBuffer::create_zeroed(BlockType::block_size()).release_value_but_fixme_should_propagate_errors())
     {
     }
 
@@ -62,13 +62,13 @@ public:
     }
 
     template<typename T>
-    void add_random_event(const T& event_data, size_t pool)
+    void add_random_event(T const& event_data, size_t pool)
     {
         pool %= pool_count;
         if (pool == 0) {
             m_p0_len++;
         }
-        m_pools[pool].update(reinterpret_cast<const u8*>(&event_data), sizeof(T));
+        m_pools[pool].update(reinterpret_cast<u8 const*>(&event_data), sizeof(T));
     }
 
     [[nodiscard]] bool is_seeded() const
@@ -82,7 +82,7 @@ public:
         return is_seeded() || m_p0_len >= reseed_threshold;
     }
 
-    Spinlock& get_lock() { return m_lock; }
+    Spinlock<LockRank::None>& get_lock() { return m_lock; }
 
 private:
     void reseed()
@@ -102,7 +102,7 @@ private:
         } else {
             auto buffer_result = ByteBuffer::copy(digest.immutable_data(), digest.data_length());
             // If there's no memory left to copy this into, bail out.
-            if (!buffer_result.has_value())
+            if (buffer_result.is_error())
                 return;
 
             m_key = buffer_result.release_value();
@@ -117,11 +117,10 @@ private:
     size_t m_p0_len { 0 };
     ByteBuffer m_key;
     HashType m_pools[pool_count];
-    Spinlock m_lock;
+    Spinlock<LockRank::None> m_lock {};
 };
 
-class KernelRng : public Lockable<FortunaPRNG<Crypto::Cipher::AESCipher, Crypto::Hash::SHA256, 256>> {
-    AK_MAKE_ETERNAL;
+class KernelRng : public FortunaPRNG<Crypto::Cipher::AESCipher, Crypto::Hash::SHA256, 256> {
 
 public:
     KernelRng();
@@ -130,8 +129,6 @@ public:
     void wait_for_entropy();
 
     void wake_if_ready();
-
-    Spinlock& get_lock() { return resource().get_lock(); }
 
 private:
     WaitQueue m_seed_queue;
@@ -162,13 +159,13 @@ public:
     }
 
     template<typename T>
-    void add_random_event(const T& event_data)
+    void add_random_event(T const& event_data)
     {
         auto& kernel_rng = KernelRng::the();
         SpinlockLocker lock(kernel_rng.get_lock());
         // We don't lock this because on the off chance a pool is corrupted, entropy isn't lost.
-        Event<T> event = { read_tsc(), m_source, event_data };
-        kernel_rng.resource().add_random_event(event, m_pool);
+        Event<T> event = { Processor::read_cpu_counter(), m_source, event_data };
+        kernel_rng.add_random_event(event, m_pool);
         m_pool++;
         kernel_rng.wake_if_ready();
     }

@@ -1,10 +1,19 @@
 /*
  * Copyright (c) 2021, Paul Scharnofske
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
+
+#ifndef AC97_DEBUG
+#cmakedefine01 AC97_DEBUG
+#endif
+
+#ifndef AHCI_DEBUG
+#cmakedefine01 AHCI_DEBUG
+#endif
 
 #ifndef ACPI_DEBUG
 #cmakedefine01 ACPI_DEBUG
@@ -20,6 +29,10 @@
 
 #ifndef ARP_DEBUG
 #cmakedefine01 ARP_DEBUG
+#endif
+
+#ifndef ATA_DEBUG
+#cmakedefine01 ATA_DEBUG
 #endif
 
 #ifndef BBFS_DEBUG
@@ -38,24 +51,16 @@
 #cmakedefine01 CONTEXT_SWITCH_DEBUG
 #endif
 
-#ifndef CONTIGUOUS_VMOBJECT_DEBUG
-#cmakedefine01 CONTIGUOUS_VMOBJECT_DEBUG
+#ifndef DUMP_REGIONS_ON_CRASH
+#cmakedefine01 DUMP_REGIONS_ON_CRASH
 #endif
 
 #ifndef E1000_DEBUG
 #cmakedefine01 E1000_DEBUG
 #endif
 
-#ifndef E1000E_DEBUG
-#cmakedefine01 E1000E_DEBUG
-#endif
-
 #ifndef ETHERNET_DEBUG
 #cmakedefine01 ETHERNET_DEBUG
-#endif
-
-#ifndef ETHERNET_VERY_DEBUG
-#cmakedefine01 ETHERNET_VERY_DEBUG
 #endif
 
 #ifndef EXEC_DEBUG
@@ -70,16 +75,12 @@
 #cmakedefine01 EXT2_DEBUG
 #endif
 
-#ifndef FRAMEBUFFER_DEVICE_DEBUG
-#cmakedefine01 FRAMEBUFFER_DEVICE_DEBUG
-#endif
-
 #ifndef EXT2_VERY_DEBUG
 #cmakedefine01 EXT2_VERY_DEBUG
 #endif
 
-#ifndef FILEDESCRIPTION_DEBUG
-#cmakedefine01 FILEDESCRIPTION_DEBUG
+#ifndef FAT_DEBUG
+#cmakedefine01 FAT_DEBUG
 #endif
 
 #ifndef FORK_DEBUG
@@ -92,10 +93,6 @@
 
 #ifndef FUTEXQUEUE_DEBUG
 #cmakedefine01 FUTEXQUEUE_DEBUG
-#endif
-
-#ifndef GPT_DEBUG
-#cmakedefine01 GPT_DEBUG
 #endif
 
 #ifndef HPET_COMPARATOR_DEBUG
@@ -114,16 +111,20 @@
 #cmakedefine01 INTEL_GRAPHICS_DEBUG
 #endif
 
+#ifndef INTEL_HDA_DEBUG
+#cmakedefine01 INTEL_HDA_DEBUG
+#endif
+
 #ifndef INTERRUPT_DEBUG
 #cmakedefine01 INTERRUPT_DEBUG
 #endif
 
-#ifndef IOAPIC_DEBUG
-#cmakedefine01 IOAPIC_DEBUG
-#endif
-
 #ifndef IO_DEBUG
 #cmakedefine01 IO_DEBUG
+#endif
+
+#ifndef IOAPIC_DEBUG
+#cmakedefine01 IOAPIC_DEBUG
 #endif
 
 #ifndef ISO9660_DEBUG
@@ -178,6 +179,10 @@
 #cmakedefine01 LOCK_RESTORE_DEBUG
 #endif
 
+#ifndef LOCK_SHARED_UPGRADE_DEBUG
+#cmakedefine01 LOCK_SHARED_UPGRADE_DEBUG
+#endif
+
 #ifndef LOCK_TRACE_DEBUG
 #cmakedefine01 LOCK_TRACE_DEBUG
 #endif
@@ -186,24 +191,24 @@
 #cmakedefine01 MASTERPTY_DEBUG
 #endif
 
-#ifndef MBR_DEBUG
-#cmakedefine01 MBR_DEBUG
-#endif
-
 #ifndef MOUSE_DEBUG
 #cmakedefine01 MOUSE_DEBUG
+#endif
+
+#ifndef MEMORY_DEVICE_DEBUG
+#cmakedefine01 MEMORY_DEVICE_DEBUG
 #endif
 
 #ifndef MULTIPROCESSOR_DEBUG
 #cmakedefine01 MULTIPROCESSOR_DEBUG
 #endif
 
-#ifndef NE2000_DEBUG
-#cmakedefine01 NE2000_DEBUG
-#endif
-
 #ifndef NETWORK_TASK_DEBUG
 #cmakedefine01 NETWORK_TASK_DEBUG
+#endif
+
+#ifndef NVME_DEBUG
+#cmakedefine01 NVME_DEBUG
 #endif
 
 #ifndef OFFD_DEBUG
@@ -216,10 +221,6 @@
 
 #ifndef PATA_DEBUG
 #cmakedefine01 PATA_DEBUG
-#endif
-
-#ifndef AHCI_DEBUG
-#cmakedefine01 AHCI_DEBUG
 #endif
 
 #ifndef PCI_DEBUG
@@ -250,16 +251,8 @@
 #cmakedefine01 ROUTING_DEBUG
 #endif
 
-#ifndef RTL8139_DEBUG
-#cmakedefine01 RTL8139_DEBUG
-#endif
-
 #ifndef RTL8168_DEBUG
 #cmakedefine01 RTL8168_DEBUG
-#endif
-
-#ifndef SB16_DEBUG
-#cmakedefine01 SB16_DEBUG
 #endif
 
 #ifndef SCHEDULER_DEBUG
@@ -288,6 +281,10 @@
 
 #ifndef STORAGE_DEVICE_DEBUG
 #cmakedefine01 STORAGE_DEVICE_DEBUG
+#endif
+
+#ifndef SYSFS_DEBUG
+#cmakedefine01 SYSFS_DEBUG
 #endif
 
 #ifndef TCP_DEBUG
@@ -330,20 +327,12 @@
 #cmakedefine01 VMWARE_BACKDOOR_DEBUG
 #endif
 
-#ifndef VOLATILE_PAGE_RANGES_DEBUG
-#cmakedefine01 VOLATILE_PAGE_RANGES_DEBUG
-#endif
-
 #ifndef VIRTIO_DEBUG
 #cmakedefine01 VIRTIO_DEBUG
 #endif
 
 #ifndef VIRTUAL_CONSOLE_DEBUG
 #cmakedefine01 VIRTUAL_CONSOLE_DEBUG
-#endif
-
-#ifndef VRA_DEBUG
-#cmakedefine01 VRA_DEBUG
 #endif
 
 #ifndef WAITBLOCK_DEBUG

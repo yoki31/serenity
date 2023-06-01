@@ -113,13 +113,13 @@ describe("errors", () => {
     test("missing fields", () => {
         expect(() => {
             Temporal.PlainDateTime.from({});
-        }).toThrowWithMessage(TypeError, "Required property year is missing or undefined");
+        }).toThrowWithMessage(TypeError, "Required property day is missing or undefined");
         expect(() => {
-            Temporal.PlainDateTime.from({ year: 0 });
+            Temporal.PlainDateTime.from({ year: 0, day: 1 });
         }).toThrowWithMessage(TypeError, "Required property month is missing or undefined");
         expect(() => {
-            Temporal.PlainDateTime.from({ year: 0, month: 1 });
-        }).toThrowWithMessage(TypeError, "Required property day is missing or undefined");
+            Temporal.PlainDateTime.from({ month: 1, day: 1 });
+        }).toThrowWithMessage(TypeError, "Required property year is missing or undefined");
     });
 
     test("with 'reject' overflow option", () => {
@@ -185,5 +185,14 @@ describe("errors", () => {
             RangeError,
             "Invalid date time string '2021-07-06T23:42:01Z': must not contain a UTC designator"
         );
+    });
+
+    test("extended year must not be negative zero", () => {
+        expect(() => {
+            Temporal.PlainDateTime.from("-000000-01-01");
+        }).toThrowWithMessage(RangeError, "Invalid date time string '-000000-01-01'");
+        expect(() => {
+            Temporal.PlainDateTime.from("−000000-01-01"); // U+2212
+        }).toThrowWithMessage(RangeError, "Invalid date time string '−000000-01-01'");
     });
 });

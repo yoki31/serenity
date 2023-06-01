@@ -4,51 +4,49 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibAudio/ClientConnection.h>
+#include <LibConfig/Client.h>
+#include <LibCore/ArgsParser.h>
+#include <LibFileSystemAccessClient/Client.h>
 #include <LibGUI/Application.h>
-#include <LibGUI/BoxLayout.h>
-#include <LibGUI/ImageWidget.h>
+#include <LibGUI/Icon.h>
 #include <LibGUI/Window.h>
-#include <LibGfx/Bitmap.h>
-#include <LibVideo/MatroskaReader.h>
-#include <LibVideo/VP9/Decoder.h>
+#include <LibMain/Main.h>
 
-int main(int argc, char** argv)
+#include "VideoPlayerWidget.h"
+
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    auto app = GUI::Application::construct(argc, argv);
-    auto window = GUI::Window::construct();
+    StringView filename = ""sv;
+    Core::ArgsParser args_parser;
+    args_parser.add_positional_argument(filename, "The video file to display.", "filename", Core::ArgsParser::Required::No);
+    args_parser.parse(arguments);
 
-    auto document = Video::MatroskaReader::parse_matroska_from_file("/home/anon/Videos/test-webm.webm");
-    auto const& optional_track = document->track_for_track_type(Video::TrackEntry::TrackType::Video);
-    if (!optional_track.has_value())
-        return 1;
-    auto const& track = optional_track.value();
-    auto const video_track = track.video_track().value();
+    Config::pledge_domain("VideoPlayer");
 
-    auto image = Gfx::Bitmap::try_create(Gfx::BitmapFormat::BGRx8888, Gfx::IntSize(video_track.pixel_height, video_track.pixel_width)).release_value_but_fixme_should_propagate_errors();
-    auto& main_widget = window->set_main_widget<GUI::Widget>();
-    main_widget.set_fill_with_background_color(true);
-    main_widget.set_layout<GUI::VerticalBoxLayout>();
-    auto& image_widget = main_widget.add<GUI::ImageWidget>();
-    image_widget.set_bitmap(image);
-    image_widget.set_fixed_size(video_track.pixel_height, video_track.pixel_width);
-    main_widget.add_child(image_widget);
+    auto app = TRY(GUI::Application::create(arguments));
+    app->set_config_domain(TRY("VideoPlayer"_string));
 
-    Video::VP9::Decoder vp9_decoder;
-    for (auto const& cluster : document->clusters()) {
-        for (auto const& block : cluster.blocks()) {
-            if (block.track_number() != track.track_number())
-                continue;
+    auto window = TRY(GUI::Window::try_create());
+    window->resize(640, 480);
+    window->set_resizable(true);
 
-            auto const& frame = block.frame(0);
-            dbgln("Reading frame 0 from block @ {}", block.timestamp());
-            bool failed = !vp9_decoder.decode_frame(frame);
-            vp9_decoder.dump_frame_info();
-            if (failed)
-                return 1;
+    TRY(Core::System::unveil("/tmp/session/%sid/portal/filesystemaccess", "rw"));
+    TRY(Core::System::unveil("/res", "r"));
+    TRY(Core::System::unveil(nullptr, nullptr));
+
+    auto main_widget = TRY(window->set_main_widget<VideoPlayer::VideoPlayerWidget>());
+    main_widget->update_title();
+    TRY(main_widget->initialize_menubar(window));
+
+    window->show();
+    window->set_icon(GUI::Icon::default_icon("app-video-player"sv).bitmap_for_size(16));
+
+    if (!filename.is_empty()) {
+        auto response = FileSystemAccessClient::Client::the().request_file_read_only_approved(window, filename);
+        if (!response.is_error()) {
+            main_widget->open_file(response.release_value());
         }
     }
 
-    window->show();
     return app->exec();
 }

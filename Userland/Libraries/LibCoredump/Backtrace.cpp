@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,26 +9,24 @@
 #include <AK/Platform.h>
 #include <AK/StringBuilder.h>
 #include <AK/Types.h>
-#include <LibCore/File.h>
 #include <LibCore/MappedFile.h>
 #include <LibCoredump/Backtrace.h>
 #include <LibCoredump/Reader.h>
 #include <LibELF/Core.h>
 #include <LibELF/Image.h>
+#include <LibFileSystem/FileSystem.h>
 
 namespace Coredump {
 
-ELFObjectInfo const* Backtrace::object_info_for_region(ELF::Core::MemoryRegionInfo const& region)
+ELFObjectInfo const* Backtrace::object_info_for_region(Reader const& coredump, MemoryRegionInfo const& region)
 {
-    auto path = region.object_name();
-    if (!path.starts_with('/') && Core::File::looks_like_shared_library(path))
-        path = LexicalPath::join("/usr/lib", path).string();
+    DeprecatedString path = coredump.resolve_object_path(region.object_name());
 
     auto maybe_ptr = m_debug_info_cache.get(path);
     if (maybe_ptr.has_value())
         return *maybe_ptr;
 
-    if (!Core::File::exists(path))
+    if (!FileSystem::exists(path))
         return nullptr;
 
     auto file_or_error = Core::MappedFile::map(path);
@@ -42,36 +41,38 @@ ELFObjectInfo const* Backtrace::object_info_for_region(ELF::Core::MemoryRegionIn
     return info_ptr;
 }
 
-Backtrace::Backtrace(const Reader& coredump, const ELF::Core::ThreadInfo& thread_info, Function<void(size_t, size_t)> on_progress)
+Backtrace::Backtrace(Reader const& coredump, const ELF::Core::ThreadInfo& thread_info, Function<void(size_t, size_t)> on_progress)
     : m_thread_info(move(thread_info))
 {
-#if ARCH(I386)
-    auto* start_bp = (FlatPtr*)m_thread_info.regs.ebp;
-    auto* start_ip = (FlatPtr*)m_thread_info.regs.eip;
+#if ARCH(X86_64)
+    auto start_bp = m_thread_info.regs.rbp;
+    auto start_ip = m_thread_info.regs.rip;
+#elif ARCH(AARCH64)
+    auto start_bp = m_thread_info.regs.x[29];
+    auto start_ip = m_thread_info.regs.pc;
 #else
-    auto* start_bp = (FlatPtr*)m_thread_info.regs.rbp;
-    auto* start_ip = (FlatPtr*)m_thread_info.regs.rip;
+#    error Unknown architecture
 #endif
 
     // In order to provide progress updates, we first have to walk the
     // call stack to determine how many frames it has.
     size_t frame_count = 0;
     {
-        auto* bp = start_bp;
-        auto* ip = start_ip;
+        auto bp = start_bp;
+        auto ip = start_ip;
         while (bp && ip) {
             ++frame_count;
-            auto next_ip = coredump.peek_memory((FlatPtr)(bp + 1));
-            auto next_bp = coredump.peek_memory((FlatPtr)(bp));
+            auto next_ip = coredump.peek_memory(bp + sizeof(FlatPtr));
+            auto next_bp = coredump.peek_memory(bp);
             if (!next_ip.has_value() || !next_bp.has_value())
                 break;
-            ip = (FlatPtr*)next_ip.value();
-            bp = (FlatPtr*)next_bp.value();
+            ip = next_ip.value();
+            bp = next_bp.value();
         }
     }
 
-    auto* bp = start_bp;
-    auto* ip = start_ip;
+    auto bp = start_bp;
+    auto ip = start_ip;
     size_t frame_index = 0;
     while (bp && ip) {
         // We use eip - 1 because the return address from a function frame
@@ -79,28 +80,24 @@ Backtrace::Backtrace(const Reader& coredump, const ELF::Core::ThreadInfo& thread
         // However, because the first frame represents the faulting
         // instruction rather than the return address we don't subtract
         // 1 there.
-        VERIFY((FlatPtr)ip > 0);
-        add_entry(coredump, (FlatPtr)ip - ((frame_index == 0) ? 0 : 1));
+        VERIFY(ip > 0);
+        add_entry(coredump, ip - ((frame_index == 0) ? 0 : 1));
         if (on_progress)
             on_progress(frame_index, frame_count);
         ++frame_index;
-        auto next_ip = coredump.peek_memory((FlatPtr)(bp + 1));
-        auto next_bp = coredump.peek_memory((FlatPtr)(bp));
+        auto next_ip = coredump.peek_memory(bp + sizeof(FlatPtr));
+        auto next_bp = coredump.peek_memory(bp);
         if (!next_ip.has_value() || !next_bp.has_value())
             break;
-        ip = (FlatPtr*)next_ip.value();
-        bp = (FlatPtr*)next_bp.value();
+        ip = next_ip.value();
+        bp = next_bp.value();
     }
 }
 
-Backtrace::~Backtrace()
+void Backtrace::add_entry(Reader const& coredump, FlatPtr ip)
 {
-}
-
-void Backtrace::add_entry(const Reader& coredump, FlatPtr ip)
-{
-    auto* ip_region = coredump.region_containing((FlatPtr)ip);
-    if (!ip_region) {
+    auto ip_region = coredump.region_containing(ip);
+    if (!ip_region.has_value()) {
         m_entries.append({ ip, {}, {}, {} });
         return;
     }
@@ -116,25 +113,27 @@ void Backtrace::add_entry(const Reader& coredump, FlatPtr ip)
     // the PT_LOAD header for the .text segment isn't the first one
     // in the object file.
     auto region = coredump.first_region_for_object(object_name);
-    auto* object_info = object_info_for_region(*region);
-    if (!object_info)
+    auto object_info = object_info_for_region(coredump, *region);
+    if (!object_info) {
+        m_entries.append({ ip, object_name, {}, {} });
         return;
+    }
 
     auto function_name = object_info->debug_info->elf().symbolicate(ip - region->region_start);
-    auto source_position = object_info->debug_info->get_source_position_with_inlines(ip - region->region_start);
+    auto source_position = object_info->debug_info->get_source_position_with_inlines(ip - region->region_start).release_value_but_fixme_should_propagate_errors();
     m_entries.append({ ip, object_name, function_name, source_position });
 }
 
-String Backtrace::Entry::to_string(bool color) const
+DeprecatedString Backtrace::Entry::to_deprecated_string(bool color) const
 {
     StringBuilder builder;
     builder.appendff("{:p}: ", eip);
     if (object_name.is_empty()) {
-        builder.append("???");
-        return builder.build();
+        builder.append("???"sv);
+        return builder.to_deprecated_string();
     }
     builder.appendff("[{}] {}", object_name, function_name.is_empty() ? "???" : function_name);
-    builder.append(" (");
+    builder.append(" ("sv);
 
     Vector<Debug::DebugInfo::SourcePosition> source_positions;
 
@@ -149,16 +148,16 @@ String Backtrace::Entry::to_string(bool color) const
 
     for (size_t i = 0; i < source_positions.size(); ++i) {
         auto& position = source_positions[i];
-        auto fmt = color ? "\033[34;1m{}\033[0m:{}" : "{}:{}";
+        auto fmt = color ? "\033[34;1m{}\033[0m:{}"sv : "{}:{}"sv;
         builder.appendff(fmt, LexicalPath::basename(position.file_path), position.line_number);
         if (i != source_positions.size() - 1) {
-            builder.append(" => ");
+            builder.append(" => "sv);
         }
     }
 
-    builder.append(")");
+    builder.append(')');
 
-    return builder.build();
+    return builder.to_deprecated_string();
 }
 
 }

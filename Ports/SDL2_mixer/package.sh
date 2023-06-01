@@ -1,26 +1,27 @@
 #!/usr/bin/env -S bash ../.port_include.sh
-port=SDL2_mixer
-version=2.0.4
-useconfigure=true
-files="https://www.libsdl.org/projects/SDL_mixer/release/SDL2_mixer-${version}.tar.gz SDL2_mixer-${version}.tar.gz b4cf5a382c061cd75081cf246c2aa2f9df8db04bdda8dcdc6b6cca55bede2419"
-auth_type=sha256
-depends=("SDL2" "libvorbis")
+port='SDL2_mixer'
+version='2.6.2'
+useconfigure='true'
+files="https://github.com/libsdl-org/SDL_mixer/releases/download/release-${version}/SDL2_mixer-${version}.tar.gz SDL2_mixer-${version}.tar.gz 8cdea810366decba3c33d32b8071bccd1c309b2499a54946d92b48e6922aa371"
+auth_type='sha256'
+depends=("libmodplug" "libmpg123" "libvorbis" "SDL2" "timidity")
 
 configure() {
+    export LIBS="-L${SERENITY_INSTALL_ROOT}/usr/local/lib"
     run ./configure \
         --host="${SERENITY_ARCH}-pc-serenity" \
         --with-sdl-prefix="${SERENITY_INSTALL_ROOT}/usr/local" \
-        --enable-music-opus=false --enable-music-opus-shared=false \
-        --enable-music-mod-modplug=false --enable-music-mod-modplug-shared=false \
+        --enable-music-opus=false \
+        --enable-music-opus-shared=false \
+        --disable-static \
+        --enable-shared \
         EXTRA_LDFLAGS="-lgui -lgfx -lipc -lcore -lcompression"
+}
+
+post_configure() {
+    unset LIBS
 }
 
 build() {
     run make -k
-}
-
-install() {
-    run make -k DESTDIR="${SERENITY_INSTALL_ROOT}" install
-    ${CC} -shared -o ${SERENITY_INSTALL_ROOT}/usr/local/lib/libSDL2_mixer.so -Wl,-soname,libSDL2_mixer.so -Wl,--whole-archive ${SERENITY_INSTALL_ROOT}/usr/local/lib/libSDL2_mixer.a -Wl,--no-whole-archive -Wl,--no-as-needed -lvorbis -lvorbisfile
-    rm -f ${SERENITY_INSTALL_ROOT}/usr/local/lib/libSDL2_mixer.la
 }

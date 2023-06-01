@@ -71,6 +71,11 @@ The expression can take any of the following forms:
 * `-w <file>` whether the current user has write access to the file
 * `-x <file>` whether the current user has execute access to the file
 * `-e <file>` whether the file exists
+* `-g <file>` whether the file exists and has the set-group-ID bit set
+* `-G <file>` whether the file exists and is owned by the effective group ID
+* `-k <file>` whether the file exists and has the sticky bit set
+* `-O <file>` whether the file exists and is owned by the effective user ID
+* `-u <file>` whether the file exists and has the set-user-ID bit set
 
 
 Except for `-h/-L`, all file checks dereference symbolic links.
@@ -93,4 +98,4 @@ $ /bin/test \( 10 -gt 20 \) -o \( ! 10 -ne 10 \) && echo "magic numbers!"
 
 ## See Also
 
-* [`find`(1)](find.md)
+* [`find`(1)](help://man/1/find)

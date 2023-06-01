@@ -23,13 +23,13 @@ public:
     size_t amount_clean() const;
 
     int release_all_clean_pages();
+    int try_release_clean_pages(int page_amount);
 
     u32 writable_mappings() const;
-    u32 executable_mappings() const;
 
 protected:
-    explicit InodeVMObject(Inode&, size_t);
-    explicit InodeVMObject(InodeVMObject const&);
+    explicit InodeVMObject(Inode&, FixedArray<RefPtr<PhysicalPage>>&&, Bitmap dirty_pages);
+    explicit InodeVMObject(InodeVMObject const&, FixedArray<RefPtr<PhysicalPage>>&&, Bitmap dirty_pages);
 
     InodeVMObject& operator=(InodeVMObject const&) = delete;
     InodeVMObject& operator=(InodeVMObject&&) = delete;
@@ -37,7 +37,7 @@ protected:
 
     virtual bool is_inode() const final { return true; }
 
-    NonnullRefPtr<Inode> m_inode;
+    NonnullRefPtr<Inode> const m_inode;
     Bitmap m_dirty_pages;
 };
 

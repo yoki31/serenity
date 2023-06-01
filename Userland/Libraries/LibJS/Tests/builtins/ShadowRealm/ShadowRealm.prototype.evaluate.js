@@ -46,6 +46,37 @@ describe("normal behavior", () => {
         expect(typeof wrappedFunction).toBe("function");
         expect(Object.getPrototypeOf(wrappedFunction)).toBe(Function.prototype);
 
+        expect(shadowRealm.evaluate("(function () {})").name).toBe("");
+        expect(shadowRealm.evaluate("(function foo() {})").name).toBe("foo");
+        expect(shadowRealm.evaluate("(function () {})")).toHaveLength(0);
+        expect(shadowRealm.evaluate("(function (foo, bar) {})")).toHaveLength(2);
+        expect(
+            shadowRealm.evaluate(
+                "Object.defineProperty(function () {}, 'length', { get() { return -Infinity } })"
+            )
+        ).toHaveLength(0);
+        expect(
+            shadowRealm.evaluate(
+                "Object.defineProperty(function () {}, 'length', { get() { return Infinity } })"
+            )
+        ).toHaveLength(Infinity);
+
+        for (const property of ["name", "length"]) {
+            expect(() => {
+                shadowRealm.evaluate(
+                    `
+                    function foo() {}
+                    Object.defineProperty(foo, "${property}", {
+                        get() { throw Error(); }
+                    });
+                    `
+                );
+            }).toThrowWithMessage(
+                TypeError,
+                "Trying to copy target name and length did not complete normally"
+            );
+        }
+
         expect(() => {
             shadowRealm.evaluate("(function () { throw Error(); })")();
         }).toThrowWithMessage(
@@ -98,5 +129,21 @@ describe("errors", () => {
         expect(() => {
             shadowRealm.evaluate("(() => { throw 42; })()");
         }).toThrowWithMessage(TypeError, "The evaluated script did not complete normally");
+    });
+
+    test("TypeError from revoked proxy is associated to caller realm", () => {
+        const shadowRealm = new ShadowRealm();
+        shadowRealm.evaluate("p = Proxy.revocable(() => {}, {}); undefined");
+        const proxy = shadowRealm.evaluate("p.proxy");
+        const revoke = shadowRealm.evaluate("p.revoke");
+        const ShadowRealmTypeError = shadowRealm.evaluate("TypeError");
+        revoke();
+        try {
+            proxy();
+            expect.fail();
+        } catch (e) {
+            expect(e.constructor).toBe(TypeError);
+            expect(e.constructor).not.toBe(ShadowRealmTypeError);
+        }
     });
 });

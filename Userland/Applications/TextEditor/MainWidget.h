@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -15,7 +16,7 @@
 #include <LibGUI/TextEditor.h>
 #include <LibGUI/Widget.h>
 #include <LibGUI/Window.h>
-#include <LibWeb/Forward.h>
+#include <LibWebView/Forward.h>
 
 namespace TextEditor {
 
@@ -23,9 +24,9 @@ class MainWidget final : public GUI::Widget {
     C_OBJECT(MainWidget);
 
 public:
-    virtual ~MainWidget() override;
-    bool read_file_and_close(int fd, String const& path);
-    void open_nonexistent_file(String const& path);
+    virtual ~MainWidget() override = default;
+    ErrorOr<void> read_file(String const& filename, Core::File&);
+    void open_nonexistent_file(DeprecatedString const& path);
     bool request_close();
 
     GUI::TextEditor& editor() { return *m_editor; }
@@ -40,7 +41,8 @@ public:
     void set_auto_detect_preview_mode(bool value) { m_auto_detect_preview_mode = value; }
 
     void update_title();
-    void initialize_menubar(GUI::Window&);
+    void update_statusbar();
+    ErrorOr<void> initialize_menubar(GUI::Window&);
 
 private:
     MainWidget();
@@ -48,21 +50,28 @@ private:
     void update_preview();
     void update_markdown_preview();
     void update_html_preview();
-    void update_statusbar();
 
-    Web::OutOfProcessWebView& ensure_web_view();
+    WebView::OutOfProcessWebView& ensure_web_view();
     void set_web_view_visible(bool);
 
+    virtual void drag_enter_event(GUI::DragEvent&) override;
     virtual void drop_event(GUI::DropEvent&) override;
 
+    enum class ShowMessageIfNoResults {
+        Yes = 1,
+        No = 0
+    };
+    void find_text(GUI::TextEditor::SearchDirection, ShowMessageIfNoResults);
+
     RefPtr<GUI::TextEditor> m_editor;
-    String m_path;
-    String m_name;
-    String m_extension;
+    DeprecatedString m_path;
+    DeprecatedString m_name;
+    DeprecatedString m_extension;
     RefPtr<GUI::Action> m_new_action;
     RefPtr<GUI::Action> m_open_action;
     RefPtr<GUI::Action> m_save_action;
     RefPtr<GUI::Action> m_save_as_action;
+    RefPtr<GUI::Action> m_open_folder_action;
     RefPtr<GUI::Action> m_find_replace_action;
     RefPtr<GUI::Action> m_vim_emulation_setting_action;
 
@@ -83,6 +92,8 @@ private:
     RefPtr<GUI::Toolbar> m_toolbar;
     RefPtr<GUI::ToolbarContainer> m_toolbar_container;
     RefPtr<GUI::Statusbar> m_statusbar;
+    RefPtr<GUI::Menu> m_line_column_statusbar_menu;
+    RefPtr<GUI::Menu> m_syntax_statusbar_menu;
 
     RefPtr<GUI::TextBox> m_find_textbox;
     RefPtr<GUI::TextBox> m_replace_textbox;
@@ -105,6 +116,7 @@ private:
     RefPtr<GUI::Action> m_visualize_trailing_whitespace_action;
     RefPtr<GUI::Action> m_visualize_leading_whitespace_action;
     RefPtr<GUI::Action> m_cursor_line_highlighting_action;
+    RefPtr<GUI::Action> m_relative_line_number_action;
 
     GUI::ActionGroup m_soft_tab_width_actions;
     RefPtr<GUI::Action> m_soft_tab_1_width_action;
@@ -115,16 +127,20 @@ private:
 
     GUI::ActionGroup syntax_actions;
     RefPtr<GUI::Action> m_plain_text_highlight;
+    RefPtr<GUI::Action> m_cmake_highlight;
+    RefPtr<GUI::Action> m_cmakecache_highlight;
     RefPtr<GUI::Action> m_cpp_highlight;
     RefPtr<GUI::Action> m_css_highlight;
     RefPtr<GUI::Action> m_js_highlight;
     RefPtr<GUI::Action> m_html_highlight;
+    RefPtr<GUI::Action> m_git_highlight;
     RefPtr<GUI::Action> m_gml_highlight;
     RefPtr<GUI::Action> m_ini_highlight;
+    RefPtr<GUI::Action> m_markdown_highlight;
     RefPtr<GUI::Action> m_shell_highlight;
     RefPtr<GUI::Action> m_sql_highlight;
 
-    RefPtr<Web::OutOfProcessWebView> m_page_view;
+    RefPtr<WebView::OutOfProcessWebView> m_page_view;
 
     bool m_auto_detect_preview_mode { false };
     bool m_use_regex { false };

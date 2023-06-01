@@ -4,28 +4,30 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/DOM/Window.h>
 #include <LibWeb/NavigationTiming/PerformanceTiming.h>
 
 namespace Web::NavigationTiming {
 
-PerformanceTiming::PerformanceTiming(DOM::Window& window)
-    : m_window(window)
+PerformanceTiming::PerformanceTiming(HTML::Window& window)
+    : PlatformObject(window.realm())
+    , m_window(window)
 {
 }
 
-PerformanceTiming::~PerformanceTiming()
+PerformanceTiming::~PerformanceTiming() = default;
+
+JS::ThrowCompletionOr<void> PerformanceTiming::initialize(JS::Realm& realm)
 {
+    MUST_OR_THROW_OOM(Base::initialize(realm));
+    set_prototype(&Bindings::ensure_web_prototype<Bindings::PerformanceTimingPrototype>(realm, "PerformanceTiming"));
+
+    return {};
 }
 
-void PerformanceTiming::ref()
+void PerformanceTiming::visit_edges(Cell::Visitor& visitor)
 {
-    m_window.ref();
-}
-
-void PerformanceTiming::unref()
-{
-    m_window.unref();
+    Base::visit_edges(visitor);
+    visitor.visit(m_window.ptr());
 }
 
 }

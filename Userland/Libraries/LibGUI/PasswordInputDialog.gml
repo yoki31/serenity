@@ -1,6 +1,5 @@
 @GUI::Widget {
     fill_with_background_color: true
-
     layout: @GUI::HorizontalBoxLayout {
         margins: [8]
         spacing: 8
@@ -8,26 +7,23 @@
 
     @GUI::Widget {
         shrink_to_fit: true
+        layout: @GUI::VerticalBoxLayout {}
 
-        layout: @GUI::VerticalBoxLayout {
-        }
-
-        @GUI::Label {
-            name: "key_icon_label"
+        @GUI::ImageWidget {
+            name: "key_icon"
             fixed_height: 32
             fixed_width: 32
         }
+
+        @GUI::Layout::Spacer {}
     }
 
     @GUI::Widget {
-        layout: @GUI::VerticalBoxLayout {
-        }
+        layout: @GUI::VerticalBoxLayout {}
 
         @GUI::Widget {
             fixed_height: 24
-
-            layout: @GUI::HorizontalBoxLayout {
-            }
+            layout: @GUI::HorizontalBoxLayout {}
 
             @GUI::Label {
                 text: "Server:"
@@ -44,9 +40,7 @@
 
         @GUI::Widget {
             fixed_height: 24
-
-            layout: @GUI::HorizontalBoxLayout {
-            }
+            layout: @GUI::HorizontalBoxLayout {}
 
             @GUI::Label {
                 text: "Username:"
@@ -63,9 +57,7 @@
 
         @GUI::Widget {
             fixed_height: 24
-
-            layout: @GUI::HorizontalBoxLayout {
-            }
+            layout: @GUI::HorizontalBoxLayout {}
 
             @GUI::Label {
                 text: "Password:"
@@ -78,7 +70,7 @@
             }
         }
 
-        @GUI::Widget
+        @GUI::Layout::Spacer {}
 
         @GUI::Widget {
             shrink_to_fit: true
@@ -86,19 +78,16 @@
                 spacing: 6
             }
 
-            @GUI::Widget {
-            }
+            @GUI::Layout::Spacer {}
 
-            @GUI::Button {
+            @GUI::DialogButton {
                 text: "OK"
                 name: "ok_button"
-                fixed_width: 75
             }
 
-            @GUI::Button {
+            @GUI::DialogButton {
                 text: "Cancel"
                 name: "cancel_button"
-                fixed_width: 75
             }
         }
     }

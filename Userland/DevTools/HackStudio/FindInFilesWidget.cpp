@@ -12,14 +12,14 @@
 #include <LibGUI/Button.h>
 #include <LibGUI/TableView.h>
 #include <LibGUI/TextBox.h>
-#include <LibGfx/FontDatabase.h>
+#include <LibGfx/Font/FontDatabase.h>
 
 namespace HackStudio {
 
 struct Match {
-    String filename;
+    DeprecatedString filename;
     GUI::TextRange range;
-    String text;
+    DeprecatedString text;
 };
 
 class SearchResultsModel final : public GUI::Model {
@@ -31,7 +31,7 @@ public:
         __Count
     };
 
-    explicit SearchResultsModel(const Vector<Match>&& matches)
+    explicit SearchResultsModel(Vector<Match> const&& matches)
         : m_matches(move(matches))
     {
     }
@@ -43,11 +43,11 @@ public:
     {
         switch (column) {
         case Column::Filename:
-            return "Filename";
+            return "Filename"_string.release_value_but_fixme_should_propagate_errors();
         case Column::Location:
-            return "#";
+            return "#"_short_string;
         case Column::MatchedText:
-            return "Text";
+            return "Text"_short_string;
         default:
             VERIFY_NOT_REACHED();
         }
@@ -105,7 +105,7 @@ static RefPtr<SearchResultsModel> find_in_files(StringView text)
             builder.append(file.document().text_in_range(range));
             builder.append(0x02);
             builder.append(right_part);
-            matches.append({ file.name(), range, builder.to_string() });
+            matches.append({ file.name(), range, builder.to_deprecated_string() });
         }
     });
 
@@ -118,12 +118,12 @@ FindInFilesWidget::FindInFilesWidget()
 
     auto& top_container = add<Widget>();
     top_container.set_layout<GUI::HorizontalBoxLayout>();
-    top_container.set_fixed_height(20);
+    top_container.set_fixed_height(22);
 
     m_textbox = top_container.add<GUI::TextBox>();
 
-    m_button = top_container.add<GUI::Button>("Find in files");
-    m_button->set_fixed_width(100);
+    m_button = top_container.add<GUI::Button>("Find"_string.release_value_but_fixme_should_propagate_errors());
+    m_button->set_fixed_width(50);
 
     m_result_view = add<GUI::TableView>();
 

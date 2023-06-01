@@ -12,22 +12,8 @@
 
 namespace Kernel {
 
-File::File()
-{
-}
-
-File::~File()
-{
-}
-
-bool File::unref() const
-{
-    if (deref_base())
-        return false;
-    const_cast<File&>(*this).before_removing();
-    delete this;
-    return true;
-}
+File::File() = default;
+File::~File() = default;
 
 ErrorOr<NonnullRefPtr<OpenFileDescription>> File::open(int options)
 {
@@ -49,7 +35,7 @@ ErrorOr<void> File::ioctl(OpenFileDescription&, unsigned, Userspace<void*>)
     return ENOTTY;
 }
 
-ErrorOr<Memory::Region*> File::mmap(Process&, OpenFileDescription&, Memory::VirtualRange const&, u64, int, bool)
+ErrorOr<NonnullLockRefPtr<Memory::VMObject>> File::vmobject_for_mmap(Process&, Memory::VirtualRange const&, u64&, bool)
 {
     return ENODEV;
 }

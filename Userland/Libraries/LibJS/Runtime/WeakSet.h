@@ -19,25 +19,19 @@ class WeakSet final
     JS_OBJECT(WeakSet, Object);
 
 public:
-    static WeakSet* create(GlobalObject&);
+    static NonnullGCPtr<WeakSet> create(Realm&);
 
-    explicit WeakSet(Object& prototype);
-    virtual ~WeakSet() override;
+    virtual ~WeakSet() override = default;
 
-    HashTable<Cell*> const& values() const { return m_values; };
-    HashTable<Cell*>& values() { return m_values; };
+    HashTable<GCPtr<Cell>> const& values() const { return m_values; };
+    HashTable<GCPtr<Cell>>& values() { return m_values; };
 
     virtual void remove_dead_cells(Badge<Heap>) override;
 
 private:
-#ifdef JS_TRACK_ZOMBIE_CELLS
-    virtual void did_become_zombie() override
-    {
-        deregister();
-    }
-#endif
+    explicit WeakSet(Object& prototype);
 
-    HashTable<Cell*> m_values; // This stores Cell pointers instead of Object pointers to aide with sweeping
+    HashTable<GCPtr<Cell>> m_values; // This stores Cell pointers instead of Object pointers to aide with sweeping
 };
 
 }

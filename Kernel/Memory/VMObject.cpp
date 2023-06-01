@@ -10,21 +10,25 @@
 
 namespace Kernel::Memory {
 
-static Singleton<SpinlockProtected<VMObject::AllInstancesList>> s_all_instances;
+static Singleton<SpinlockProtected<VMObject::AllInstancesList, LockRank::None>> s_all_instances;
 
-SpinlockProtected<VMObject::AllInstancesList>& VMObject::all_instances()
+SpinlockProtected<VMObject::AllInstancesList, LockRank::None>& VMObject::all_instances()
 {
     return s_all_instances;
 }
 
-VMObject::VMObject(VMObject const& other)
-    : m_physical_pages(other.m_physical_pages)
+ErrorOr<FixedArray<RefPtr<PhysicalPage>>> VMObject::try_clone_physical_pages() const
 {
-    all_instances().with([&](auto& list) { list.append(*this); });
+    return m_physical_pages.clone();
 }
 
-VMObject::VMObject(size_t size)
-    : m_physical_pages(ceil_div(size, static_cast<size_t>(PAGE_SIZE)))
+ErrorOr<FixedArray<RefPtr<PhysicalPage>>> VMObject::try_create_physical_pages(size_t size)
+{
+    return FixedArray<RefPtr<PhysicalPage>>::create(ceil_div(size, static_cast<size_t>(PAGE_SIZE)));
+}
+
+VMObject::VMObject(FixedArray<RefPtr<PhysicalPage>>&& new_physical_pages)
+    : m_physical_pages(move(new_physical_pages))
 {
     all_instances().with([&](auto& list) { list.append(*this); });
 }

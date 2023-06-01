@@ -8,31 +8,22 @@
 
 namespace JS {
 
-WeakSet* WeakSet::create(GlobalObject& global_object)
+NonnullGCPtr<WeakSet> WeakSet::create(Realm& realm)
 {
-    return global_object.heap().allocate<WeakSet>(global_object, *global_object.weak_set_prototype());
+    return realm.heap().allocate<WeakSet>(realm, realm.intrinsics().weak_set_prototype()).release_allocated_value_but_fixme_should_propagate_errors();
 }
 
 WeakSet::WeakSet(Object& prototype)
-    : Object(prototype)
+    : Object(ConstructWithPrototypeTag::Tag, prototype)
     , WeakContainer(heap())
-{
-}
-
-WeakSet::~WeakSet()
 {
 }
 
 void WeakSet::remove_dead_cells(Badge<Heap>)
 {
-    // FIXME: Do this in a single pass.
-    Vector<Cell*> to_remove;
-    for (auto* cell : m_values) {
-        if (cell->state() != Cell::State::Live)
-            to_remove.append(cell);
-    }
-    for (auto* cell : to_remove)
-        m_values.remove(cell);
+    m_values.remove_all_matching([](Cell* cell) {
+        return cell->state() != Cell::State::Live;
+    });
 }
 
 }

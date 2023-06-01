@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Max Wipfli <mail@maxwipfli.ch>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -42,6 +43,16 @@ constexpr bool is_ascii_alpha(u32 code_point)
 constexpr bool is_ascii_alphanumeric(u32 code_point)
 {
     return is_ascii_alpha(code_point) || is_ascii_digit(code_point);
+}
+
+constexpr bool is_ascii_binary_digit(u32 code_point)
+{
+    return code_point == '0' || code_point == '1';
+}
+
+constexpr bool is_ascii_octal_digit(u32 code_point)
+{
+    return code_point >= '0' && code_point <= '7';
 }
 
 constexpr bool is_ascii_hex_digit(u32 code_point)
@@ -152,18 +163,20 @@ constexpr u32 parse_ascii_base36_digit(u32 code_point)
     VERIFY_NOT_REACHED();
 }
 
-static constexpr Array<char, 36> base36_map = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z' };
 constexpr u32 to_ascii_base36_digit(u32 digit)
 {
-    VERIFY(digit < 36);
+    constexpr Array<char, 36> base36_map = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z' };
+    VERIFY(digit < base36_map.size());
     return base36_map[digit];
 }
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::is_ascii;
 using AK::is_ascii_alpha;
 using AK::is_ascii_alphanumeric;
+using AK::is_ascii_binary_digit;
 using AK::is_ascii_blank;
 using AK::is_ascii_c0_control;
 using AK::is_ascii_control;
@@ -171,6 +184,7 @@ using AK::is_ascii_digit;
 using AK::is_ascii_graphical;
 using AK::is_ascii_hex_digit;
 using AK::is_ascii_lower_alpha;
+using AK::is_ascii_octal_digit;
 using AK::is_ascii_printable;
 using AK::is_ascii_punctuation;
 using AK::is_ascii_space;
@@ -186,3 +200,4 @@ using AK::parse_ascii_hex_digit;
 using AK::to_ascii_base36_digit;
 using AK::to_ascii_lowercase;
 using AK::to_ascii_uppercase;
+#endif

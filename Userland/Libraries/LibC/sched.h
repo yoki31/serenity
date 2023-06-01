@@ -6,16 +6,13 @@
 
 #pragma once
 
+#include <Kernel/API/POSIX/sched.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
 
 __BEGIN_DECLS
 
-int sched_yield();
-
-struct sched_param {
-    int sched_priority;
-};
+int sched_yield(void);
 
 #define SCHED_FIFO 0
 #define SCHED_RR 1

@@ -10,9 +10,11 @@ set(SOURCES
     Calculator.cpp
     CalculatorWidget.cpp
     Keypad.cpp
-    KeypadValue.cpp
+)
+
+set(GENERATED_SOURCES
     CalculatorGML.h
 )
 
 serenity_app(Calculator ICON app-calculator)
-target_link_libraries(Calculator LibGUI LibMain)
+target_link_libraries(Calculator PRIVATE LibCore LibCrypto LibGfx LibGUI LibMain)

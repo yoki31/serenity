@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, the SerenityOS developers.
+ * Copyright (c) 2020-2022, the SerenityOS developers.
  * Copyright (c) 2021, Idan Horowitz <idan.horowitz@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -7,9 +7,13 @@
 
 #include <LibCompress/Gzip.h>
 
+#include <AK/BitStream.h>
+#include <AK/DeprecatedString.h>
 #include <AK/MemoryStream.h>
-#include <AK/String.h>
 #include <LibCore/DateTime.h>
+#include <LibCore/File.h>
+#include <LibCore/MappedFile.h>
+#include <LibCore/System.h>
 
 namespace Compress {
 
@@ -38,8 +42,20 @@ bool BlockHeader::supported_by_implementation() const
     return true;
 }
 
-GzipDecompressor::GzipDecompressor(InputStream& stream)
-    : m_input_stream(stream)
+ErrorOr<NonnullOwnPtr<GzipDecompressor::Member>> GzipDecompressor::Member::construct(BlockHeader header, LittleEndianInputBitStream& stream)
+{
+    auto deflate_stream = TRY(DeflateDecompressor::construct(MaybeOwned<LittleEndianInputBitStream>(stream)));
+    return TRY(adopt_nonnull_own_or_enomem(new (nothrow) Member(header, move(deflate_stream))));
+}
+
+GzipDecompressor::Member::Member(BlockHeader header, NonnullOwnPtr<DeflateDecompressor> stream)
+    : m_header(header)
+    , m_stream(move(stream))
+{
+}
+
+GzipDecompressor::GzipDecompressor(NonnullOwnPtr<Stream> stream)
+    : m_input_stream(make<LittleEndianInputBitStream>(move(stream)))
 {
 }
 
@@ -48,57 +64,45 @@ GzipDecompressor::~GzipDecompressor()
     m_current_member.clear();
 }
 
-// FIXME: Again, there are surely a ton of bugs because the code doesn't check for read errors.
-size_t GzipDecompressor::read(Bytes bytes)
+ErrorOr<Bytes> GzipDecompressor::read_some(Bytes bytes)
 {
     size_t total_read = 0;
     while (total_read < bytes.size()) {
-        if (has_any_error() || m_eof)
+        if (is_eof())
             break;
 
         auto slice = bytes.slice(total_read);
 
-        if (m_current_member.has_value()) {
-            size_t nread = current_member().m_stream.read(slice);
-            current_member().m_checksum.update(slice.trim(nread));
-            current_member().m_nread += nread;
+        if (m_current_member) {
+            auto current_slice = TRY(current_member().m_stream->read_some(slice));
+            current_member().m_checksum.update(current_slice);
+            current_member().m_nread += current_slice.size();
 
-            if (current_member().m_stream.handle_any_error()) {
-                set_fatal_error();
-                break;
-            }
+            if (current_slice.size() < slice.size()) {
+                u32 crc32 = TRY(m_input_stream->read_value<LittleEndian<u32>>());
+                u32 input_size = TRY(m_input_stream->read_value<LittleEndian<u32>>());
 
-            if (nread < slice.size()) {
-                LittleEndian<u32> crc32, input_size;
-                m_input_stream >> crc32 >> input_size;
+                if (crc32 != current_member().m_checksum.digest())
+                    return Error::from_string_literal("Stored CRC32 does not match the calculated CRC32 of the current member");
 
-                if (crc32 != current_member().m_checksum.digest()) {
-                    // FIXME: Somehow the checksum is incorrect?
-
-                    set_fatal_error();
-                    break;
-                }
-
-                if (input_size != current_member().m_nread) {
-                    set_fatal_error();
-                    break;
-                }
+                if (input_size != current_member().m_nread)
+                    return Error::from_string_literal("Input size does not match the number of read bytes");
 
                 m_current_member.clear();
 
-                total_read += nread;
+                total_read += current_slice.size();
                 continue;
             }
 
-            total_read += nread;
+            total_read += current_slice.size();
             continue;
         } else {
-            m_partial_header_offset += m_input_stream.read(Bytes { m_partial_header, sizeof(BlockHeader) }.slice(m_partial_header_offset));
+            auto current_partial_header_slice = Bytes { m_partial_header, sizeof(BlockHeader) }.slice(m_partial_header_offset);
+            auto current_partial_header_data = TRY(m_input_stream->read_some(current_partial_header_slice));
+            m_partial_header_offset += current_partial_header_data.size();
 
-            if (m_input_stream.handle_any_error() || m_input_stream.unreliable_eof()) {
-                m_eof = true;
+            if (is_eof())
                 break;
-            }
 
             if (m_partial_header_offset < sizeof(BlockHeader)) {
                 break; // partial header read
@@ -107,129 +111,111 @@ size_t GzipDecompressor::read(Bytes bytes)
 
             BlockHeader header = *(reinterpret_cast<BlockHeader*>(m_partial_header));
 
-            if (!header.valid_magic_number() || !header.supported_by_implementation()) {
-                set_fatal_error();
-                break;
-            }
+            if (!header.valid_magic_number())
+                return Error::from_string_literal("Header does not have a valid magic number");
+
+            if (!header.supported_by_implementation())
+                return Error::from_string_literal("Header is not supported by implementation");
 
             if (header.flags & Flags::FEXTRA) {
-                LittleEndian<u16> subfield_id, length;
-                m_input_stream >> subfield_id >> length;
-                m_input_stream.discard_or_error(length);
+                u16 subfield_id = TRY(m_input_stream->read_value<LittleEndian<u16>>());
+                u16 length = TRY(m_input_stream->read_value<LittleEndian<u16>>());
+                TRY(m_input_stream->discard(length));
+                (void)subfield_id;
             }
 
-            auto discard_string = [&]() {
+            auto discard_string = [&]() -> ErrorOr<void> {
                 char next_char;
                 do {
-                    m_input_stream >> next_char;
-                    if (m_input_stream.has_any_error()) {
-                        set_fatal_error();
-                        break;
-                    }
+                    next_char = TRY(m_input_stream->read_value<char>());
                 } while (next_char);
+
+                return {};
             };
 
-            if (header.flags & Flags::FNAME) {
-                discard_string();
-                if (has_any_error())
-                    break;
-            }
+            if (header.flags & Flags::FNAME)
+                TRY(discard_string());
 
-            if (header.flags & Flags::FCOMMENT) {
-                discard_string();
-                if (has_any_error())
-                    break;
-            }
+            if (header.flags & Flags::FCOMMENT)
+                TRY(discard_string());
 
             if (header.flags & Flags::FHCRC) {
-                LittleEndian<u16> crc16;
-                m_input_stream >> crc16;
+                u16 crc = TRY(m_input_stream->read_value<LittleEndian<u16>>());
                 // FIXME: we should probably verify this instead of just assuming it matches
+                (void)crc;
             }
 
-            m_current_member.emplace(header, m_input_stream);
+            m_current_member = TRY(Member::construct(header, *m_input_stream));
             continue;
         }
     }
-    return total_read;
+    return bytes.slice(0, total_read);
 }
 
-Optional<String> GzipDecompressor::describe_header(ReadonlyBytes bytes)
+Optional<DeprecatedString> GzipDecompressor::describe_header(ReadonlyBytes bytes)
 {
     if (bytes.size() < sizeof(BlockHeader))
         return {};
 
-    auto& header = *(reinterpret_cast<const BlockHeader*>(bytes.data()));
+    auto& header = *(reinterpret_cast<BlockHeader const*>(bytes.data()));
     if (!header.valid_magic_number() || !header.supported_by_implementation())
         return {};
 
-    LittleEndian<u32> original_size = *reinterpret_cast<const u32*>(bytes.offset(bytes.size() - sizeof(u32)));
-    return String::formatted("last modified: {}, original size {}", Core::DateTime::from_timestamp(header.modification_time).to_string(), (u32)original_size);
+    LittleEndian<u32> original_size = *reinterpret_cast<u32 const*>(bytes.offset(bytes.size() - sizeof(u32)));
+    return DeprecatedString::formatted("last modified: {}, original size {}", Core::DateTime::from_timestamp(header.modification_time).to_deprecated_string(), (u32)original_size);
 }
 
-bool GzipDecompressor::read_or_error(Bytes bytes)
+ErrorOr<ByteBuffer> GzipDecompressor::decompress_all(ReadonlyBytes bytes)
 {
-    if (read(bytes) < bytes.size()) {
-        set_fatal_error();
-        return false;
+    auto memory_stream = TRY(try_make<FixedMemoryStream>(bytes));
+    auto gzip_stream = make<GzipDecompressor>(move(memory_stream));
+    AllocatingMemoryStream output_stream;
+
+    auto buffer = TRY(ByteBuffer::create_uninitialized(4096));
+    while (!gzip_stream->is_eof()) {
+        auto const data = TRY(gzip_stream->read_some(buffer));
+        TRY(output_stream.write_until_depleted(data));
     }
 
-    return true;
+    auto output_buffer = TRY(ByteBuffer::create_uninitialized(output_stream.used_buffer_size()));
+    TRY(output_stream.read_until_filled(output_buffer));
+    return output_buffer;
 }
 
-bool GzipDecompressor::discard_or_error(size_t count)
+ErrorOr<void> GzipDecompressor::decompress_file(StringView input_filename, NonnullOwnPtr<Stream> output_stream)
 {
-    u8 buffer[4096];
+    auto input_file = TRY(Core::File::open(input_filename, Core::File::OpenMode::Read));
+    auto input_stream = TRY(Core::InputBufferedFile::create(move(input_file), 256 * KiB));
 
-    size_t ndiscarded = 0;
-    while (ndiscarded < count) {
-        if (unreliable_eof()) {
-            set_fatal_error();
-            return false;
-        }
+    auto gzip_stream = GzipDecompressor { move(input_stream) };
+    auto buffer = TRY(ByteBuffer::create_uninitialized(256 * KiB));
 
-        ndiscarded += read({ buffer, min<size_t>(count - ndiscarded, sizeof(buffer)) });
+    while (!gzip_stream.is_eof()) {
+        auto span = TRY(gzip_stream.read_some(buffer));
+        TRY(output_stream->write_until_depleted(span));
     }
 
-    return true;
+    return {};
 }
 
-Optional<ByteBuffer> GzipDecompressor::decompress_all(ReadonlyBytes bytes)
+bool GzipDecompressor::is_eof() const { return m_input_stream->is_eof(); }
+
+ErrorOr<size_t> GzipDecompressor::write_some(ReadonlyBytes)
 {
-    InputMemoryStream memory_stream { bytes };
-    GzipDecompressor gzip_stream { memory_stream };
-    DuplexMemoryStream output_stream;
-
-    u8 buffer[4096];
-    while (!gzip_stream.has_any_error() && !gzip_stream.unreliable_eof()) {
-        const auto nread = gzip_stream.read({ buffer, sizeof(buffer) });
-        output_stream.write_or_error({ buffer, nread });
-    }
-
-    if (gzip_stream.handle_any_error())
-        return {};
-
-    return output_stream.copy_into_contiguous_buffer();
+    return Error::from_errno(EBADF);
 }
 
-bool GzipDecompressor::unreliable_eof() const { return m_eof; }
-
-bool GzipDecompressor::handle_any_error()
-{
-    bool handled_errors = m_input_stream.handle_any_error();
-    return Stream::handle_any_error() || handled_errors;
-}
-
-GzipCompressor::GzipCompressor(OutputStream& stream)
-    : m_output_stream(stream)
+GzipCompressor::GzipCompressor(MaybeOwned<Stream> stream)
+    : m_output_stream(move(stream))
 {
 }
 
-GzipCompressor::~GzipCompressor()
+ErrorOr<Bytes> GzipCompressor::read_some(Bytes)
 {
+    return Error::from_errno(EBADF);
 }
 
-size_t GzipCompressor::write(ReadonlyBytes bytes)
+ErrorOr<size_t> GzipCompressor::write_some(ReadonlyBytes bytes)
 {
     BlockHeader header;
     header.identification_1 = 0x1f;
@@ -239,39 +225,59 @@ size_t GzipCompressor::write(ReadonlyBytes bytes)
     header.modification_time = 0;
     header.extra_flags = 3;      // DEFLATE sets 2 for maximum compression and 4 for minimum compression
     header.operating_system = 3; // unix
-    m_output_stream << Bytes { &header, sizeof(header) };
-    DeflateCompressor compressed_stream { m_output_stream };
-    VERIFY(compressed_stream.write_or_error(bytes));
-    compressed_stream.final_flush();
+    TRY(m_output_stream->write_until_depleted({ &header, sizeof(header) }));
+    auto compressed_stream = TRY(DeflateCompressor::construct(MaybeOwned(*m_output_stream)));
+    TRY(compressed_stream->write_until_depleted(bytes));
+    TRY(compressed_stream->final_flush());
     Crypto::Checksum::CRC32 crc32;
     crc32.update(bytes);
-    LittleEndian<u32> digest = crc32.digest();
-    LittleEndian<u32> size = bytes.size();
-    m_output_stream << digest << size;
+    TRY(m_output_stream->write_value<LittleEndian<u32>>(crc32.digest()));
+    TRY(m_output_stream->write_value<LittleEndian<u32>>(bytes.size()));
     return bytes.size();
 }
 
-bool GzipCompressor::write_or_error(ReadonlyBytes bytes)
+bool GzipCompressor::is_eof() const
 {
-    if (write(bytes) < bytes.size()) {
-        set_fatal_error();
-        return false;
-    }
-
     return true;
 }
 
-Optional<ByteBuffer> GzipCompressor::compress_all(ReadonlyBytes bytes)
+bool GzipCompressor::is_open() const
 {
-    DuplexMemoryStream output_stream;
-    GzipCompressor gzip_stream { output_stream };
+    return m_output_stream->is_open();
+}
 
-    gzip_stream.write_or_error(bytes);
+void GzipCompressor::close()
+{
+}
 
-    if (gzip_stream.handle_any_error())
-        return {};
+ErrorOr<ByteBuffer> GzipCompressor::compress_all(ReadonlyBytes bytes)
+{
+    auto output_stream = TRY(try_make<AllocatingMemoryStream>());
+    GzipCompressor gzip_stream { MaybeOwned<Stream>(*output_stream) };
 
-    return output_stream.copy_into_contiguous_buffer();
+    TRY(gzip_stream.write_until_depleted(bytes));
+
+    auto buffer = TRY(ByteBuffer::create_uninitialized(output_stream->used_buffer_size()));
+    TRY(output_stream->read_until_filled(buffer.bytes()));
+    return buffer;
+}
+
+ErrorOr<void> GzipCompressor::compress_file(StringView input_filename, NonnullOwnPtr<Stream> output_stream)
+{
+    // We map the whole file instead of streaming to reduce size overhead (gzip header) and increase the deflate block size (better compression)
+    // TODO: automatically fallback to buffered streaming for very large files
+    RefPtr<Core::MappedFile> file;
+    ReadonlyBytes input_bytes;
+
+    if (TRY(Core::System::stat(input_filename)).st_size > 0) {
+        file = TRY(Core::MappedFile::map(input_filename));
+        input_bytes = file->bytes();
+    }
+
+    auto output_bytes = TRY(Compress::GzipCompressor::compress_all(input_bytes));
+    TRY(output_stream->write_until_depleted(output_bytes));
+
+    return {};
 }
 
 }

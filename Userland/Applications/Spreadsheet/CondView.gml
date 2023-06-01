@@ -1,10 +1,10 @@
 @GUI::Widget {
-    layout: @GUI::VerticalBoxLayout
+    layout: @GUI::VerticalBoxLayout {}
+    preferred_height: "fit"
 
     @GUI::Widget {
-        shrink_to_fit: true
-
-        layout: @GUI::HorizontalBoxLayout
+        preferred_height: "fit"
+        layout: @GUI::HorizontalBoxLayout {}
 
         @GUI::Label {
             text: "if..."
@@ -13,16 +13,15 @@
 
         @GUI::TextEditor {
             name: "formula_editor"
-            fixed_height: 25
+            fixed_height: 32
             tooltip: "Use 'value' to refer to the current cell's value"
             font_type: "FixedWidth"
         }
     }
 
     @GUI::Widget {
-        shrink_to_fit: true
-
-        layout: @GUI::HorizontalBoxLayout
+        preferred_height: "fit"
+        layout: @GUI::HorizontalBoxLayout {}
 
         @GUI::Label {
             text: "Foreground..."
@@ -35,9 +34,8 @@
     }
 
     @GUI::Widget {
-        shrink_to_fit: true
-
-        layout: @GUI::HorizontalBoxLayout
+        preferred_height: "fit"
+        layout: @GUI::HorizontalBoxLayout {}
 
         @GUI::Label {
             text: "Background..."

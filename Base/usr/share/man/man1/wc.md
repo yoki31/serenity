@@ -1,6 +1,6 @@
 ## Name
 
-wc
+wc - word, line, character, and byte count
 
 ## Synopsis
 
@@ -8,7 +8,7 @@ wc
 $ wc [--lines] [--bytes] [--words] [file...]
 ```
 
-## Options:
+## Options
 
 * `--help`: Display help message and exit
 * `--version`: Print version
@@ -16,7 +16,7 @@ $ wc [--lines] [--bytes] [--words] [file...]
 * `-c`, `--bytes`: Output byte count
 * `-w`, `--words`: Output word count
 
-## Arguments:
+## Arguments
 
 * `file`: File to process
 

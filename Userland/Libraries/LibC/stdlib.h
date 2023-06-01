@@ -6,74 +6,74 @@
 
 #pragma once
 
+#include <bits/wchar.h>
 #include <stddef.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
-
-__attribute__((warn_unused_result)) int __generate_unique_filename(char* pattern);
 
 __BEGIN_DECLS
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
-#define MB_CUR_MAX 4
+
+__attribute__((noreturn)) void _abort(void);
 
 __attribute__((malloc)) __attribute__((alloc_size(1))) void* malloc(size_t);
 __attribute__((malloc)) __attribute__((alloc_size(1, 2))) void* calloc(size_t nmemb, size_t);
-size_t malloc_size(void*);
+size_t malloc_size(void const*);
 size_t malloc_good_size(size_t);
 void serenity_dump_malloc_stats(void);
 void free(void*);
 __attribute__((alloc_size(2))) void* realloc(void* ptr, size_t);
-__attribute__((malloc, alloc_size(1), alloc_align(2))) void* _aligned_malloc(size_t size, size_t alignment);
-void _aligned_free(void* memblock);
-char* getenv(const char* name);
-char* secure_getenv(const char* name);
+char* getenv(char const* name);
+char* secure_getenv(char const* name);
 int putenv(char*);
-int unsetenv(const char*);
+int serenity_putenv(char const* new_var, size_t length);
+int unsetenv(char const*);
 int clearenv(void);
-int setenv(const char* name, const char* value, int overwrite);
-const char* getprogname();
-void setprogname(const char*);
-int atoi(const char*);
-long atol(const char*);
-long long atoll(const char*);
-double strtod(const char*, char** endptr);
-long double strtold(const char*, char** endptr);
-float strtof(const char*, char** endptr);
-long strtol(const char*, char** endptr, int base);
-long long strtoll(const char*, char** endptr, int base);
-unsigned long long strtoull(const char*, char** endptr, int base);
-unsigned long strtoul(const char*, char** endptr, int base);
-void qsort(void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*));
-void qsort_r(void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*, void*), void* arg);
-int atexit(void (*function)());
+int setenv(char const* name, char const* value, int overwrite);
+char const* getprogname(void);
+void setprogname(char const*);
+int atoi(char const*);
+long atol(char const*);
+long long atoll(char const*);
+double strtod(char const*, char** endptr);
+long double strtold(char const*, char** endptr);
+float strtof(char const*, char** endptr);
+long strtol(char const*, char** endptr, int base);
+long long strtoll(char const*, char** endptr, int base);
+unsigned long long strtoull(char const*, char** endptr, int base);
+unsigned long strtoul(char const*, char** endptr, int base);
+void qsort(void* base, size_t nmemb, size_t size, int (*compar)(void const*, void const*));
+void qsort_r(void* base, size_t nmemb, size_t size, int (*compar)(void const*, void const*, void*), void* arg);
+int atexit(void (*function)(void));
 __attribute__((noreturn)) void exit(int status);
-__attribute__((noreturn)) void abort();
+__attribute__((noreturn)) void abort(void);
 char* ptsname(int fd);
 int ptsname_r(int fd, char* buffer, size_t);
 int abs(int);
 long labs(long);
 long long int llabs(long long int);
-double atof(const char*);
-int system(const char* command);
+double atof(char const*);
+int system(char const* command);
 char* mktemp(char*);
 int mkstemp(char*);
+int mkstemps(char*, int);
 char* mkdtemp(char*);
-void* bsearch(const void* key, const void* base, size_t nmemb, size_t size, int (*compar)(const void*, const void*));
+void* bsearch(void const* key, void const* base, size_t nmemb, size_t size, int (*compar)(void const*, void const*));
 int mblen(char const*, size_t);
-size_t mbstowcs(wchar_t*, const char*, size_t);
-int mbtowc(wchar_t*, const char*, size_t);
+size_t mbstowcs(wchar_t*, char const*, size_t);
+int mbtowc(wchar_t*, char const*, size_t);
 int wctomb(char*, wchar_t);
-size_t wcstombs(char*, const wchar_t*, size_t);
-char* realpath(const char* pathname, char* buffer);
+size_t wcstombs(char*, wchar_t const*, size_t);
+char* realpath(char const* pathname, char* buffer);
 __attribute__((noreturn)) void _Exit(int status);
 
 #define RAND_MAX 32767
-int rand();
+int rand(void);
 void srand(unsigned seed);
 
-long int random();
+long int random(void);
 void srandom(unsigned seed);
 
 uint32_t arc4random(void);
@@ -99,5 +99,8 @@ lldiv_t lldiv(long long, long long);
 int posix_openpt(int flags);
 int grantpt(int fd);
 int unlockpt(int fd);
+
+int posix_memalign(void**, size_t alignment, size_t size);
+__attribute__((malloc, alloc_size(2), alloc_align(1))) void* aligned_alloc(size_t alignment, size_t size);
 
 __END_DECLS

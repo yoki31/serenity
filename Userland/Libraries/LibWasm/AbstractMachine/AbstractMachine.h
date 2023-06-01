@@ -11,7 +11,11 @@
 #include <AK/HashTable.h>
 #include <AK/OwnPtr.h>
 #include <AK/Result.h>
+#include <AK/StackInfo.h>
 #include <LibWasm/Types.h>
+
+// NOTE: Special case for Wasm::Result.
+#include <LibJS/Runtime/Completion.h>
 
 namespace Wasm {
 
@@ -19,22 +23,23 @@ class Configuration;
 struct Interpreter;
 
 struct InstantiationError {
-    String error { "Unknown error" };
+    DeprecatedString error { "Unknown error" };
 };
 struct LinkError {
     enum OtherErrors {
         InvalidImportedModule,
     };
-    Vector<String> missing_imports;
+    Vector<DeprecatedString> missing_imports;
     Vector<OtherErrors> other_errors;
 };
 
-TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, true, true, false, false, false, true, FunctionAddress);
-TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, true, true, false, false, false, true, ExternAddress);
-TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, true, true, false, false, false, true, TableAddress);
-TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, true, true, false, false, false, true, GlobalAddress);
-TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, true, true, false, false, false, true, ElementAddress);
-TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, true, true, false, false, false, true, MemoryAddress);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, FunctionAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, ExternAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, TableAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, GlobalAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, ElementAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, DataAddress, Arithmetic, Comparison, Increment);
+AK_TYPEDEF_DISTINCT_NUMERIC_GENERAL(u64, MemoryAddress, Arithmetic, Comparison, Increment);
 
 // FIXME: These should probably be made generic/virtual if/when we decide to do something more
 //        fancy than just a dumb interpreter.
@@ -117,15 +122,17 @@ public:
     ALWAYS_INLINE Value& operator=(Value const& value) = default;
 
     template<typename T>
-    ALWAYS_INLINE Optional<T> to()
+    ALWAYS_INLINE Optional<T> to() const
     {
         Optional<T> result;
         m_value.visit(
             [&](auto value) {
-                if constexpr (IsSame<T, decltype(value)>)
-                    result = value;
-                else if constexpr (!IsFloatingPoint<T> && IsSame<decltype(value), MakeSigned<T>>)
-                    result = value;
+                if constexpr (IsSame<T, decltype(value)> || (!IsFloatingPoint<T> && IsSame<decltype(value), MakeSigned<T>>)) {
+                    result = static_cast<T>(value);
+                } else if constexpr (!IsFloatingPoint<T> && IsConvertible<decltype(value), T>) {
+                    if (AK::is_within_range<T>(value))
+                        result = static_cast<T>(value);
+                }
             },
             [&](Reference const& value) {
                 if constexpr (IsSame<T, Reference>) {
@@ -167,7 +174,36 @@ private:
 };
 
 struct Trap {
-    String reason;
+    DeprecatedString reason;
+};
+
+// A variant of Result that does not include external reasons for error (JS::Completion, for now).
+class PureResult {
+public:
+    explicit PureResult(Vector<Value> values)
+        : m_result(move(values))
+    {
+    }
+
+    PureResult(Trap trap)
+        : m_result(move(trap))
+    {
+    }
+
+    auto is_trap() const { return m_result.has<Trap>(); }
+    auto& values() const { return m_result.get<Vector<Value>>(); }
+    auto& values() { return m_result.get<Vector<Value>>(); }
+    auto& trap() const { return m_result.get<Trap>(); }
+    auto& trap() { return m_result.get<Trap>(); }
+
+private:
+    friend class Result;
+    explicit PureResult(Variant<Vector<Value>, Trap>&& result)
+        : m_result(move(result))
+    {
+    }
+
+    Variant<Vector<Value>, Trap> m_result;
 };
 
 class Result {
@@ -182,21 +218,41 @@ public:
     {
     }
 
+    Result(JS::Completion completion)
+        : m_result(move(completion))
+    {
+        VERIFY(m_result.get<JS::Completion>().is_abrupt());
+    }
+
+    Result(PureResult&& result)
+        : m_result(result.m_result.downcast<decltype(m_result)>())
+    {
+    }
+
     auto is_trap() const { return m_result.has<Trap>(); }
+    auto is_completion() const { return m_result.has<JS::Completion>(); }
     auto& values() const { return m_result.get<Vector<Value>>(); }
     auto& values() { return m_result.get<Vector<Value>>(); }
     auto& trap() const { return m_result.get<Trap>(); }
     auto& trap() { return m_result.get<Trap>(); }
+    auto& completion() { return m_result.get<JS::Completion>(); }
+    auto& completion() const { return m_result.get<JS::Completion>(); }
+
+    PureResult assert_wasm_result() &&
+    {
+        VERIFY(!is_completion());
+        return PureResult(move(m_result).downcast<Vector<Value>, Trap>());
+    }
 
 private:
-    Variant<Vector<Value>, Trap> m_result;
+    Variant<Vector<Value>, Trap, JS::Completion> m_result;
 };
 
 using ExternValue = Variant<FunctionAddress, TableAddress, MemoryAddress, GlobalAddress>;
 
 class ExportInstance {
 public:
-    explicit ExportInstance(String name, ExternValue value)
+    explicit ExportInstance(DeprecatedString name, ExternValue value)
         : m_name(move(name))
         , m_value(move(value))
     {
@@ -206,7 +262,7 @@ public:
     auto& value() const { return m_value; }
 
 private:
-    String m_name;
+    DeprecatedString m_name;
     ExternValue m_value;
 };
 
@@ -214,12 +270,14 @@ class ModuleInstance {
 public:
     explicit ModuleInstance(
         Vector<FunctionType> types, Vector<FunctionAddress> function_addresses, Vector<TableAddress> table_addresses,
-        Vector<MemoryAddress> memory_addresses, Vector<GlobalAddress> global_addresses, Vector<ExportInstance> exports)
+        Vector<MemoryAddress> memory_addresses, Vector<GlobalAddress> global_addresses, Vector<DataAddress> data_addresses,
+        Vector<ExportInstance> exports)
         : m_types(move(types))
         , m_functions(move(function_addresses))
         , m_tables(move(table_addresses))
         , m_memories(move(memory_addresses))
         , m_globals(move(global_addresses))
+        , m_datas(move(data_addresses))
         , m_exports(move(exports))
     {
     }
@@ -232,6 +290,7 @@ public:
     auto& memories() const { return m_memories; }
     auto& globals() const { return m_globals; }
     auto& elements() const { return m_elements; }
+    auto& datas() const { return m_datas; }
     auto& exports() const { return m_exports; }
 
     auto& types() { return m_types; }
@@ -240,6 +299,7 @@ public:
     auto& memories() { return m_memories; }
     auto& globals() { return m_globals; }
     auto& elements() { return m_elements; }
+    auto& datas() { return m_datas; }
     auto& exports() { return m_exports; }
 
 private:
@@ -249,6 +309,7 @@ private:
     Vector<MemoryAddress> m_memories;
     Vector<GlobalAddress> m_globals;
     Vector<ElementAddress> m_elements;
+    Vector<DataAddress> m_datas;
     Vector<ExportInstance> m_exports;
 };
 
@@ -325,10 +386,14 @@ private:
 
 class MemoryInstance {
 public:
-    explicit MemoryInstance(MemoryType const& type)
-        : m_type(type)
+    static ErrorOr<MemoryInstance> create(MemoryType const& type)
     {
-        grow(m_type.limits().min() * Constants::page_size);
+        MemoryInstance instance { type };
+
+        if (!instance.grow(type.limits().min() * Constants::page_size))
+            return Error::from_string_literal("Failed to grow to requested size");
+
+        return { move(instance) };
     }
 
     auto& type() const { return m_type; }
@@ -336,11 +401,16 @@ public:
     auto& data() const { return m_data; }
     auto& data() { return m_data; }
 
-    bool grow(size_t size_to_grow)
+    enum class InhibitGrowCallback {
+        No,
+        Yes,
+    };
+
+    bool grow(size_t size_to_grow, InhibitGrowCallback inhibit_callback = InhibitGrowCallback::No)
     {
         if (size_to_grow == 0)
             return true;
-        auto new_size = m_data.size() + size_to_grow;
+        u64 new_size = m_data.size() + size_to_grow;
         // Can't grow past 2^16 pages.
         if (new_size >= Constants::page_size * 65536)
             return false;
@@ -354,10 +424,23 @@ public:
         m_size = new_size;
         // The spec requires that we zero out everything on grow
         __builtin_memset(m_data.offset_pointer(previous_size), 0, size_to_grow);
+
+        // NOTE: This exists because wasm-js-api wants to execute code after a successful grow,
+        //       See [this issue](https://github.com/WebAssembly/spec/issues/1635) for more details.
+        if (inhibit_callback == InhibitGrowCallback::No && successful_grow_hook)
+            successful_grow_hook();
+
         return true;
     }
 
+    Function<void()> successful_grow_hook;
+
 private:
+    explicit MemoryInstance(MemoryType const& type)
+        : m_type(type)
+    {
+    }
+
     MemoryType const& m_type;
     size_t m_size { 0 };
     ByteBuffer m_data;
@@ -385,6 +468,22 @@ private:
     Value m_value;
 };
 
+class DataInstance {
+public:
+    explicit DataInstance(Vector<u8> data)
+        : m_data(move(data))
+    {
+    }
+
+    size_t size() const { return m_data.size(); }
+
+    Vector<u8>& data() { return m_data; }
+    Vector<u8> const& data() const { return m_data; }
+
+private:
+    Vector<u8> m_data;
+};
+
 class ElementInstance {
 public:
     explicit ElementInstance(ValueType type, Vector<Reference> references)
@@ -409,6 +508,7 @@ public:
     Optional<FunctionAddress> allocate(HostFunction&&);
     Optional<TableAddress> allocate(TableType const&);
     Optional<MemoryAddress> allocate(MemoryType const&);
+    Optional<DataAddress> allocate_data(Vector<u8>);
     Optional<GlobalAddress> allocate(GlobalType const&, Value);
     Optional<ElementAddress> allocate(ValueType const&, Vector<Reference>);
 
@@ -416,6 +516,7 @@ public:
     TableInstance* get(TableAddress);
     MemoryInstance* get(MemoryAddress);
     GlobalInstance* get(GlobalAddress);
+    DataInstance* get(DataAddress);
     ElementInstance* get(ElementAddress);
 
 private:
@@ -424,6 +525,7 @@ private:
     Vector<MemoryInstance> m_memories;
     Vector<GlobalInstance> m_globals;
     Vector<ElementInstance> m_elements;
+    Vector<DataInstance> m_datas;
 };
 
 class Label {
@@ -506,14 +608,15 @@ private:
     Optional<InstantiationError> allocate_all_initial_phase(Module const&, ModuleInstance&, Vector<ExternValue>&, Vector<Value>& global_values);
     Optional<InstantiationError> allocate_all_final_phase(Module const&, ModuleInstance&, Vector<Vector<Reference>>& elements);
     Store m_store;
+    StackInfo m_stack_info;
     bool m_should_limit_instruction_count { false };
 };
 
 class Linker {
 public:
     struct Name {
-        String module;
-        String name;
+        DeprecatedString module;
+        DeprecatedString name;
         ImportSection::Import::ImportDesc type;
     };
 

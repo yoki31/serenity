@@ -8,4 +8,4 @@ set(SOURCES
 )
 
 serenity_bin(Debugger)
-target_link_libraries(Debugger LibCore LibDebug LibX86 LibLine)
+target_link_libraries(Debugger PRIVATE LibCore LibDebug LibLine LibMain LibX86)

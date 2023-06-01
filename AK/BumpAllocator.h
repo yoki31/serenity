@@ -65,7 +65,7 @@ public:
         for_each_chunk([&](auto chunk) {
             if (!cache_filled) {
                 cache_filled = true;
-                ((ChunkHeader*)chunk)->next_chunk = 0;
+                (reinterpret_cast<ChunkHeader*>(chunk))->next_chunk = 0;
                 chunk = s_unused_allocation_cache.exchange(chunk);
                 if (!chunk)
                     return;
@@ -86,7 +86,7 @@ protected:
     {
         auto head_chunk = m_head_chunk;
         while (head_chunk) {
-            auto& chunk_header = *(ChunkHeader const*)head_chunk;
+            auto& chunk_header = *reinterpret_cast<ChunkHeader const*>(head_chunk);
             VERIFY(chunk_header.magic == chunk_magic);
             if (head_chunk == m_current_chunk)
                 VERIFY(chunk_header.next_chunk == 0);
@@ -100,13 +100,13 @@ protected:
     {
         // dbgln("Allocated {} entries in previous chunk and have {} unusable bytes", m_allocations_in_previous_chunk, m_chunk_size - m_byte_offset_into_current_chunk);
         // m_allocations_in_previous_chunk = 0;
-        void* new_chunk = (void*)s_unused_allocation_cache.exchange(0);
+        void* new_chunk = reinterpret_cast<void*>(s_unused_allocation_cache.exchange(0));
         if (!new_chunk) {
             if constexpr (use_mmap) {
-#ifdef __serenity__
+#ifdef AK_OS_SERENITY
                 new_chunk = serenity_mmap(nullptr, m_chunk_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_RANDOMIZED | MAP_PRIVATE, 0, 0, m_chunk_size, "BumpAllocator Chunk");
 #else
-                new_chunk = mmap(nullptr, m_chunk_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+                new_chunk = mmap(nullptr, m_chunk_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 #endif
                 if (new_chunk == MAP_FAILED)
                     return false;
@@ -117,24 +117,24 @@ protected:
             }
         }
 
-        auto& new_header = *(ChunkHeader*)new_chunk;
+        auto& new_header = *reinterpret_cast<ChunkHeader*>(new_chunk);
         new_header.magic = chunk_magic;
         new_header.next_chunk = 0;
         m_byte_offset_into_current_chunk = sizeof(ChunkHeader);
 
         if (!m_head_chunk) {
             VERIFY(!m_current_chunk);
-            m_head_chunk = (FlatPtr)new_chunk;
-            m_current_chunk = (FlatPtr)new_chunk;
+            m_head_chunk = reinterpret_cast<FlatPtr>(new_chunk);
+            m_current_chunk = reinterpret_cast<FlatPtr>(new_chunk);
             return true;
         }
 
         VERIFY(m_current_chunk);
-        auto& old_header = *(ChunkHeader*)m_current_chunk;
+        auto& old_header = *reinterpret_cast<ChunkHeader*>(m_current_chunk);
         VERIFY(old_header.magic == chunk_magic);
         VERIFY(old_header.next_chunk == 0);
-        old_header.next_chunk = (FlatPtr)new_chunk;
-        m_current_chunk = (FlatPtr)new_chunk;
+        old_header.next_chunk = reinterpret_cast<FlatPtr>(new_chunk);
+        m_current_chunk = reinterpret_cast<FlatPtr>(new_chunk);
         return true;
     }
 
@@ -181,11 +181,11 @@ public:
         this->for_each_chunk([&](auto chunk) {
             auto base_ptr = align_up_to(chunk + sizeof(typename Allocator::ChunkHeader), alignof(T));
             // Compute the offset of the first byte *after* this chunk:
-            FlatPtr end_offset = base_ptr + this->m_chunk_size - chunk;
-            // Compute the offset of the first byte *after* the last valid object, in case the end of the chunk does not align with the end of an object:
-            end_offset = (end_offset / sizeof(T)) * sizeof(T);
+            FlatPtr end_offset = base_ptr + this->m_chunk_size - chunk - sizeof(typename Allocator::ChunkHeader);
             if (chunk == this->m_current_chunk)
                 end_offset = this->m_byte_offset_into_current_chunk;
+            // Compute the offset of the first byte *after* the last valid object, in case the end of the chunk does not align with the end of an object:
+            end_offset = (end_offset / sizeof(T)) * sizeof(T);
             for (; base_ptr - chunk < end_offset; base_ptr += sizeof(T))
                 reinterpret_cast<T*>(base_ptr)->~T();
         });
@@ -197,5 +197,7 @@ inline Atomic<FlatPtr> BumpAllocator<use_mmap, size>::s_unused_allocation_cache 
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::BumpAllocator;
 using AK::UniformBumpAllocator;
+#endif

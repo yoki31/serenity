@@ -53,7 +53,8 @@ public:
         size_t match_length_minimum;
         Error error;
         Token error_token;
-        Vector<FlyString> capture_groups;
+        Vector<DeprecatedFlyString> capture_groups;
+        AllOptions options;
     };
 
     explicit Parser(Lexer& lexer)
@@ -71,6 +72,7 @@ public:
     Result parse(Optional<AllOptions> regex_options = {});
     bool has_error() const { return m_parser_state.error != Error::NoError; }
     Error error() const { return m_parser_state.error; }
+    AllOptions options() const { return m_parser_state.regex_options; }
 
 protected:
     virtual bool parse_internal(ByteCode&, size_t& match_length_minimum) = 0;
@@ -80,7 +82,7 @@ protected:
     ALWAYS_INLINE bool match_ordinary_characters();
     ALWAYS_INLINE Token consume();
     ALWAYS_INLINE Token consume(TokenType type, Error error);
-    ALWAYS_INLINE bool consume(String const&);
+    ALWAYS_INLINE bool consume(DeprecatedString const&);
     ALWAYS_INLINE Optional<u32> consume_escaped_code_point(bool unicode);
     ALWAYS_INLINE bool try_skip(StringView);
     ALWAYS_INLINE bool lookahead_any(StringView);
@@ -89,6 +91,8 @@ protected:
     ALWAYS_INLINE void reset();
     ALWAYS_INLINE bool done() const;
     ALWAYS_INLINE bool set_error(Error error);
+
+    size_t tell() const { return m_parser_state.current_token.position(); }
 
     struct NamedCaptureGroup {
         size_t group_index { 0 };
@@ -99,7 +103,7 @@ protected:
         Lexer& lexer;
         Token current_token;
         Error error = Error::NoError;
-        Token error_token { TokenType::Eof, 0, StringView(nullptr) };
+        Token error_token { TokenType::Eof, 0, {} };
         ByteCode bytecode;
         size_t capture_groups_count { 0 };
         size_t named_capture_groups_count { 0 };
@@ -107,7 +111,7 @@ protected:
         size_t repetition_mark_count { 0 };
         AllOptions regex_options;
         HashMap<int, size_t> capture_group_minimum_lengths;
-        HashMap<FlyString, NamedCaptureGroup> named_capture_groups;
+        HashMap<DeprecatedFlyString, NamedCaptureGroup> named_capture_groups;
 
         explicit ParserState(Lexer& lexer)
             : lexer(lexer)
@@ -170,14 +174,16 @@ private:
 };
 
 class PosixExtendedParser final : public AbstractPosixParser {
+    constexpr static auto default_options = static_cast<PosixFlags>(AllFlags::SingleLine) | static_cast<PosixFlags>(AllFlags::Internal_ConsiderNewline);
+
 public:
     explicit PosixExtendedParser(Lexer& lexer)
-        : AbstractPosixParser(lexer)
+        : AbstractPosixParser(lexer, default_options)
     {
     }
 
     PosixExtendedParser(Lexer& lexer, Optional<typename ParserTraits<PosixExtendedParser>::OptionsType> regex_options)
-        : AbstractPosixParser(lexer, regex_options.value_or({}))
+        : AbstractPosixParser(lexer, regex_options.value_or({}) | default_options.value())
     {
     }
 
@@ -195,15 +201,17 @@ private:
 };
 
 class ECMA262Parser final : public Parser {
+    constexpr static ECMAScriptOptions default_options = static_cast<ECMAScriptFlags>(AllFlags::Internal_ConsiderNewline);
+
 public:
     explicit ECMA262Parser(Lexer& lexer)
-        : Parser(lexer)
+        : Parser(lexer, default_options)
     {
         m_capture_groups_in_scope.empend();
     }
 
     ECMA262Parser(Lexer& lexer, Optional<typename ParserTraits<ECMA262Parser>::OptionsType> regex_options)
-        : Parser(lexer, regex_options.value_or({}))
+        : Parser(lexer, regex_options.value_or({}) | default_options.value())
     {
         m_should_use_browser_extended_grammar = regex_options.has_value() && regex_options->has_flag_set(ECMAScriptFlags::BrowserExtended);
         m_capture_groups_in_scope.empend();
@@ -214,13 +222,19 @@ public:
 private:
     bool parse_internal(ByteCode&, size_t&) override;
 
+    struct ParseFlags {
+        bool unicode { false };
+        bool named { false };
+        bool unicode_sets { false };
+    };
+
     enum class ReadDigitsInitialZeroState {
         Allow,
         Disallow,
     };
     StringView read_digits_as_string(ReadDigitsInitialZeroState initial_zero = ReadDigitsInitialZeroState::Allow, bool hex = false, int max_count = -1, int min_count = -1);
     Optional<unsigned> read_digits(ReadDigitsInitialZeroState initial_zero = ReadDigitsInitialZeroState::Allow, bool hex = false, int max_count = -1, int min_count = -1);
-    FlyString read_capture_group_specifier(bool take_starting_angle_bracket = false);
+    DeprecatedFlyString read_capture_group_specifier(bool take_starting_angle_bracket = false);
 
     struct Script {
         Unicode::Script script {};
@@ -229,30 +243,54 @@ private:
     using PropertyEscape = Variant<Unicode::Property, Unicode::GeneralCategory, Script, Empty>;
     Optional<PropertyEscape> read_unicode_property_escape();
 
-    bool parse_pattern(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_disjunction(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_alternative(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_term(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_assertion(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_atom(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_quantifier(ByteCode&, size_t&, bool unicode, bool named);
+    bool parse_pattern(ByteCode&, size_t&, ParseFlags);
+    bool parse_disjunction(ByteCode&, size_t&, ParseFlags);
+    bool parse_alternative(ByteCode&, size_t&, ParseFlags);
+    bool parse_term(ByteCode&, size_t&, ParseFlags);
+    bool parse_assertion(ByteCode&, size_t&, ParseFlags);
+    bool parse_atom(ByteCode&, size_t&, ParseFlags);
+    bool parse_quantifier(ByteCode&, size_t&, ParseFlags);
     bool parse_interval_quantifier(Optional<u64>& repeat_min, Optional<u64>& repeat_max);
-    bool parse_atom_escape(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_character_class(ByteCode&, size_t&, bool unicode, bool named);
-    bool parse_capture_group(ByteCode&, size_t&, bool unicode, bool named);
+    bool parse_atom_escape(ByteCode&, size_t&, ParseFlags);
+    bool parse_character_class(ByteCode&, size_t&, ParseFlags);
+    bool parse_capture_group(ByteCode&, size_t&, ParseFlags);
     Optional<CharClass> parse_character_class_escape(bool& out_inverse, bool expect_backslash = false);
-    bool parse_nonempty_class_ranges(Vector<CompareTypeAndValuePair>&, bool unicode);
+    bool parse_nonempty_class_ranges(Vector<CompareTypeAndValuePair>&, ParseFlags);
     bool parse_unicode_property_escape(PropertyEscape& property, bool& negated);
 
+    bool parse_character_escape(Vector<CompareTypeAndValuePair>&, size_t&, ParseFlags);
+
+    bool parse_class_set_expression(Vector<CompareTypeAndValuePair>&);
+    bool parse_class_union(Vector<CompareTypeAndValuePair>&);
+    bool parse_class_intersection(Vector<CompareTypeAndValuePair>&);
+    bool parse_class_subtraction(Vector<CompareTypeAndValuePair>&);
+    bool parse_class_set_range(Vector<CompareTypeAndValuePair>&);
+    bool parse_class_set_operand(Vector<CompareTypeAndValuePair>&);
+    bool parse_nested_class(Vector<CompareTypeAndValuePair>&);
+    Optional<u32> parse_class_set_character();
+
     // Used only by B.1.4, Regular Expression Patterns (Extended for use in browsers)
-    bool parse_quantifiable_assertion(ByteCode&, size_t&, bool named);
-    bool parse_extended_atom(ByteCode&, size_t&, bool named);
-    bool parse_inner_disjunction(ByteCode& bytecode_stack, size_t& length, bool unicode, bool named);
+    bool parse_quantifiable_assertion(ByteCode&, size_t&, ParseFlags);
+    bool parse_extended_atom(ByteCode&, size_t&, ParseFlags);
+    bool parse_inner_disjunction(ByteCode& bytecode_stack, size_t& length, ParseFlags);
     bool parse_invalid_braced_quantifier(); // Note: This function either parses and *fails*, or doesn't parse anything and returns false.
-    bool parse_legacy_octal_escape_sequence(ByteCode& bytecode_stack, size_t& length);
     Optional<u8> parse_legacy_octal_escape();
 
     size_t ensure_total_number_of_capturing_parenthesis();
+
+    void enter_capture_group_scope() { m_capture_groups_in_scope.empend(); }
+
+    void exit_capture_group_scope()
+    {
+        auto last = m_capture_groups_in_scope.take_last();
+        m_capture_groups_in_scope.last().extend(move(last));
+    }
+
+    void clear_all_capture_groups_in_scope(ByteCode& stack)
+    {
+        for (auto& index : m_capture_groups_in_scope.last())
+            stack.insert_bytecode_clear_capture_group(index);
+    };
 
     // ECMA-262's flavour of regex is a bit weird in that it allows backrefs to reference "future" captures, and such backrefs
     // always match the empty string. So we have to know how many capturing parenthesis there are, but we don't want to always

@@ -6,21 +6,23 @@
  */
 
 #include "Player.h"
+#include <LibAudio/FlacLoader.h>
+#include <LibFileSystem/FileSystem.h>
 
-Player::Player(Audio::ClientConnection& audio_client_connection)
+Player::Player(Audio::ConnectionToServer& audio_client_connection)
     : m_audio_client_connection(audio_client_connection)
     , m_playback_manager(audio_client_connection)
 {
     m_playback_manager.on_update = [&]() {
-        auto samples_played = m_audio_client_connection.get_played_samples();
+        auto samples_played = m_playback_manager.loader()->loaded_samples();
         auto sample_rate = m_playback_manager.loader()->sample_rate();
         float source_to_dest_ratio = static_cast<float>(sample_rate) / m_playback_manager.device_sample_rate();
         samples_played *= source_to_dest_ratio;
-        samples_played += m_playback_manager.last_seek();
 
         auto played_seconds = samples_played / sample_rate;
         time_elapsed(played_seconds);
-        sound_buffer_played(m_playback_manager.current_buffer(), m_playback_manager.device_sample_rate(), samples_played);
+        if (play_state() == PlayState::Playing)
+            sound_buffer_played(m_playback_manager.current_buffer(), m_playback_manager.device_sample_rate(), samples_played);
     };
     m_playback_manager.on_finished_playing = [&]() {
         set_play_state(PlayState::Stopped);
@@ -38,34 +40,42 @@ Player::Player(Audio::ClientConnection& audio_client_connection)
     };
 }
 
-void Player::play_file_path(String const& path)
+void Player::play_file_path(DeprecatedString const& path)
 {
     if (path.is_null())
         return;
 
-    if (!Core::File::exists(path)) {
-        audio_load_error(path, "File does not exist");
+    if (!FileSystem::exists(path)) {
+        audio_load_error(path, "File does not exist"sv);
         return;
     }
 
-    if (path.ends_with(".m3u", AK::CaseSensitivity::CaseInsensitive) || path.ends_with(".m3u8", AK::CaseSensitivity::CaseInsensitive)) {
+    if (is_playlist(path)) {
         playlist_loaded(path, m_playlist.load(path));
         return;
     }
 
-    NonnullRefPtr<Audio::Loader> loader = Audio::Loader::create(path);
-    if (loader->has_error()) {
-        audio_load_error(path, loader->error_string());
+    auto maybe_loader = Audio::Loader::create(path);
+    if (maybe_loader.is_error()) {
+        audio_load_error(path, maybe_loader.error().description);
         return;
     }
+    auto loader = maybe_loader.value();
 
     m_loaded_filename = path;
 
-    file_name_changed(path);
-    total_samples_changed(loader->total_samples());
+    // TODO: The combination of sample count, sample rate, and sample data should be properly abstracted for the source and the playback device.
+    total_samples_changed(loader->total_samples() * (static_cast<float>(loader->sample_rate()) / m_playback_manager.device_sample_rate()));
     m_playback_manager.set_loader(move(loader));
+    file_name_changed(path);
 
     play();
+}
+
+bool Player::is_playlist(DeprecatedString const& path)
+{
+    return (path.ends_with(".m3u"sv, AK::CaseSensitivity::CaseInsensitive)
+        || path.ends_with(".m3u8"sv, AK::CaseSensitivity::CaseInsensitive));
 }
 
 void Player::set_play_state(PlayState state)
@@ -90,6 +100,15 @@ void Player::set_volume(double volume)
     m_volume = clamp(volume, 0, 1.5);
     m_audio_client_connection.set_self_volume(m_volume);
     volume_changed(m_volume);
+}
+
+void Player::set_mute(bool muted)
+{
+    if (m_muted != muted) {
+        m_muted = muted;
+        m_audio_client_connection.set_self_muted(muted);
+        mute_changed(muted);
+    }
 }
 
 void Player::set_shuffle_mode(ShuffleMode mode)
@@ -125,7 +144,27 @@ void Player::stop()
     set_play_state(PlayState::Stopped);
 }
 
+void Player::mute()
+{
+    set_mute(true);
+}
+
+void Player::toggle_mute()
+{
+    set_mute(!m_muted);
+}
+
 void Player::seek(int sample)
 {
+    auto loader = m_playback_manager.loader();
+    if (loader.is_null()) {
+        return;
+    }
+    sample *= (m_playback_manager.device_sample_rate() / static_cast<float>(loader->sample_rate()));
     m_playback_manager.seek(sample);
+}
+
+Vector<Audio::PictureData> const& Player::pictures() const
+{
+    return m_playback_manager.loader()->pictures();
 }

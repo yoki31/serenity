@@ -1,48 +1,42 @@
 /*
  * Copyright (c) 2021, the SerenityOS developers.
- * Copyright (c) 2021, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2021-2022, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "MailSettingsWidget.h"
 #include <LibConfig/Client.h>
+#include <LibCore/ArgsParser.h>
+#include <LibCore/System.h>
 #include <LibGUI/Application.h>
 #include <LibGUI/Icon.h>
 #include <LibGUI/SettingsWindow.h>
-#include <unistd.h>
+#include <LibMain/Main.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath recvfd sendfd unix", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath recvfd sendfd unix"));
 
-    auto app = GUI::Application::construct(argc, argv);
+    auto app = TRY(GUI::Application::create(arguments));
 
-    Config::pledge_domains("Mail");
+    Config::pledge_domain("Mail");
 
-    if (pledge("stdio rpath recvfd sendfd", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    StringView selected_tab;
+    Core::ArgsParser args_parser;
+    args_parser.add_option(selected_tab, "Tab, only option is 'mail'", "open-tab", 't', "tab");
+    args_parser.parse(arguments);
 
-    if (unveil("/res", "r") < 0) {
-        perror("unveil");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath recvfd sendfd"));
+    TRY(Core::System::unveil("/res", "r"));
+    TRY(Core::System::unveil(nullptr, nullptr));
 
-    if (unveil(nullptr, nullptr)) {
-        perror("unveil");
-        return 1;
-    }
+    auto app_icon = GUI::Icon::default_icon("app-mail"sv);
 
-    auto app_icon = GUI::Icon::default_icon("app-mail");
-
-    auto window = GUI::SettingsWindow::construct("Mail Settings", GUI::SettingsWindow::ShowDefaultsButton::Yes);
-    window->add_tab<MailSettingsWidget>("Mail");
+    auto window = TRY(GUI::SettingsWindow::create("Mail Settings", GUI::SettingsWindow::ShowDefaultsButton::Yes));
+    (void)TRY(window->add_tab<MailSettingsWidget>("Mail"_short_string, "mail"sv));
     window->set_icon(app_icon.bitmap_for_size(16));
+    window->set_active_tab(selected_tab);
 
     window->show();
     return app->exec();

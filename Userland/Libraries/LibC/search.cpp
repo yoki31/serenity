@@ -9,7 +9,7 @@
 #include <bits/search.h>
 #include <search.h>
 
-struct search_tree_node* new_tree_node(const void* key)
+struct search_tree_node* new_tree_node(void const* key)
 {
     auto* node = static_cast<struct search_tree_node*>(malloc(sizeof(struct search_tree_node)));
 
@@ -36,7 +36,8 @@ void delete_node_recursive(struct search_tree_node* node)
 
 extern "C" {
 
-void* tsearch(const void* key, void** rootp, int (*comparator)(const void*, const void*))
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/tsearch.html
+void* tsearch(void const* key, void** rootp, int (*comparator)(void const*, void const*))
 {
     if (!rootp)
         return nullptr;
@@ -69,7 +70,8 @@ void* tsearch(const void* key, void** rootp, int (*comparator)(const void*, cons
     VERIFY_NOT_REACHED();
 }
 
-void* tfind(const void* key, void* const* rootp, int (*comparator)(const void*, const void*))
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/tfind.html
+void* tfind(void const* key, void* const* rootp, int (*comparator)(void const*, void const*))
 {
     if (!rootp)
         return nullptr;
@@ -90,13 +92,14 @@ void* tfind(const void* key, void* const* rootp, int (*comparator)(const void*, 
     return nullptr;
 }
 
-void* tdelete(const void*, void**, int (*)(const void*, const void*))
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/tdelete.html
+void* tdelete(void const*, void**, int (*)(void const*, void const*))
 {
     dbgln("FIXME: Implement tdelete()");
-    TODO();
+    return nullptr;
 }
 
-static void twalk_internal(const struct search_tree_node* node, void (*action)(const void*, VISIT, int), int depth)
+static void twalk_internal(const struct search_tree_node* node, void (*action)(void const*, VISIT, int), int depth)
 {
     if (!node)
         return;
@@ -113,7 +116,8 @@ static void twalk_internal(const struct search_tree_node* node, void (*action)(c
     action(node, endorder, depth);
 }
 
-void twalk(const void* rootp, void (*action)(const void*, VISIT, int))
+// https://pubs.opengroup.org/onlinepubs/9699919799/functions/twalk.html
+void twalk(void const* rootp, void (*action)(void const*, VISIT, int))
 {
     auto node = static_cast<const struct search_tree_node*>(rootp);
 

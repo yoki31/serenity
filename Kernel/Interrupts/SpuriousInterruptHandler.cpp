@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <Kernel/Interrupts/InterruptManagement.h>
+#include <Kernel/Arch/InterruptManagement.h>
+#include <Kernel/Arch/x86_64/Interrupts.h>
 #include <Kernel/Interrupts/SpuriousInterruptHandler.h>
 #include <Kernel/Sections.h>
 
@@ -14,6 +15,20 @@ UNMAP_AFTER_INIT void SpuriousInterruptHandler::initialize(u8 interrupt_number)
 {
     auto* handler = new SpuriousInterruptHandler(interrupt_number);
     handler->register_interrupt_handler();
+}
+
+void SpuriousInterruptHandler::initialize_for_disabled_master_pic()
+{
+    auto* handler = new SpuriousInterruptHandler(7);
+    register_disabled_interrupt_handler(7, *handler);
+    handler->enable_interrupt_vector_for_disabled_pic();
+}
+
+void SpuriousInterruptHandler::initialize_for_disabled_slave_pic()
+{
+    auto* handler = new SpuriousInterruptHandler(15);
+    register_disabled_interrupt_handler(15, *handler);
+    handler->enable_interrupt_vector_for_disabled_pic();
 }
 
 void SpuriousInterruptHandler::register_handler(GenericInterruptHandler& handler)
@@ -51,23 +66,27 @@ SpuriousInterruptHandler::SpuriousInterruptHandler(u8 irq)
 {
 }
 
-SpuriousInterruptHandler::~SpuriousInterruptHandler()
-{
-}
+SpuriousInterruptHandler::~SpuriousInterruptHandler() = default;
 
-bool SpuriousInterruptHandler::handle_interrupt(const RegisterState& state)
+bool SpuriousInterruptHandler::handle_interrupt(RegisterState const& state)
 {
     // Actually check if IRQ7 or IRQ15 are spurious, and if not, call the real handler to handle the IRQ.
     if (m_responsible_irq_controller->get_isr() & (1 << interrupt_number())) {
         m_real_irq = true; // remember that we had a real IRQ, when EOI later!
         if (m_real_handler->handle_interrupt(state)) {
-            m_real_handler->increment_invoking_counter();
+            m_real_handler->increment_call_count();
             return true;
         }
         return false;
     }
     dbgln("Spurious interrupt, vector {}", interrupt_number());
     return true;
+}
+
+void SpuriousInterruptHandler::enable_interrupt_vector_for_disabled_pic()
+{
+    m_enabled = true;
+    m_responsible_irq_controller = InterruptManagement::the().get_responsible_irq_controller(IRQControllerType::i8259, interrupt_number());
 }
 
 void SpuriousInterruptHandler::enable_interrupt_vector()
@@ -90,7 +109,7 @@ void SpuriousInterruptHandler::disable_interrupt_vector()
 StringView SpuriousInterruptHandler::controller() const
 {
     if (m_responsible_irq_controller->type() == IRQControllerType::i82093AA)
-        return "";
+        return ""sv;
     return m_responsible_irq_controller->model();
 }
 }

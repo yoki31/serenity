@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,31 +9,10 @@
 
 #include <AK/EnumBits.h>
 #include <AK/Forward.h>
+#include <AK/Stream.h>
 #include <LibCore/Object.h>
 
 namespace Core {
-
-// This is not necessarily a valid iterator in all contexts,
-// if we had concepts, this would be InputIterator, not Copyable, Movable.
-class LineIterator {
-    AK_MAKE_NONCOPYABLE(LineIterator);
-
-public:
-    explicit LineIterator(IODevice&, bool is_end = false);
-
-    bool operator==(const LineIterator& other) const { return &other == this || (at_end() && other.is_end()) || (other.at_end() && is_end()); }
-    bool is_end() const { return m_is_end; }
-    bool at_end() const;
-
-    LineIterator& operator++();
-
-    StringView operator*() const { return m_buffer; }
-
-private:
-    NonnullRefPtr<IODevice> m_device;
-    bool m_is_end { false };
-    String m_buffer;
-};
 
 enum class OpenMode : unsigned {
     NotOpen = 0,
@@ -45,52 +25,34 @@ enum class OpenMode : unsigned {
     KeepOnExec = 32,
 };
 
-enum class SeekMode {
-    SetPosition,
-    FromCurrentPosition,
-    FromEndPosition,
-};
-
 AK_ENUM_BITWISE_OPERATORS(OpenMode)
 
 class IODevice : public Object {
     C_OBJECT_ABSTRACT(IODevice)
 public:
-    virtual ~IODevice() override;
+    virtual ~IODevice() override = default;
 
     int fd() const { return m_fd; }
     OpenMode mode() const { return m_mode; }
-    bool is_open() const { return m_mode != OpenMode::NotOpen; }
     bool eof() const { return m_eof; }
 
     int error() const { return m_error; }
-    const char* error_string() const;
-
-    bool has_error() const { return m_error != 0; }
+    char const* error_string() const;
 
     int read(u8* buffer, int length);
 
     ByteBuffer read(size_t max_size);
     ByteBuffer read_all();
-    String read_line(size_t max_size = 16384);
+    DeprecatedString read_line(size_t max_size = 16384);
 
-    bool write(const u8*, int size);
-    bool write(StringView);
-
-    bool truncate(off_t);
+    bool write(u8 const*, int size);
 
     bool can_read_line() const;
-
-    bool can_read() const;
-    bool can_read_only_from_buffer() const { return !m_buffered_data.is_empty() && !can_read_from_fd(); }
 
     bool seek(i64, SeekMode = SeekMode::SetPosition, off_t* = nullptr);
 
     virtual bool open(OpenMode) = 0;
     virtual bool close();
-
-    LineIterator line_begin() & { return LineIterator(*this); }
-    LineIterator line_end() { return LineIterator(*this, true); }
 
 protected:
     explicit IODevice(Object* parent = nullptr);
@@ -99,8 +61,6 @@ protected:
     void set_mode(OpenMode mode) { m_mode = mode; }
     void set_error(int error) const { m_error = error; }
     void set_eof(bool eof) const { m_eof = eof; }
-
-    virtual void did_update_fd(int) { }
 
 private:
     bool populate_read_buffer(size_t size = 1024) const;

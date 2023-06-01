@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -21,11 +22,7 @@ IODevice::IODevice(Object* parent)
 {
 }
 
-IODevice::~IODevice()
-{
-}
-
-const char* IODevice::error_string() const
+char const* IODevice::error_string() const
 {
     return strerror(m_error);
 }
@@ -49,7 +46,7 @@ ByteBuffer IODevice::read(size_t max_size)
 
     auto size = min(max_size, m_buffered_data.size());
     auto buffer_result = ByteBuffer::create_uninitialized(size);
-    if (!buffer_result.has_value()) {
+    if (buffer_result.is_error()) {
         dbgln("IODevice::read: Not enough memory to allocate a buffer of {} bytes", size);
         return {};
     }
@@ -113,11 +110,6 @@ bool IODevice::can_read_line() const
     }
 }
 
-bool IODevice::can_read() const
-{
-    return !m_buffered_data.is_empty() || can_read_from_fd();
-}
-
 ByteBuffer IODevice::read_all()
 {
     off_t file_size = 0;
@@ -145,18 +137,18 @@ ByteBuffer IODevice::read_all()
             set_eof(true);
             break;
         }
-        data.append((const u8*)read_buffer, nread);
+        data.append((u8 const*)read_buffer, nread);
     }
 
     auto result = ByteBuffer::copy(data);
-    if (result.has_value())
+    if (!result.is_error())
         return result.release_value();
 
     set_error(ENOMEM);
     return {};
 }
 
-String IODevice::read_line(size_t max_size)
+DeprecatedString IODevice::read_line(size_t max_size)
 {
     if (m_fd < 0)
         return {};
@@ -169,12 +161,12 @@ String IODevice::read_line(size_t max_size)
             dbgln("IODevice::read_line: At EOF but there's more than max_size({}) buffered", max_size);
             return {};
         }
-        auto line = String((const char*)m_buffered_data.data(), m_buffered_data.size(), Chomp);
+        auto line = DeprecatedString((char const*)m_buffered_data.data(), m_buffered_data.size(), Chomp);
         m_buffered_data.clear();
         return line;
     }
     auto line_result = ByteBuffer::create_uninitialized(max_size + 1);
-    if (!line_result.has_value()) {
+    if (line_result.is_error()) {
         dbgln("IODevice::read_line: Not enough memory to allocate a buffer of {} bytes", max_size + 1);
         return {};
     }
@@ -188,7 +180,7 @@ String IODevice::read_line(size_t max_size)
             new_buffered_data.append(m_buffered_data.data() + line_index, m_buffered_data.size() - line_index);
             m_buffered_data = move(new_buffered_data);
             line.resize(line_index);
-            return String::copy(line, Chomp);
+            return DeprecatedString::copy(line, Chomp);
         }
     }
     return {};
@@ -202,7 +194,7 @@ bool IODevice::populate_read_buffer(size_t size) const
         return false;
 
     auto buffer_result = ByteBuffer::create_uninitialized(size);
-    if (!buffer_result.has_value()) {
+    if (buffer_result.is_error()) {
         dbgln("IODevice::populate_read_buffer: Not enough memory to allocate a buffer of {} bytes", size);
         return {};
     }
@@ -245,6 +237,7 @@ bool IODevice::seek(i64 offset, SeekMode mode, off_t* pos)
         break;
     case SeekMode::FromCurrentPosition:
         m = SEEK_CUR;
+        offset -= m_buffered_data.size();
         break;
     case SeekMode::FromEndPosition:
         m = SEEK_END;
@@ -264,17 +257,7 @@ bool IODevice::seek(i64 offset, SeekMode mode, off_t* pos)
     return true;
 }
 
-bool IODevice::truncate(off_t size)
-{
-    int rc = ftruncate(m_fd, size);
-    if (rc < 0) {
-        set_error(errno);
-        return false;
-    }
-    return true;
-}
-
-bool IODevice::write(const u8* data, int size)
+bool IODevice::write(u8 const* data, int size)
 {
     int rc = ::write(m_fd, data, size);
     if (rc < 0) {
@@ -291,29 +274,6 @@ void IODevice::set_fd(int fd)
         return;
 
     m_fd = fd;
-    did_update_fd(fd);
 }
 
-bool IODevice::write(StringView v)
-{
-    return write((const u8*)v.characters_without_null_termination(), v.length());
-}
-
-LineIterator::LineIterator(IODevice& device, bool is_end)
-    : m_device(device)
-    , m_is_end(is_end)
-{
-    ++*this;
-}
-
-bool LineIterator::at_end() const
-{
-    return m_device->eof();
-}
-
-LineIterator& LineIterator::operator++()
-{
-    m_buffer = m_device->read_line();
-    return *this;
-}
 }

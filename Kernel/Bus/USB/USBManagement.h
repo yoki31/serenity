@@ -6,14 +6,12 @@
 
 #pragma once
 
-#include <AK/NonnullRefPtr.h>
-#include <AK/NonnullRefPtrVector.h>
 #include <Kernel/Bus/USB/USBController.h>
+#include <Kernel/Library/NonnullLockRefPtr.h>
 
 namespace Kernel::USB {
 
 class USBManagement {
-    AK_MAKE_ETERNAL;
 
 public:
     USBManagement();

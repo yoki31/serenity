@@ -5,38 +5,42 @@ set -eo pipefail
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# shellcheck source=/dev/null
+. "${DIR}/../Meta/shell_include.sh"
+
+exit_if_running_as_root "Do not run BuildClang.sh as root, parts of your Toolchain directory will become root-owned"
+
 echo "$DIR"
 
 PREFIX="$DIR/Local/clang/"
 BUILD="$DIR/../Build/"
-USERLAND_ARCHS="i686 x86_64"
+USERLAND_ARCHS="x86_64"
 ARCHS="$USERLAND_ARCHS aarch64"
 
 MD5SUM="md5sum"
 REALPATH="realpath"
-MAKE="make"
-NPROC="nproc"
+INSTALL="install"
+SED="sed"
 
 SYSTEM_NAME="$(uname -s)"
 
 if [ "$SYSTEM_NAME" = "OpenBSD" ]; then
     MD5SUM="md5 -q"
     REALPATH="readlink -f"
-    MAKE="gmake"
-    NPROC="sysctl -n hw.ncpuonline"
     export CC=egcc
     export CXX=eg++
     export LDFLAGS=-Wl,-z,notext
 elif [ "$SYSTEM_NAME" = "FreeBSD" ]; then
     MD5SUM="md5 -q"
-    MAKE="gmake"
-    NPROC="sysctl -n hw.ncpu"
+elif [ "$SYSTEM_NAME" = "Darwin" ]; then
+    MD5SUM="md5 -q"
+    REALPATH="grealpath"  # GNU coreutils
+    INSTALL="ginstall"    # GNU coreutils
+    SED="gsed"            # GNU sed
 fi
 
-if [ -z "$MAKEJOBS" ]; then
-    MAKEJOBS=$($NPROC)
-fi
-
+NPROC=$(get_number_of_processing_units)
+[ -z "$MAKEJOBS" ] && MAKEJOBS=${NPROC}
 
 if [ ! -d "$BUILD" ]; then
     mkdir -p "$BUILD"
@@ -65,23 +69,16 @@ echo PREFIX is "$PREFIX"
 
 mkdir -p "$DIR/Tarballs"
 
-LLVM_VERSION="13.0.0"
-LLVM_MD5SUM="bfc5191cbe87954952d25c6884596ccb"
+LLVM_VERSION="15.0.3"
+LLVM_MD5SUM="d435e1160fd16b8efe1e0f4d1058bd50"
 LLVM_NAME="llvm-project-$LLVM_VERSION.src"
 LLVM_PKG="$LLVM_NAME.tar.xz"
 LLVM_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$LLVM_PKG"
 
-# We need GNU binutils because we use a feature that llvm-objdump doesn't support yet.
-BINUTILS_VERSION="2.37"
-BINUTILS_MD5SUM="1e55743d73c100b7a0d67ffb32398cdb"
-BINUTILS_NAME="binutils-$BINUTILS_VERSION"
-BINUTILS_PKG="${BINUTILS_NAME}.tar.gz"
-BINUTILS_BASE_URL="https://ftp.gnu.org/gnu/binutils"
-
 buildstep() {
     NAME=$1
     shift
-    "$@" 2>&1 | sed $'s|^|\e[34m['"${NAME}"$']\e[39m |'
+    "$@" 2>&1 | "$SED" $'s|^|\e[34m['"${NAME}"$']\e[39m |'
 }
 
 buildstep_ninja() {
@@ -97,9 +94,9 @@ buildstep_ninja() {
 
 # === DEPENDENCIES ===
 
-buildstep dependencies echo "Checking whether 'make' is available..."
-if ! command -v ${MAKE:-make} >/dev/null; then
-    buildstep dependencies echo "Please make sure to install GNU Make (for the '${MAKE:-make}' tool)."
+buildstep dependencies echo "Checking whether Ninja is available..."
+if ! command -v ninja >/dev/null; then
+    buildstep dependencies echo "Please make sure to install Ninja."
     exit 1
 fi
 
@@ -130,6 +127,37 @@ PROGRAM
 then
     buildstep dependencies echo "Please make sure to install a working C++ compiler."
     exit 1
+fi
+
+link_lld=
+buildstep dependencies echo "Checking whether the LLD linker is available..."
+if ${CXX:-c++} -o /dev/null -fuse-ld=lld -xc - >/dev/null 2>/dev/null << 'PROGRAM'
+int main() {}
+PROGRAM
+then
+    link_lld=1
+    buildstep dependencies echo "Using LLD for linking LLVM."
+else
+    buildstep dependencies echo "LLD not found. Using the default linker."
+fi
+
+buildstep setup echo "Determining if LLVM should be built with -march=native..."
+if [ "$ci" = "1" ]; then
+    # The toolchain cache is shared among all runners, which might have different CPUs.
+    buildstep setup echo "On a CI runner. Using the default compiler settings."
+elif [ -z "${CFLAGS+x}" ] && [ -z "${CXXFLAGS+x}" ]; then
+    if ${CXX:-c++} -o /dev/null -march=native -xc - >/dev/null 2>/dev/null << 'PROGRAM'
+int main() {}
+PROGRAM
+    then
+        export CFLAGS="-march=native"
+        export CXXFLAGS="-march=native"
+        buildstep setup echo "Using -march=native for compiling LLVM."
+    else
+        buildstep setup echo "-march=native is not supported by the compiler. Using the default settings."
+    fi
+else
+    buildstep setup echo "Using user-provided CFLAGS/CXXFLAGS."
 fi
 
 # === CHECK CACHE AND REUSE ===
@@ -185,73 +213,49 @@ pushd "$DIR/Tarballs"
         echo "Skipped downloading LLVM"
     fi
 
-    if [ -d "$LLVM_NAME" ]; then
-        # Drop the previously patched extracted dir
-        rm -rf "${LLVM_NAME}"
-        # Also drop the build dir
+    patch_md5="$($MD5SUM "$DIR"/Patches/llvm/*.patch)"
+
+    if [ ! -d "$LLVM_NAME" ] || [ "$(cat $LLVM_NAME/.patch.applied)" != "$patch_md5" ]; then
+        if [ -d "$LLVM_NAME" ]; then
+            # Drop the previously patched extracted dir
+            rm -rf "${LLVM_NAME}"
+        fi
+
         rm -rf "$DIR/Build/clang"
-    fi
-    echo "Extracting LLVM..."
-    tar -xJf "$LLVM_PKG"
 
-    pushd "$LLVM_NAME"
-        if [ "$dev" = "1" ]; then
-            git init > /dev/null
-            git add . > /dev/null
-            git commit -am "BASE" > /dev/null
-            git apply "$DIR"/Patches/llvm.patch > /dev/null
-        else
-            patch -p1 < "$DIR/Patches/llvm.patch" > /dev/null
-        fi
-        $MD5SUM "$DIR/Patches/llvm.patch" > .patch.applied
-    popd
+        echo "Extracting LLVM..."
+        tar -xJf "$LLVM_PKG"
 
-    md5=""
-    if [ -e "$BINUTILS_PKG" ]; then
-        md5="$($MD5SUM $BINUTILS_PKG | cut -f1 -d' ')"
-        echo "bu md5='$md5'"
-    fi
-
-    if [ "$md5" != "$BINUTILS_MD5SUM" ]; then
-        rm -f "$BINUTILS_PKG"
-        curl -LO "$BINUTILS_BASE_URL/$BINUTILS_PKG"
+        pushd "$LLVM_NAME"
+            if [ "$dev" = "1" ]; then
+                git init > /dev/null
+                git add . > /dev/null
+                git commit -am "BASE" > /dev/null
+                git am --keep-non-patch "$DIR"/Patches/llvm/*.patch > /dev/null
+            else
+                for patch in "$DIR"/Patches/llvm/*.patch; do
+                    patch -p1 < "$patch" > /dev/null
+                done
+            fi
+            echo "$patch_md5" > .patch.applied
+        popd
     else
-        echo "Skipped downloading GNU binutils"
+        echo "Using existing LLVM source directory"
     fi
-
-    if [ -d "$BINUTILS_NAME" ]; then
-        rm -rf "$BINUTILS_NAME"
-        rm -rf "$DIR/Build/clang/binutils"
-    fi
-    echo "Extracting GNU binutils"
-
-
-    tar -xzf "$BINUTILS_PKG"
-    pushd "$BINUTILS_NAME"
-        if [ "$dev" = "1" ]; then
-            git init > /dev/null
-            git add . > /dev/null
-            git commit -am "BASE" > /dev/null
-            git apply "$DIR"/Patches/binutils.patch > /dev/null
-        else
-            patch -p1 < "$DIR/Patches/binutils.patch" > /dev/null
-        fi
-         $MD5SUM "$DIR/Patches/binutils.patch" > .patch.applied
-    popd
 popd
 
 # === COPY HEADERS ===
 
 SRC_ROOT=$($REALPATH "$DIR"/..)
-FILES=$(find "$SRC_ROOT"/Kernel/API "$SRC_ROOT"/Userland/Libraries/LibC "$SRC_ROOT"/Userland/Libraries/LibM "$SRC_ROOT"/Userland/Libraries/LibPthread "$SRC_ROOT"/Userland/Libraries/LibDl -name '*.h' -print)
+FILES=$(find "$SRC_ROOT"/Kernel/API "$SRC_ROOT"/Userland/Libraries/LibC -name '*.h' -print)
 
 for arch in $ARCHS; do
     mkdir -p "$BUILD/${arch}clang"
     pushd "$BUILD/${arch}clang"
         mkdir -p Root/usr/include/
         for header in $FILES; do
-            target=$(echo "$header" | sed -e "s@$SRC_ROOT/Userland/Libraries/LibC@@" -e "s@$SRC_ROOT/Userland/Libraries/LibM@@" -e "s@$SRC_ROOT/Userland/Libraries/LibPthread@@" -e "s@$SRC_ROOT/Userland/Libraries/LibDl@@" -e "s@$SRC_ROOT/Kernel/@Kernel/@")
-            buildstep "system_headers" install -D "$header" "Root/usr/include/$target"
+            target=$(echo "$header" | "$SED" -e "s|$SRC_ROOT/Userland/Libraries/LibC||" -e "s|$SRC_ROOT/Kernel/|Kernel/|")
+            buildstep "system_headers" "$INSTALL" -D "$header" "Root/usr/include/$target"
         done
     popd
 done
@@ -264,7 +268,7 @@ for arch in $USERLAND_ARCHS; do
         mkdir -p Root/usr/lib/
         for lib in "$DIR/Stubs/${arch}clang/"*".so"; do
             lib_name=$(basename "$lib")
-            [ ! -f "Root/usr/lib/${lib_name}.so" ] && cp "$lib" "Root/usr/lib/${lib_name}"
+            [ ! -f "Root/usr/lib/${lib_name}" ] && cp "$lib" "Root/usr/lib/${lib_name}"
         done
     popd
 done
@@ -281,33 +285,19 @@ pushd "$DIR/Build/clang"
     pushd llvm
         buildstep "llvm/configure" cmake "$DIR/Tarballs/$LLVM_NAME/llvm" \
             -G Ninja \
-            -DSERENITY_i686-pc-serenity_SYSROOT="$BUILD/i686clang/Root" \
             -DSERENITY_x86_64-pc-serenity_SYSROOT="$BUILD/x86_64clang/Root" \
             -DSERENITY_aarch64-pc-serenity_SYSROOT="$BUILD/aarch64clang/Root" \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DSERENITY_MODULE_PATH="$DIR/CMake" \
             -C "$DIR/CMake/LLVMConfig.cmake" \
+            ${link_lld:+"-DLLVM_ENABLE_LLD=ON"} \
             ${dev:+"-DLLVM_CCACHE_BUILD=ON"} \
             ${ci:+"-DLLVM_CCACHE_BUILD=ON"} \
             ${ci:+"-DLLVM_CCACHE_DIR=$LLVM_CCACHE_DIR"} \
             ${ci:+"-DLLVM_CCACHE_MAXSIZE=$LLVM_CCACHE_MAXSIZE"}
 
         buildstep_ninja "llvm/build" ninja -j "$MAKEJOBS"
-        buildstep "llvm/install" ninja install/strip
-    popd
-
-    mkdir -p binutils
-    pushd binutils
-        buildstep "binutils/configure" "$DIR/Tarballs/$BINUTILS_NAME/configure" --prefix="$PREFIX" \
-            --enable-targets="$(echo "$ARCHS" | sed -E "s@(\S)(\s|$)@\1-pc-serenity,@g")" \
-            --program-prefix="gnu-" \
-            --disable-nls \
-            --disable-gas \
-            --disable-gold \
-            --disable-ld \
-            --disable-gprof \
-            --enable-shared
-        buildstep "binutils/build" "$MAKE" -j "$MAKEJOBS"
-        buildstep "binutils/install" "$MAKE" install
+        buildstep_ninja "llvm/install" ninja install/strip
     popd
 
     for arch in $ARCHS; do
@@ -318,12 +308,24 @@ pushd "$DIR/Build/clang"
                 -DSERENITY_TOOLCHAIN_ARCH="$arch" \
                 -DSERENITY_TOOLCHAIN_ROOT="$PREFIX" \
                 -DSERENITY_BUILD_DIR="$BUILD/${arch}clang/" \
+                -DSERENITY_MODULE_PATH="$DIR/CMake" \
                 -DCMAKE_INSTALL_PREFIX="$PREFIX" \
                 -C "$DIR/CMake/LLVMRuntimesConfig.cmake"
 
-            buildstep "runtimes/$arch/build" ninja -j "$MAKEJOBS"
-            buildstep "runtimes/$arch/install" ninja install
+            buildstep_ninja "runtimes/$arch/build" ninja -j "$MAKEJOBS"
+            buildstep_ninja "runtimes/$arch/install" ninja install
         popd
+    done
+popd
+
+pushd "$DIR/Local/clang/bin/"
+    ln -s ../../mold/bin/mold ld.mold
+
+    for arch in $ARCHS; do
+        ln -s clang "$arch"-pc-serenity-clang
+        ln -s clang++ "$arch"-pc-serenity-clang++
+        ln -s llvm-nm "$arch"-pc-serenity-nm
+        echo "--sysroot=$BUILD/${arch}clang/Root" > "$arch"-pc-serenity.cfg
     done
 popd
 

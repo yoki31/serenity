@@ -10,16 +10,15 @@
 
 namespace Core {
 
-SecretString SecretString::take_ownership(char*& cstring, size_t length)
+ErrorOr<SecretString> SecretString::take_ownership(char*& cstring, size_t length)
 {
-    auto buffer = ByteBuffer::copy(cstring, length);
-    VERIFY(buffer.has_value());
+    auto buffer = TRY(ByteBuffer::copy(cstring, length));
 
     secure_zero(cstring, length);
     free(cstring);
     cstring = nullptr;
 
-    return SecretString(buffer.release_value());
+    return SecretString(move(buffer));
 }
 
 SecretString SecretString::take_ownership(ByteBuffer&& buffer)

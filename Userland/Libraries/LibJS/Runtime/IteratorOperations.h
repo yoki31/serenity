@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Matthew Olsson <mattco@serenityos.org>
+ * Copyright (c) 2022-2023, Linus Groh <linusg@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,6 +10,7 @@
 #include <AK/Function.h>
 #include <AK/Optional.h>
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/Iterator.h>
 #include <LibJS/Runtime/Object.h>
 
 namespace JS {
@@ -20,16 +22,17 @@ enum class IteratorHint {
     Async,
 };
 
-ThrowCompletionOr<Object*> get_iterator(GlobalObject&, Value value, IteratorHint hint = IteratorHint::Sync, Value method = {});
-ThrowCompletionOr<Object*> iterator_next(Object& iterator, Value value = {});
-ThrowCompletionOr<Object*> iterator_step(GlobalObject&, Object& iterator);
-ThrowCompletionOr<bool> iterator_complete(GlobalObject&, Object& iterator_result);
-ThrowCompletionOr<Value> iterator_value(GlobalObject&, Object& iterator_result);
-Completion iterator_close(Object& iterator, Completion completion);
-Object* create_iterator_result_object(GlobalObject&, Value value, bool done);
-ThrowCompletionOr<MarkedValueList> iterable_to_list(GlobalObject&, Value iterable, Value method = {});
+ThrowCompletionOr<Iterator> get_iterator(VM&, Value, IteratorHint = IteratorHint::Sync, Optional<Value> method = {});
+ThrowCompletionOr<NonnullGCPtr<Object>> iterator_next(VM&, Iterator const&, Optional<Value> = {});
+ThrowCompletionOr<GCPtr<Object>> iterator_step(VM&, Iterator const&);
+ThrowCompletionOr<bool> iterator_complete(VM&, Object& iterator_result);
+ThrowCompletionOr<Value> iterator_value(VM&, Object& iterator_result);
+Completion iterator_close(VM&, Iterator const&, Completion);
+Completion async_iterator_close(VM&, Iterator const&, Completion);
+NonnullGCPtr<Object> create_iterator_result_object(VM&, Value, bool done);
+ThrowCompletionOr<MarkedVector<Value>> iterable_to_list(VM&, Value iterable, Optional<Value> method = {});
 
 using IteratorValueCallback = Function<Optional<Completion>(Value)>;
-Completion get_iterator_values(GlobalObject& global_object, Value iterable, IteratorValueCallback callback, Value method = {});
+Completion get_iterator_values(VM&, Value iterable, IteratorValueCallback callback, Optional<Value> method = {});
 
 }

@@ -5,28 +5,31 @@
  */
 
 #include <Kernel/Process.h>
+#include <Kernel/Scheduler.h>
 #include <Kernel/Sections.h>
 #include <Kernel/Tasks/FinalizerTask.h>
 
 namespace Kernel {
 
+static constexpr StringView finalizer_task_name = "Finalizer Task"sv;
+
 static void finalizer_task(void*)
 {
     Thread::current()->set_priority(THREAD_PRIORITY_LOW);
     for (;;) {
-        g_finalizer_wait_queue->wait_forever("FinalizerTask");
-
+        // The order of this if-else is important: We want to continue trying to finalize the threads in case
+        // Thread::finalize_dying_threads set g_finalizer_has_work back to true due to OOM conditions
         if (g_finalizer_has_work.exchange(false, AK::MemoryOrder::memory_order_acq_rel) == true)
             Thread::finalize_dying_threads();
+        else
+            g_finalizer_wait_queue->wait_forever(finalizer_task_name);
     }
 };
 
 UNMAP_AFTER_INIT void FinalizerTask::spawn()
 {
-    RefPtr<Thread> finalizer_thread;
-    auto finalizer_process = Process::create_kernel_process(finalizer_thread, KString::must_create("FinalizerTask"), finalizer_task, nullptr);
-    VERIFY(finalizer_process);
-    g_finalizer = finalizer_thread;
+    auto [_, finalizer_thread] = MUST(Process::create_kernel_process(KString::must_create(finalizer_task_name), finalizer_task, nullptr));
+    g_finalizer = move(finalizer_thread);
 }
 
 }

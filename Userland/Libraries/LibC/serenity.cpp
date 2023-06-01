@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <Kernel/API/POSIX/fcntl.h>
+#include <Kernel/API/Syscall.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <serenity.h>
@@ -20,7 +22,7 @@ int disown(pid_t pid)
 
 int profiling_enable(pid_t pid, uint64_t event_mask)
 {
-    int rc = syscall(SC_profiling_enable, pid, event_mask);
+    int rc = syscall(SC_profiling_enable, pid, &event_mask);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
@@ -99,17 +101,18 @@ int anon_create(size_t size, int options)
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int serenity_readlink(const char* path, size_t path_length, char* buffer, size_t buffer_size)
+int serenity_readlink(char const* path, size_t path_length, char* buffer, size_t buffer_size)
 {
     Syscall::SC_readlink_params small_params {
         { path, path_length },
-        { buffer, buffer_size }
+        { buffer, buffer_size },
+        AT_FDCWD
     };
     int rc = syscall(SC_readlink, &small_params);
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-int setkeymap(const char* name, const u32* map, u32* const shift_map, const u32* alt_map, const u32* altgr_map, const u32* shift_altgr_map)
+int setkeymap(char const* name, u32 const* map, u32* const shift_map, u32 const* alt_map, u32 const* altgr_map, u32 const* shift_altgr_map)
 {
     Syscall::SC_setkeymap_params params { map, shift_map, alt_map, altgr_map, shift_altgr_map, { name, strlen(name) } };
     return syscall(SC_setkeymap, &params);
@@ -129,10 +132,10 @@ int getkeymap(char* name_buffer, size_t name_buffer_size, u32* map, u32* shift_m
     __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 
-u16 internet_checksum(const void* ptr, size_t count)
+u16 internet_checksum(void const* ptr, size_t count)
 {
     u32 checksum = 0;
-    auto* w = (const u16*)ptr;
+    auto* w = (u16 const*)ptr;
     while (count > 1) {
         checksum += ntohs(*w++);
         if (checksum & 0x80000000)
@@ -147,5 +150,28 @@ u16 internet_checksum(const void* ptr, size_t count)
 int emuctl(uintptr_t command, uintptr_t arg0, uintptr_t arg1)
 {
     return syscall(SC_emuctl, command, arg0, arg1);
+}
+
+int serenity_open(char const* path, size_t path_length, int options, ...)
+{
+    if (!path) {
+        errno = EFAULT;
+        return -1;
+    }
+
+    if (path_length > INT32_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    va_list ap;
+    va_start(ap, options);
+    auto mode = (mode_t)va_arg(ap, unsigned);
+    va_end(ap);
+
+    Syscall::SC_open_params params { AT_FDCWD, { path, path_length }, options, mode };
+    int rc = syscall(SC_open, &params);
+
+    __RETURN_WITH_ERRNO(rc, rc, -1);
 }
 }

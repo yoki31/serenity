@@ -5,12 +5,14 @@
  */
 
 #include <AK/Assertions.h>
+#include <AK/DeprecatedString.h>
 #include <AK/GenericLexer.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/OwnPtr.h>
 #include <AK/Queue.h>
-#include <AK/String.h>
 #include <AK/StringView.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <LibRegex/Regex.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -29,7 +31,7 @@ template<typename Fmt, typename... Args>
 [[noreturn]] void fail(Fmt&& fmt, Args&&... args)
 {
     warn("ERROR: \e[31m");
-    warnln(StringView { fmt }, args...);
+    warnln(StringView { fmt, strlen(fmt) }, args...);
     warn("\e[0m");
     exit(2);
 }
@@ -54,9 +56,9 @@ public:
 
     virtual bool truth() const = 0;
     virtual int integer() const = 0;
-    virtual String string() const = 0;
+    virtual DeprecatedString string() const = 0;
     virtual Type type() const = 0;
-    virtual ~Expression() { }
+    virtual ~Expression() = default;
 };
 
 class ValueExpression : public Expression {
@@ -67,13 +69,13 @@ public:
     {
     }
 
-    ValueExpression(String&& v)
+    ValueExpression(DeprecatedString&& v)
         : as_string(move(v))
         , m_type(Type::String)
     {
     }
 
-    virtual ~ValueExpression() { }
+    virtual ~ValueExpression() {};
 
 private:
     virtual bool truth() const override
@@ -94,11 +96,11 @@ private:
         }
         VERIFY_NOT_REACHED();
     }
-    virtual String string() const override
+    virtual DeprecatedString string() const override
     {
         switch (m_type) {
         case Type::Integer:
-            return String::formatted("{}", as_integer);
+            return DeprecatedString::formatted("{}", as_integer);
         case Type::String:
             return as_string;
         }
@@ -108,7 +110,7 @@ private:
 
     union {
         int as_integer;
-        String as_string;
+        DeprecatedString as_string;
     };
     Type m_type { Type::String };
 };
@@ -159,7 +161,7 @@ private:
         VERIFY_NOT_REACHED();
     }
 
-    virtual String string() const override
+    virtual DeprecatedString string() const override
     {
         switch (m_op) {
         case BooleanOperator::And:
@@ -206,15 +208,15 @@ public:
 
     static ComparisonOperation op_from(StringView sv)
     {
-        if (sv == "<")
+        if (sv == "<"sv)
             return ComparisonOperation::Less;
-        if (sv == "<=")
+        if (sv == "<="sv)
             return ComparisonOperation::LessEq;
-        if (sv == "=")
+        if (sv == "="sv)
             return ComparisonOperation::Eq;
-        if (sv == "!=")
+        if (sv == "!="sv)
             return ComparisonOperation::Neq;
-        if (sv == ">=")
+        if (sv == ">="sv)
             return ComparisonOperation::GreaterEq;
         return ComparisonOperation::Greater;
     }
@@ -228,7 +230,7 @@ public:
 
 private:
     template<typename T>
-    bool compare(const T& left, const T& right) const
+    bool compare(T const& left, T const& right) const
     {
         switch (m_op) {
         case ComparisonOperation::Less:
@@ -258,7 +260,7 @@ private:
         VERIFY_NOT_REACHED();
     }
     virtual int integer() const override { return truth(); }
-    virtual String string() const override { return truth() ? "1" : "0"; }
+    virtual DeprecatedString string() const override { return truth() ? "1" : "0"; }
     virtual Type type() const override { return Type::Integer; }
 
     ComparisonOperation m_op { ComparisonOperation::Less };
@@ -276,13 +278,13 @@ public:
     };
     static ArithmeticOperation op_from(StringView sv)
     {
-        if (sv == "+")
+        if (sv == "+"sv)
             return ArithmeticOperation::Sum;
-        if (sv == "-")
+        if (sv == "-"sv)
             return ArithmeticOperation::Difference;
-        if (sv == "*")
+        if (sv == "*"sv)
             return ArithmeticOperation::Product;
-        if (sv == "/")
+        if (sv == "/"sv)
             return ArithmeticOperation::Quotient;
         return ArithmeticOperation::Remainder;
     }
@@ -328,9 +330,9 @@ private:
         }
         VERIFY_NOT_REACHED();
     }
-    virtual String string() const override
+    virtual DeprecatedString string() const override
     {
-        return String::formatted("{}", integer());
+        return DeprecatedString::formatted("{}", integer());
     }
     virtual Type type() const override
     {
@@ -386,7 +388,7 @@ private:
 
         VERIFY_NOT_REACHED();
     }
-    static auto safe_substring(const String& str, int start, int length)
+    static auto safe_substring(DeprecatedString const& str, int start, int length)
     {
         if (start < 1 || (size_t)start > str.length())
             fail("Index out of range");
@@ -395,7 +397,7 @@ private:
             fail("Index out of range");
         return str.substring(start, length);
     }
-    virtual String string() const override
+    virtual DeprecatedString string() const override
     {
         if (m_op == StringOperation::Substring)
             return safe_substring(m_str->string(), m_pos_or_chars->integer(), m_length->integer());
@@ -410,7 +412,7 @@ private:
                 for (auto& m : match.matches)
                     count += m.view.length();
 
-                return String::number(count);
+                return DeprecatedString::number(count);
             } else {
                 if (!match.success)
                     return "";
@@ -419,11 +421,11 @@ private:
                 for (auto& e : match.capture_group_matches[0])
                     result.append(e.view.string_view());
 
-                return result.build();
+                return result.to_deprecated_string();
             }
         }
 
-        return String::number(integer());
+        return DeprecatedString::number(integer());
     }
     virtual Type type() const override
     {
@@ -471,7 +473,7 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
     }
     case And: {
         auto left = parse(args, Comp);
-        while (!args.is_empty() && args.head() == "&") {
+        while (!args.is_empty() && args.head() == "&"sv) {
             args.dequeue();
             auto right = parse(args, Comp);
             left = make<BooleanExpression>(BooleanExpression::BooleanOperator::And, move(left), move(right));
@@ -480,7 +482,7 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
     }
     case Comp: {
         auto left = parse(args, ArithS);
-        while (!args.is_empty() && args.head().is_one_of("<", "<=", "=", "!=", "=>", ">")) {
+        while (!args.is_empty() && args.head().is_one_of("<"sv, "<="sv, "="sv, "!="sv, "=>"sv, ">"sv)) {
             auto op = args.dequeue();
             auto right = parse(args, ArithM);
             left = make<ComparisonExpression>(ComparisonExpression::op_from(op), move(left), move(right));
@@ -489,7 +491,7 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
     }
     case ArithS: {
         auto left = parse(args, ArithM);
-        while (!args.is_empty() && args.head().is_one_of("+", "-")) {
+        while (!args.is_empty() && args.head().is_one_of("+"sv, "-"sv)) {
             auto op = args.dequeue();
             auto right = parse(args, ArithM);
             left = make<ArithmeticExpression>(ArithmeticExpression::op_from(op), move(left), move(right));
@@ -498,7 +500,7 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
     }
     case ArithM: {
         auto left = parse(args, StringO);
-        while (!args.is_empty() && args.head().is_one_of("*", "/", "%")) {
+        while (!args.is_empty() && args.head().is_one_of("*"sv, "/"sv, "%"sv)) {
             auto op = args.dequeue();
             auto right = parse(args, StringO);
             left = make<ArithmeticExpression>(ArithmeticExpression::op_from(op), move(left), move(right));
@@ -513,26 +515,26 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
 
         while (!args.is_empty()) {
             auto& op = args.head();
-            if (op == "+") {
+            if (op == "+"sv) {
                 args.dequeue();
                 left = make<ValueExpression>(args.dequeue());
-            } else if (op == "substr") {
+            } else if (op == "substr"sv) {
                 args.dequeue();
                 auto str = parse(args, Paren);
                 auto pos = parse(args, Paren);
                 auto len = parse(args, Paren);
                 left = make<StringExpression>(StringExpression::StringOperation::Substring, move(str), move(pos), move(len));
-            } else if (op == "index") {
+            } else if (op == "index"sv) {
                 args.dequeue();
                 auto str = parse(args, Paren);
                 auto chars = parse(args, Paren);
                 left = make<StringExpression>(StringExpression::StringOperation::Index, move(str), move(chars));
-            } else if (op == "match") {
+            } else if (op == "match"sv) {
                 args.dequeue();
                 auto str = parse(args, Paren);
                 auto pattern = parse(args, Paren);
                 left = make<StringExpression>(StringExpression::StringOperation::Match, move(str), move(pattern));
-            } else if (op == "length") {
+            } else if (op == "length"sv) {
                 args.dequeue();
                 auto str = parse(args, Paren);
                 left = make<StringExpression>(StringExpression::StringOperation::Length, move(str));
@@ -540,7 +542,7 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
                 left = parse(args, Paren);
             }
 
-            if (!args.is_empty() && args.head() == ":") {
+            if (!args.is_empty() && args.head() == ":"sv) {
                 args.dequeue();
                 auto right = parse(args, Paren);
                 left = make<StringExpression>(StringExpression::StringOperation::Match, left.release_nonnull(), move(right));
@@ -555,7 +557,7 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
         if (args.is_empty())
             fail("Expected a term");
 
-        if (args.head() == "(") {
+        if (args.head() == "("sv) {
             args.dequeue();
             auto expr = parse(args);
             if (args.head() != ")")
@@ -571,24 +573,17 @@ NonnullOwnPtr<Expression> Expression::parse(Queue<StringView>& args, Precedence 
     fail("Invalid expression");
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio", nullptr) < 0) {
-        perror("pledge");
-        return 3;
-    }
+    TRY(Core::System::pledge("stdio"sv));
+    TRY(Core::System::unveil(nullptr, nullptr));
 
-    if (unveil(nullptr, nullptr) < 0) {
-        perror("unveil");
-        return 3;
-    }
-
-    if ((argc == 2 && "--help"sv == argv[1]) || argc == 1)
+    if ((arguments.strings.size() == 2 && "--help"sv == arguments.strings[1]) || arguments.strings.size() == 1)
         print_help_and_exit();
 
     Queue<StringView> args;
-    for (int i = 1; i < argc; ++i)
-        args.enqueue(argv[i]);
+    for (size_t i = 1; i < arguments.strings.size(); ++i)
+        args.enqueue(arguments.strings[i]);
 
     auto expression = Expression::parse(args);
     if (!args.is_empty())

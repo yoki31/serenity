@@ -4,32 +4,41 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/String.h>
+#include <AK/DeprecatedString.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/ProcessStatisticsReader.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static int pid_of(const String& process_name, bool single_shot, bool omit_pid, pid_t pid)
+struct Options {
+    bool single_shot { false };
+    Optional<pid_t> pid_to_omit;
+    StringView process_name;
+    StringView pid_separator { " "sv };
+};
+
+static ErrorOr<int> pid_of(Options const& options)
 {
     bool displayed_at_least_one = false;
 
-    auto all_processes = Core::ProcessStatisticsReader::get_all();
-    if (!all_processes.has_value())
-        return 1;
+    auto all_processes = TRY(Core::ProcessStatisticsReader::get_all());
 
-    for (auto& it : all_processes.value().processes) {
-        if (it.name == process_name) {
-            if (!omit_pid || it.pid != pid) {
-                out(displayed_at_least_one ? " {}" : "{}", it.pid);
-                displayed_at_least_one = true;
+    for (auto& it : all_processes.processes) {
+        if (it.name != options.process_name || options.pid_to_omit == it.pid)
+            continue;
 
-                if (single_shot)
-                    break;
-            }
-        }
+        if (displayed_at_least_one)
+            out("{}{}"sv, options.pid_separator, it.pid);
+        else
+            out("{}"sv, it.pid);
+
+        displayed_at_least_one = true;
+
+        if (options.single_shot)
+            break;
     }
 
     if (displayed_at_least_one)
@@ -38,32 +47,42 @@ static int pid_of(const String& process_name, bool single_shot, bool omit_pid, p
     return 0;
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments args)
 {
-    bool single_shot = false;
-    const char* omit_pid_value = nullptr;
-    const char* process_name = nullptr;
+    TRY(Core::System::pledge("stdio rpath"));
+    TRY(Core::System::unveil("/sys/kernel/processes", "r"));
+    TRY(Core::System::unveil("/etc/passwd", "r"));
+    TRY(Core::System::unveil(nullptr, nullptr));
+
+    Options options;
 
     Core::ArgsParser args_parser;
-    args_parser.add_option(single_shot, "Only return one pid", nullptr, 's');
-    args_parser.add_option(omit_pid_value, "Omit the given PID, or the parent process if the special value %PPID is passed", nullptr, 'o', "pid");
-    args_parser.add_positional_argument(process_name, "Process name to search for", "process-name");
+    args_parser.add_option(Core::ArgsParser::Option {
+        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
+        .help_string = "Omit the given PID, or the parent process if the special value %PPID is passed",
+        .short_name = 'o',
+        .value_name = "pid",
+        .accept_value = [&options](auto omit_pid_value) {
+            if (omit_pid_value.is_empty())
+                return false;
 
-    args_parser.parse(argc, argv);
-
-    pid_t pid_to_omit = 0;
-    if (omit_pid_value) {
-        if (!strcmp(omit_pid_value, "%PPID")) {
-            pid_to_omit = getppid();
-        } else {
-            auto number = StringView(omit_pid_value).to_uint();
-            if (!number.has_value()) {
-                warnln("Invalid value for -o");
-                args_parser.print_usage(stderr, argv[0]);
-                return 1;
+            if (omit_pid_value == "%PPID"sv) {
+                options.pid_to_omit = getppid();
+                return true;
             }
-            pid_to_omit = number.value();
-        }
-    }
-    return pid_of(process_name, single_shot, omit_pid_value != nullptr, pid_to_omit);
+
+            auto number = omit_pid_value.to_uint();
+            if (!number.has_value())
+                return false;
+
+            options.pid_to_omit = number.value();
+            return true;
+        },
+    });
+    args_parser.add_option(options.single_shot, "Only return one pid", nullptr, 's');
+    args_parser.add_option(options.pid_separator, "Use `separator` to separate multiple pids", nullptr, 'S', "separator");
+    args_parser.add_positional_argument(options.process_name, "Process name to search for", "process-name");
+
+    args_parser.parse(args);
+    return pid_of(options);
 }

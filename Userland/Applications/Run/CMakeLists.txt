@@ -9,9 +9,11 @@ compile_gml(Run.gml RunGML.h run_gml)
 set(SOURCES
     main.cpp
     RunWindow.cpp
-    RunWindow.h
+)
+
+set(GENERATED_SOURCES
     RunGML.h
 )
 
 serenity_app(Run ICON app-run)
-target_link_libraries(Run LibCore LibDesktop LibGUI)
+target_link_libraries(Run PRIVATE LibCore LibFileSystem LibDesktop LibGfx LibGUI LibMain)

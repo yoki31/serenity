@@ -12,7 +12,7 @@ int unveil(const char* path, const char* permissions);
 
 ## Description
 
-`unveil()` manipulates the process veil. The veil is a whitelist of paths on
+`unveil()` manipulates the process veil. The veil is a allowlist of paths on
 the file system the calling process is allowed to access.
 
 A process that has not made any `unveil()` calls is allowed to access the whole
@@ -96,5 +96,5 @@ unveil(nullptr, nullptr);
 
 ## See also
 
-* [`pledge`(2)](pledge.md)
-* [`Mitigations`(7)](../man7/Mitigations.md)
+* [`pledge`(2)](help://man/2/pledge)
+* [`Mitigations`(7)](help://man/7/Mitigations)

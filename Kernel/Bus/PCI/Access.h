@@ -7,85 +7,60 @@
 #pragma once
 
 #include <AK/Bitmap.h>
-#include <AK/String.h>
+#include <AK/HashMap.h>
+#include <AK/NonnullOwnPtr.h>
+#include <AK/Try.h>
 #include <AK/Vector.h>
+#include <Kernel/Bus/PCI/Controller/HostController.h>
 #include <Kernel/Bus/PCI/Definitions.h>
-#include <Kernel/FileSystem/SysFS.h>
 #include <Kernel/Locking/Spinlock.h>
 
 namespace Kernel::PCI {
 
 class Access {
 public:
-    enum class AccessType {
-        IO,
-        Memory,
-    };
+    static bool initialize_for_multiple_pci_domains(PhysicalAddress mcfg_table);
 
-public:
-    static bool initialize_for_memory_access(PhysicalAddress mcfg_table);
-    static bool initialize_for_io_access();
+#if ARCH(X86_64)
+    static bool initialize_for_one_pci_domain();
+#endif
 
-    void fast_enumerate(Function<void(DeviceIdentifier const&)>&) const;
+    ErrorOr<void> fast_enumerate(Function<void(DeviceIdentifier const&)>&) const;
     void rescan_hardware();
-    void rescan_hardware_with_memory_addressing();
-    void rescan_hardware_with_io_addressing();
 
     static Access& the();
     static bool is_initialized();
+    static bool is_disabled();
+    static bool is_hardware_disabled();
 
-    void write8_field(Address address, u32 field, u8 value);
-    void write16_field(Address address, u32 field, u16 value);
-    void write32_field(Address address, u32 field, u32 value);
-    u8 read8_field(Address address, u32 field);
-    u16 read16_field(Address address, u32 field);
-    u32 read32_field(Address address, u32 field);
-    DeviceIdentifier get_device_identifier(Address address) const;
+    void write8_field(DeviceIdentifier const&, u32 field, u8 value);
+    void write16_field(DeviceIdentifier const&, u32 field, u16 value);
+    void write32_field(DeviceIdentifier const&, u32 field, u32 value);
+    u8 read8_field(DeviceIdentifier const&, u32 field);
+    u16 read16_field(DeviceIdentifier const&, u32 field);
+    u32 read32_field(DeviceIdentifier const&, u32 field);
+
+    // FIXME: Remove this once we can use PCI::Capability with inline buffer
+    // so we don't need this method
+    DeviceIdentifier const& get_device_identifier(Address address) const;
+
+    Spinlock<LockRank::None> const& scan_lock() const { return m_scan_lock; }
+    RecursiveSpinlock<LockRank::None> const& access_lock() const { return m_access_lock; }
+
+    ErrorOr<void> add_host_controller_and_scan_for_devices(NonnullOwnPtr<HostController>);
 
 private:
-    u8 read8_field(Address address, RegisterOffset field);
-    u16 read16_field(Address address, RegisterOffset field);
+    u8 read8_field(DeviceIdentifier const&, RegisterOffset field);
+    u16 read16_field(DeviceIdentifier const&, RegisterOffset field);
 
-    void enumerate_bus(int type, u8 bus, bool recursive);
-    void enumerate_functions(int type, u8 bus, u8 device, u8 function, bool recursive);
-    void enumerate_device(int type, u8 bus, u8 device, bool recursive);
+    void add_host_controller(NonnullOwnPtr<HostController>);
+    bool find_and_register_pci_host_bridges_from_acpi_mcfg_table(PhysicalAddress mcfg);
+    Access();
 
-    explicit Access(AccessType);
-    bool search_pci_domains_from_acpi_mcfg_table(PhysicalAddress mcfg);
-    Vector<Capability> get_capabilities(Address);
-    Optional<u8> get_capabilities_pointer(Address address);
+    mutable RecursiveSpinlock<LockRank::None> m_access_lock {};
+    mutable Spinlock<LockRank::None> m_scan_lock {};
 
-    // IO access (legacy) operations
-    u8 io_read8_field(Address address, u32 field);
-    u16 io_read16_field(Address address, u32 field);
-    u32 io_read32_field(Address address, u32 field);
-    void io_write8_field(Address address, u32, u8);
-    void io_write16_field(Address address, u32, u16);
-    void io_write32_field(Address address, u32, u32);
-    u16 io_read_type(Address address);
-
-    // Memory-mapped access operations
-    void map_bus_region(u32 domain, u8 bus);
-    u8 memory_read8_field(Address address, u32 field);
-    u16 memory_read16_field(Address address, u32 field);
-    u32 memory_read32_field(Address address, u32 field);
-    void memory_write8_field(Address address, u32, u8);
-    void memory_write16_field(Address address, u32, u16);
-    void memory_write32_field(Address address, u32, u32);
-    u16 memory_read_type(Address address);
-    VirtualAddress get_device_configuration_memory_mapped_space(Address address);
-    Optional<PhysicalAddress> determine_memory_mapped_bus_base_address(u32 domain, u8 bus) const;
-
-    // Data-members for accessing Memory mapped PCI devices' configuration spaces
-    u8 m_mapped_bus { 0 };
-    OwnPtr<Memory::Region> m_mapped_bus_region;
-    HashMap<u32, PCI::Domain> m_domains;
-
-    // General Data-members
-    mutable Mutex m_access_lock;
-    mutable Spinlock m_scan_lock;
-    Bitmap m_enumerated_buses;
-    AccessType m_access_type;
-    Vector<DeviceIdentifier> m_device_identifiers;
+    HashMap<u32, NonnullOwnPtr<PCI::HostController>> m_host_controllers;
+    Vector<NonnullRefPtr<DeviceIdentifier>> m_device_identifiers;
 };
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -16,18 +16,19 @@ class NumberFormatFunction final : public NativeFunction {
     JS_OBJECT(NumberFormatFunction, NativeFunction);
 
 public:
-    static NumberFormatFunction* create(GlobalObject&, NumberFormat&);
+    static NonnullGCPtr<NumberFormatFunction> create(Realm&, NumberFormat&);
 
-    explicit NumberFormatFunction(NumberFormat&, Object& prototype);
     virtual ~NumberFormatFunction() override = default;
-    virtual void initialize(GlobalObject&) override;
+    virtual ThrowCompletionOr<void> initialize(Realm&) override;
 
     virtual ThrowCompletionOr<Value> call() override;
 
 private:
+    explicit NumberFormatFunction(NumberFormat&, Object& prototype);
+
     virtual void visit_edges(Visitor&) override;
 
-    NumberFormat& m_number_format; // [[NumberFormat]]
+    NonnullGCPtr<NumberFormat> m_number_format; // [[NumberFormat]]
 };
 
 }

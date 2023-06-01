@@ -61,35 +61,33 @@ public:
         return *this;
     }
 
-    [[nodiscard]] static Optional<ByteBuffer> create_uninitialized(size_t size)
+    [[nodiscard]] static ErrorOr<ByteBuffer> create_uninitialized(size_t size)
     {
         auto buffer = ByteBuffer();
-        if (buffer.try_resize(size).is_error())
-            return {};
+        TRY(buffer.try_resize(size));
         return { move(buffer) };
     }
 
-    [[nodiscard]] static Optional<ByteBuffer> create_zeroed(size_t size)
+    [[nodiscard]] static ErrorOr<ByteBuffer> create_zeroed(size_t size)
     {
-        auto buffer_result = create_uninitialized(size);
-        if (!buffer_result.has_value())
-            return {};
+        auto buffer = TRY(create_uninitialized(size));
 
-        auto& buffer = buffer_result.value();
         buffer.zero_fill();
         VERIFY(size == 0 || (buffer[0] == 0 && buffer[size - 1] == 0));
-        return buffer_result;
+        return { move(buffer) };
     }
 
-    [[nodiscard]] static Optional<ByteBuffer> copy(void const* data, size_t size)
+    [[nodiscard]] static ErrorOr<ByteBuffer> copy(void const* data, size_t size)
     {
-        auto buffer = create_uninitialized(size);
-        if (buffer.has_value() && size != 0)
-            __builtin_memcpy(buffer->data(), data, size);
-        return buffer;
+        auto buffer = TRY(create_uninitialized(size));
+        if (buffer.m_inline && size > inline_capacity)
+            VERIFY_NOT_REACHED();
+        if (size != 0)
+            __builtin_memcpy(buffer.data(), data, size);
+        return { move(buffer) };
     }
 
-    [[nodiscard]] static Optional<ByteBuffer> copy(ReadonlyBytes bytes)
+    [[nodiscard]] static ErrorOr<ByteBuffer> copy(ReadonlyBytes bytes)
     {
         return copy(bytes.data(), bytes.size());
     }
@@ -103,8 +101,6 @@ public:
         // So they both have data, and the same length.
         return !__builtin_memcmp(data(), other.data(), size());
     }
-
-    bool operator!=(ByteBuffer const& other) const { return !(*this == other); }
 
     [[nodiscard]] u8& operator[](size_t i)
     {
@@ -121,28 +117,41 @@ public:
     [[nodiscard]] bool is_empty() const { return m_size == 0; }
     [[nodiscard]] size_t size() const { return m_size; }
 
-    [[nodiscard]] u8* data() { return m_inline ? m_inline_buffer : m_outline_buffer; }
+#ifdef AK_COMPILER_GCC
+#    pragma GCC diagnostic push
+//   Workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109727
+#    pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
+    [[nodiscard]] u8* data()
+    {
+        return m_inline ? m_inline_buffer : m_outline_buffer;
+    }
     [[nodiscard]] u8 const* data() const { return m_inline ? m_inline_buffer : m_outline_buffer; }
+#ifdef AK_COMPILER_GCC
+#    pragma GCC diagnostic pop
+#endif
 
-    [[nodiscard]] Bytes bytes() { return { data(), size() }; }
+    [[nodiscard]] Bytes bytes()
+    {
+        return { data(), size() };
+    }
     [[nodiscard]] ReadonlyBytes bytes() const { return { data(), size() }; }
 
-    [[nodiscard]] AK::Span<u8> span() { return { data(), size() }; }
-    [[nodiscard]] AK::Span<const u8> span() const { return { data(), size() }; }
+    [[nodiscard]] AK::Bytes span() { return { data(), size() }; }
+    [[nodiscard]] AK::ReadonlyBytes span() const { return { data(), size() }; }
 
-    [[nodiscard]] u8* offset_pointer(int offset) { return data() + offset; }
-    [[nodiscard]] u8 const* offset_pointer(int offset) const { return data() + offset; }
+    [[nodiscard]] u8* offset_pointer(size_t offset) { return data() + offset; }
+    [[nodiscard]] u8 const* offset_pointer(size_t offset) const { return data() + offset; }
 
     [[nodiscard]] void* end_pointer() { return data() + m_size; }
     [[nodiscard]] void const* end_pointer() const { return data() + m_size; }
 
-    // FIXME: Make this function handle failures too.
-    [[nodiscard]] ByteBuffer slice(size_t offset, size_t size) const
+    [[nodiscard]] ErrorOr<ByteBuffer> slice(size_t offset, size_t size) const
     {
         // I cannot hand you a slice I don't have
         VERIFY(offset + size <= this->size());
 
-        return copy(offset_pointer(offset), size).release_value();
+        return copy(offset_pointer(offset), size);
     }
 
     void clear()
@@ -182,12 +191,42 @@ public:
         return try_ensure_capacity_slowpath(new_capacity);
     }
 
+    /// Return a span of bytes past the end of this ByteBuffer for writing.
+    /// Ensures that the required space is available.
+    ErrorOr<Bytes> get_bytes_for_writing(size_t length)
+    {
+        auto const old_size = size();
+        TRY(try_resize(old_size + length));
+        return Bytes { data() + old_size, length };
+    }
+
+    /// Like get_bytes_for_writing, but crashes if allocation fails.
+    Bytes must_get_bytes_for_writing(size_t length)
+    {
+        return MUST(get_bytes_for_writing(length));
+    }
+
+    void append(u8 byte)
+    {
+        MUST(try_append(byte));
+    }
+
     void append(ReadonlyBytes bytes)
     {
         MUST(try_append(bytes));
     }
 
     void append(void const* data, size_t data_size) { append({ data, data_size }); }
+
+    ErrorOr<void> try_append(u8 byte)
+    {
+        auto old_size = size();
+        auto new_size = old_size + 1;
+        VERIFY(new_size > old_size);
+        TRY(try_resize(new_size));
+        data()[old_size] = byte;
+        return {};
+    }
 
     ErrorOr<void> try_append(ReadonlyBytes bytes)
     {
@@ -199,7 +238,7 @@ public:
         if (data_size == 0)
             return {};
         VERIFY(data != nullptr);
-        int old_size = size();
+        auto old_size = size();
         TRY(try_resize(size() + data_size));
         __builtin_memcpy(this->data() + old_size, data, data_size);
         return {};
@@ -214,7 +253,7 @@ public:
     {
         // make sure we're not told to write past the end
         VERIFY(offset + data_size <= size());
-        __builtin_memcpy(this->data() + offset, data, data_size);
+        __builtin_memmove(this->data() + offset, data, data_size);
     }
 
     void zero_fill()
@@ -264,8 +303,14 @@ private:
 
     NEVER_INLINE ErrorOr<void> try_ensure_capacity_slowpath(size_t new_capacity)
     {
+        // When we are asked to raise the capacity by very small amounts,
+        // the caller is perhaps appending very little data in many calls.
+        // To avoid copying the entire ByteBuffer every single time,
+        // we raise the capacity exponentially, by a factor of roughly 1.5.
+        // This is most noticeable in Lagom, where kmalloc_good_size is just a no-op.
+        new_capacity = max(new_capacity, (capacity() * 3) / 2);
         new_capacity = kmalloc_good_size(new_capacity);
-        auto* new_buffer = (u8*)kmalloc(new_capacity);
+        auto* new_buffer = static_cast<u8*>(kmalloc(new_capacity));
         if (!new_buffer)
             return Error::from_errno(ENOMEM);
 
@@ -294,4 +339,21 @@ private:
 };
 
 }
+
+template<>
+struct Traits<ByteBuffer> : public GenericTraits<ByteBuffer> {
+    static unsigned hash(ByteBuffer const& byte_buffer)
+    {
+        return Traits<ReadonlyBytes>::hash(byte_buffer.span());
+    }
+    static bool equals(ByteBuffer const& byte_buffer, Bytes const& other)
+    {
+        return byte_buffer.bytes() == other;
+    }
+    static bool equals(ByteBuffer const& byte_buffer, ReadonlyBytes const& other)
+    {
+        return byte_buffer.bytes() == other;
+    }
+};
+
 }

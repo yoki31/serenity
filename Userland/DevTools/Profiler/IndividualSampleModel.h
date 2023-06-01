@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -26,18 +27,18 @@ public:
         __Count
     };
 
-    virtual ~IndividualSampleModel() override;
+    virtual ~IndividualSampleModel() override = default;
 
-    virtual int row_count(const GUI::ModelIndex& = GUI::ModelIndex()) const override;
-    virtual int column_count(const GUI::ModelIndex& = GUI::ModelIndex()) const override;
+    virtual int row_count(GUI::ModelIndex const& = GUI::ModelIndex()) const override;
+    virtual int column_count(GUI::ModelIndex const& = GUI::ModelIndex()) const override;
     virtual String column_name(int) const override;
-    virtual GUI::Variant data(const GUI::ModelIndex&, GUI::ModelRole) const override;
+    virtual GUI::Variant data(GUI::ModelIndex const&, GUI::ModelRole) const override;
 
 private:
     IndividualSampleModel(Profile&, size_t event_index);
 
     Profile& m_profile;
-    const size_t m_event_index { 0 };
+    size_t const m_event_index { 0 };
 };
 
 }

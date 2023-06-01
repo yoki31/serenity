@@ -1,13 +1,12 @@
 /*
  * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, sin-ack <sin-ack@protonmail.com>
+ * Copyright (c) 2022, Idan Horowitz <idan.horowitz@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/NonnullRefPtrVector.h>
 #include <AK/Singleton.h>
-#include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <Kernel/API/InodeWatcherEvent.h>
 #include <Kernel/FileSystem/Custody.h>
@@ -22,16 +21,16 @@
 
 namespace Kernel {
 
-static Singleton<SpinlockProtected<Inode::AllInstancesList>> s_all_instances;
+static Singleton<SpinlockProtected<Inode::AllInstancesList, LockRank::None>> s_all_instances;
 
-SpinlockProtected<Inode::AllInstancesList>& Inode::all_instances()
+SpinlockProtected<Inode::AllInstancesList, LockRank::None>& Inode::all_instances()
 {
     return s_all_instances;
 }
 
 void Inode::sync_all()
 {
-    NonnullRefPtrVector<Inode, 32> inodes;
+    Vector<NonnullRefPtr<Inode>, 32> inodes;
     Inode::all_instances().with([&](auto& all_inodes) {
         for (auto& inode : all_inodes) {
             if (inode.is_metadata_dirty())
@@ -40,8 +39,8 @@ void Inode::sync_all()
     });
 
     for (auto& inode : inodes) {
-        VERIFY(inode.is_metadata_dirty());
-        (void)inode.flush_metadata();
+        VERIFY(inode->is_metadata_dirty());
+        (void)inode->flush_metadata();
     }
 }
 
@@ -52,37 +51,19 @@ void Inode::sync()
     fs().flush_writes();
 }
 
-ErrorOr<NonnullOwnPtr<KBuffer>> Inode::read_entire(OpenFileDescription* description) const
-{
-    auto builder = TRY(KBufferBuilder::try_create());
-
-    u8 buffer[4096];
-    off_t offset = 0;
-    for (;;) {
-        auto buf = UserOrKernelBuffer::for_kernel_buffer(buffer);
-        auto nread = TRY(read_bytes(offset, sizeof(buffer), buf, description));
-        VERIFY(nread <= sizeof(buffer));
-        if (nread == 0)
-            break;
-        TRY(builder.append((const char*)buffer, nread));
-        offset += nread;
-        if (nread < sizeof(buffer))
-            break;
-    }
-
-    auto entire_file = builder.build();
-    if (!entire_file)
-        return ENOMEM;
-    return entire_file.release_nonnull();
-}
-
-ErrorOr<NonnullRefPtr<Custody>> Inode::resolve_as_link(Custody& base, RefPtr<Custody>* out_parent, int options, int symlink_recursion_level) const
+ErrorOr<NonnullRefPtr<Custody>> Inode::resolve_as_link(Credentials const& credentials, Custody& base, RefPtr<Custody>* out_parent, int options, int symlink_recursion_level) const
 {
     // The default implementation simply treats the stored
     // contents as a path and resolves that. That is, it
     // behaves exactly how you would expect a symlink to work.
-    auto contents = TRY(read_entire());
-    return VirtualFileSystem::the().resolve_path(StringView { contents->bytes() }, base, out_parent, options, symlink_recursion_level);
+
+    // Make sure that our assumptions about the path length hold up.
+    // Note that this doesn't mean that the reported size can be trusted, some inodes just report zero.
+    VERIFY(size() <= MAXPATHLEN);
+
+    Array<u8, MAXPATHLEN> contents;
+    auto read_bytes = TRY(read_until_filled_or_end(0, contents.size(), UserOrKernelBuffer::for_kernel_buffer(contents.data()), nullptr));
+    return VirtualFileSystem::the().resolve_path(credentials, StringView { contents.span().trim(read_bytes) }, base, out_parent, options, symlink_recursion_level);
 }
 
 Inode::Inode(FileSystem& fs, InodeIndex index)
@@ -94,9 +75,9 @@ Inode::Inode(FileSystem& fs, InodeIndex index)
 
 Inode::~Inode()
 {
-    for (auto& watcher : m_watchers) {
+    m_watchers.for_each([&](auto& watcher) {
         watcher->unregister_by_inode({}, identifier());
-    }
+    });
 }
 
 void Inode::will_be_destroyed()
@@ -106,17 +87,35 @@ void Inode::will_be_destroyed()
         (void)flush_metadata();
 }
 
-ErrorOr<void> Inode::set_atime(time_t)
+ErrorOr<size_t> Inode::write_bytes(off_t offset, size_t length, UserOrKernelBuffer const& target_buffer, OpenFileDescription* open_description)
 {
-    return ENOTIMPL;
+    MutexLocker locker(m_inode_lock);
+    TRY(prepare_to_write_data());
+    return write_bytes_locked(offset, length, target_buffer, open_description);
 }
 
-ErrorOr<void> Inode::set_ctime(time_t)
+ErrorOr<size_t> Inode::read_bytes(off_t offset, size_t length, UserOrKernelBuffer& buffer, OpenFileDescription* open_description) const
 {
-    return ENOTIMPL;
+    MutexLocker locker(m_inode_lock, Mutex::Mode::Shared);
+    return read_bytes_locked(offset, length, buffer, open_description);
 }
 
-ErrorOr<void> Inode::set_mtime(time_t)
+ErrorOr<size_t> Inode::read_until_filled_or_end(off_t offset, size_t length, UserOrKernelBuffer buffer, OpenFileDescription* open_description) const
+{
+    auto remaining_length = length;
+
+    while (remaining_length > 0) {
+        auto filled_bytes = TRY(read_bytes(offset, remaining_length, buffer, open_description));
+        if (filled_bytes == 0)
+            break;
+        offset += filled_bytes;
+        remaining_length -= filled_bytes;
+    }
+
+    return length - remaining_length;
+}
+
+ErrorOr<void> Inode::update_timestamps([[maybe_unused]] Optional<UnixDateTime> atime, [[maybe_unused]] Optional<UnixDateTime> ctime, [[maybe_unused]] Optional<UnixDateTime> mtime)
 {
     return ENOTIMPL;
 }
@@ -131,42 +130,51 @@ ErrorOr<void> Inode::decrement_link_count()
     return ENOTIMPL;
 }
 
-void Inode::set_shared_vmobject(Memory::SharedInodeVMObject& vmobject)
+ErrorOr<void> Inode::set_shared_vmobject(Memory::SharedInodeVMObject& vmobject)
 {
     MutexLocker locker(m_inode_lock);
-    m_shared_vmobject = vmobject;
+    m_shared_vmobject = TRY(vmobject.try_make_weak_ptr<Memory::SharedInodeVMObject>());
+    return {};
+}
+
+LockRefPtr<LocalSocket> Inode::bound_socket() const
+{
+    return m_bound_socket.strong_ref();
 }
 
 bool Inode::bind_socket(LocalSocket& socket)
 {
     MutexLocker locker(m_inode_lock);
-    if (m_socket)
+    if (m_bound_socket)
         return false;
-    m_socket = socket;
+    m_bound_socket = socket;
     return true;
 }
 
 bool Inode::unbind_socket()
 {
     MutexLocker locker(m_inode_lock);
-    if (!m_socket)
+    if (!m_bound_socket)
         return false;
-    m_socket = nullptr;
+    m_bound_socket = nullptr;
     return true;
 }
 
-void Inode::register_watcher(Badge<InodeWatcher>, InodeWatcher& watcher)
+ErrorOr<void> Inode::register_watcher(Badge<InodeWatcher>, InodeWatcher& watcher)
 {
-    MutexLocker locker(m_inode_lock);
-    VERIFY(!m_watchers.contains(&watcher));
-    m_watchers.set(&watcher);
+    return m_watchers.with([&](auto& watchers) -> ErrorOr<void> {
+        VERIFY(!watchers.contains(&watcher));
+        TRY(watchers.try_set(&watcher));
+        return {};
+    });
 }
 
 void Inode::unregister_watcher(Badge<InodeWatcher>, InodeWatcher& watcher)
 {
-    MutexLocker locker(m_inode_lock);
-    VERIFY(m_watchers.contains(&watcher));
-    m_watchers.remove(&watcher);
+    m_watchers.with([&](auto& watchers) {
+        VERIFY(watchers.contains(&watcher));
+        watchers.remove(&watcher);
+    });
 }
 
 ErrorOr<NonnullRefPtr<FIFO>> Inode::fifo()
@@ -197,56 +205,53 @@ void Inode::set_metadata_dirty(bool metadata_dirty)
     if (m_metadata_dirty) {
         // FIXME: Maybe we should hook into modification events somewhere else, I'm not sure where.
         //        We don't always end up on this particular code path, for instance when writing to an ext2fs file.
-        for (auto& watcher : m_watchers) {
+        m_watchers.for_each([&](auto& watcher) {
             watcher->notify_inode_event({}, identifier(), InodeWatcherEvent::Type::MetadataModified);
-        }
+        });
     }
 }
 
-void Inode::did_add_child(InodeIdentifier const&, String const& name)
+void Inode::did_add_child(InodeIdentifier, StringView name)
 {
-    MutexLocker locker(m_inode_lock);
-
-    for (auto& watcher : m_watchers) {
+    m_watchers.for_each([&](auto& watcher) {
         watcher->notify_inode_event({}, identifier(), InodeWatcherEvent::Type::ChildCreated, name);
-    }
+    });
 }
 
-void Inode::did_remove_child(InodeIdentifier const&, String const& name)
+void Inode::did_remove_child(InodeIdentifier, StringView name)
 {
-    MutexLocker locker(m_inode_lock);
-
     if (name == "." || name == "..") {
         // These are just aliases and are not interesting to userspace.
         return;
     }
 
-    for (auto& watcher : m_watchers) {
+    m_watchers.for_each([&](auto& watcher) {
         watcher->notify_inode_event({}, identifier(), InodeWatcherEvent::Type::ChildDeleted, name);
-    }
+    });
 }
 
 void Inode::did_modify_contents()
 {
-    MutexLocker locker(m_inode_lock);
-    for (auto& watcher : m_watchers) {
+    // FIXME: What happens if this fails?
+    //        ENOTIMPL would be a meaningless error to return here
+    auto now = kgettimeofday();
+    (void)update_timestamps({}, now, now);
+
+    m_watchers.for_each([&](auto& watcher) {
         watcher->notify_inode_event({}, identifier(), InodeWatcherEvent::Type::ContentModified);
-    }
+    });
 }
 
 void Inode::did_delete_self()
 {
-    MutexLocker locker(m_inode_lock);
-    for (auto& watcher : m_watchers) {
+    m_watchers.for_each([&](auto& watcher) {
         watcher->notify_inode_event({}, identifier(), InodeWatcherEvent::Type::Deleted);
-    }
+    });
 }
 
 ErrorOr<void> Inode::prepare_to_write_data()
 {
-    // FIXME: It's a poor design that filesystems are expected to call this before writing out data.
-    //        We should funnel everything through an interface at the VirtualFileSystem layer so this can happen from a single place.
-    MutexLocker locker(m_inode_lock);
+    VERIFY(m_inode_lock.is_locked());
     if (fs().is_readonly())
         return EROFS;
     auto metadata = this->metadata();
@@ -257,7 +262,7 @@ ErrorOr<void> Inode::prepare_to_write_data()
     return {};
 }
 
-RefPtr<Memory::SharedInodeVMObject> Inode::shared_vmobject() const
+LockRefPtr<Memory::SharedInodeVMObject> Inode::shared_vmobject() const
 {
     MutexLocker locker(m_inode_lock);
     return m_shared_vmobject.strong_ref();
@@ -289,55 +294,91 @@ static inline ErrorOr<void> normalize_flock(OpenFileDescription const& descripti
     return {};
 }
 
-ErrorOr<void> Inode::can_apply_flock(OpenFileDescription const& description, flock const& new_lock) const
+bool Inode::can_apply_flock(flock const& new_lock, Optional<OpenFileDescription const&> description) const
 {
     VERIFY(new_lock.l_whence == SEEK_SET);
 
-    MutexLocker locker(m_inode_lock, Mutex::Mode::Shared);
+    if (new_lock.l_type == F_UNLCK)
+        return true;
 
-    if (new_lock.l_type == F_UNLCK) {
-        for (auto& lock : m_flocks) {
-            if (&description == lock.owner && lock.start == new_lock.l_start && lock.len == new_lock.l_len)
-                return {};
+    return m_flocks.with([&](auto& flocks) {
+        for (auto const& lock : flocks) {
+            if (!range_overlap(lock.start, lock.len, new_lock.l_start, new_lock.l_len))
+                continue;
+
+            // There are two cases where we can attempt downgrade:
+            //
+            // 1) We're the owner of this lock. The downgrade will immediately
+            //    succeed.
+            // 2) We're not the owner of this lock. Our downgrade attempt will
+            //    fail, and the thread will start blocking on an FlockBlocker.
+            //
+            // For the first case, we get the description from try_apply_flock
+            // below. For the second case, the check below would always be
+            // false, so there is no need to store the description in the
+            // blocker in the first place.
+            if (new_lock.l_type == F_RDLCK && lock.type == F_WRLCK)
+                return description.has_value() && lock.owner == &description.value() && lock.start == new_lock.l_start && lock.len == new_lock.l_len;
+
+            if (new_lock.l_type == F_WRLCK)
+                return false;
         }
-        return EINVAL;
-    }
-
-    for (auto& lock : m_flocks) {
-        if (!range_overlap(lock.start, lock.len, new_lock.l_start, new_lock.l_len))
-            continue;
-
-        if (new_lock.l_type == F_RDLCK && lock.type == F_WRLCK)
-            return EAGAIN;
-
-        if (new_lock.l_type == F_WRLCK)
-            return EAGAIN;
-    }
-    return {};
+        return true;
+    });
 }
 
-ErrorOr<void> Inode::apply_flock(Process const& process, OpenFileDescription const& description, Userspace<flock const*> input_lock)
+ErrorOr<bool> Inode::try_apply_flock(Process const& process, OpenFileDescription const& description, flock const& new_lock)
 {
-    flock new_lock = {};
-    TRY(copy_from_user(&new_lock, input_lock));
-    TRY(normalize_flock(description, new_lock));
+    return m_flocks.with([&](auto& flocks) -> ErrorOr<bool> {
+        if (!can_apply_flock(new_lock, description))
+            return false;
 
-    MutexLocker locker(m_inode_lock);
+        bool did_manipulate_lock = false;
+        for (size_t i = 0; i < flocks.size(); ++i) {
+            auto const& lock = flocks[i];
 
-    TRY(can_apply_flock(description, new_lock));
+            bool is_potential_downgrade = new_lock.l_type == F_RDLCK && lock.type == F_WRLCK;
+            bool is_potential_unlock = new_lock.l_type == F_UNLCK;
 
-    if (new_lock.l_type == F_UNLCK) {
-        for (size_t i = 0; i < m_flocks.size(); ++i) {
-            if (&description == m_flocks[i].owner && m_flocks[i].start == new_lock.l_start && m_flocks[i].len == new_lock.l_len) {
-                m_flocks.remove(i);
-                return {};
+            bool is_lock_owner = &description == lock.owner;
+            bool lock_range_exactly_matches = lock.start == new_lock.l_start && lock.len == new_lock.l_len;
+            bool can_manage_this_lock = is_lock_owner && lock_range_exactly_matches;
+
+            if ((is_potential_downgrade || is_potential_unlock) && can_manage_this_lock) {
+                flocks.remove(i);
+                did_manipulate_lock = true;
+                break;
             }
         }
-        return EINVAL;
-    }
 
-    TRY(m_flocks.try_append(Flock { new_lock.l_start, new_lock.l_len, &description, process.pid().value(), new_lock.l_type }));
-    return {};
+        if (new_lock.l_type != F_UNLCK)
+            TRY(flocks.try_append(Flock { new_lock.l_start, new_lock.l_len, &description, process.pid().value(), new_lock.l_type }));
+
+        if (did_manipulate_lock)
+            m_flock_blocker_set.unblock_all_blockers_whose_conditions_are_met();
+
+        // Judging by the Linux implementation, unlocking a non-existent lock
+        // also works.
+        return true;
+    });
+}
+
+ErrorOr<void> Inode::apply_flock(Process const& process, OpenFileDescription const& description, Userspace<flock const*> input_lock, ShouldBlock should_block)
+{
+    auto new_lock = TRY(copy_typed_from_user(input_lock));
+    TRY(normalize_flock(description, new_lock));
+
+    while (true) {
+        auto success = TRY(try_apply_flock(process, description, new_lock));
+        if (success)
+            return {};
+
+        if (should_block == ShouldBlock::No)
+            return EAGAIN;
+
+        if (Thread::current()->block<Thread::FlockBlocker>({}, *this, new_lock).was_interrupted())
+            return EINTR;
+    }
 }
 
 ErrorOr<void> Inode::get_flock(OpenFileDescription const& description, Userspace<flock*> reference_lock) const
@@ -346,29 +387,36 @@ ErrorOr<void> Inode::get_flock(OpenFileDescription const& description, Userspace
     TRY(copy_from_user(&lookup, reference_lock));
     TRY(normalize_flock(description, lookup));
 
-    MutexLocker locker(m_inode_lock, Mutex::Mode::Shared);
+    return m_flocks.with([&](auto& flocks) {
+        for (auto const& lock : flocks) {
+            if (!range_overlap(lock.start, lock.len, lookup.l_start, lookup.l_len))
+                continue;
 
-    for (auto& lock : m_flocks) {
-        if (!range_overlap(lock.start, lock.len, lookup.l_start, lookup.l_len))
-            continue;
+            // Locks with the same owner can't conflict with each other.
+            if (lock.pid == Process::current().pid())
+                continue;
 
-        if ((lookup.l_type == F_RDLCK && lock.type == F_WRLCK) || lookup.l_type == F_WRLCK) {
-            lookup = { lock.type, SEEK_SET, lock.start, lock.len, lock.pid };
-            return copy_to_user(reference_lock, &lookup);
+            if ((lookup.l_type == F_RDLCK && lock.type == F_WRLCK) || lookup.l_type == F_WRLCK) {
+                lookup = { lock.type, SEEK_SET, lock.start, lock.len, lock.pid };
+                return copy_to_user(reference_lock, &lookup);
+            }
         }
-    }
 
-    lookup.l_type = F_UNLCK;
-    return copy_to_user(reference_lock, &lookup);
+        lookup.l_type = F_UNLCK;
+        return copy_to_user(reference_lock, &lookup);
+    });
 }
 
 void Inode::remove_flocks_for_description(OpenFileDescription const& description)
 {
-    MutexLocker locker(m_inode_lock);
-
-    for (size_t i = 0; i < m_flocks.size(); ++i) {
-        if (&description == m_flocks[i].owner)
-            m_flocks.remove(i--);
-    }
+    m_flocks.with([&](auto& flocks) {
+        flocks.remove_all_matching([&](auto& entry) { return entry.owner == &description; });
+    });
 }
+
+bool Inode::has_watchers() const
+{
+    return !m_watchers.with([&](auto& watchers) { return watchers.is_empty(); });
+}
+
 }

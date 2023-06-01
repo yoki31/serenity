@@ -1,16 +1,21 @@
 /*
  * Copyright (c) 2020-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2020-2022, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2023, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <LibJS/AST.h>
 #include <LibJS/Bytecode/Generator.h>
+#include <LibJS/Runtime/ClassFieldDefinition.h>
+#include <LibJS/Runtime/ExecutionContext.h>
 #include <LibJS/Runtime/FunctionObject.h>
 
 namespace JS {
+
+void async_block_start(VM&, NonnullRefPtr<Statement const> const& parse_node, PromiseCapability const&, ExecutionContext&);
 
 // 10.2 ECMAScript Function Objects, https://tc39.es/ecma262/#sec-ecmascript-function-objects
 class ECMAScriptFunctionObject final : public FunctionObject {
@@ -28,20 +33,22 @@ public:
         Global,
     };
 
-    static ECMAScriptFunctionObject* create(GlobalObject&, FlyString name, Statement const& ecmascript_code, Vector<FunctionNode::Parameter> parameters, i32 m_function_length, Environment* parent_scope, PrivateEnvironment* private_scope, FunctionKind, bool is_strict, bool might_need_arguments_object = true, bool contains_direct_call_to_eval = true, bool is_arrow_function = false);
+    static NonnullGCPtr<ECMAScriptFunctionObject> create(Realm&, DeprecatedFlyString name, DeprecatedString source_text, Statement const& ecmascript_code, Vector<FunctionParameter> parameters, i32 m_function_length, Environment* parent_environment, PrivateEnvironment* private_environment, FunctionKind, bool is_strict, bool might_need_arguments_object = true, bool contains_direct_call_to_eval = true, bool is_arrow_function = false, Variant<PropertyKey, PrivateName, Empty> class_field_initializer_name = {});
+    static NonnullGCPtr<ECMAScriptFunctionObject> create(Realm&, DeprecatedFlyString name, Object& prototype, DeprecatedString source_text, Statement const& ecmascript_code, Vector<FunctionParameter> parameters, i32 m_function_length, Environment* parent_environment, PrivateEnvironment* private_environment, FunctionKind, bool is_strict, bool might_need_arguments_object = true, bool contains_direct_call_to_eval = true, bool is_arrow_function = false, Variant<PropertyKey, PrivateName, Empty> class_field_initializer_name = {});
 
-    ECMAScriptFunctionObject(FlyString name, Statement const& ecmascript_code, Vector<FunctionNode::Parameter> parameters, i32 m_function_length, Environment* parent_scope, PrivateEnvironment* private_scope, Object& prototype, FunctionKind, bool is_strict, bool might_need_arguments_object, bool contains_direct_call_to_eval, bool is_arrow_function);
-    virtual void initialize(GlobalObject&) override;
-    virtual ~ECMAScriptFunctionObject();
+    virtual ThrowCompletionOr<void> initialize(Realm&) override;
+    virtual ~ECMAScriptFunctionObject() override = default;
 
-    virtual ThrowCompletionOr<Value> internal_call(Value this_argument, MarkedValueList arguments_list) override;
-    virtual ThrowCompletionOr<Object*> internal_construct(MarkedValueList arguments_list, FunctionObject& new_target) override;
+    virtual ThrowCompletionOr<Value> internal_call(Value this_argument, MarkedVector<Value> arguments_list) override;
+    virtual ThrowCompletionOr<NonnullGCPtr<Object>> internal_construct(MarkedVector<Value> arguments_list, FunctionObject& new_target) override;
+
+    void make_method(Object& home_object);
 
     Statement const& ecmascript_code() const { return m_ecmascript_code; }
-    Vector<FunctionNode::Parameter> const& formal_parameters() const { return m_formal_parameters; };
+    Vector<FunctionParameter> const& formal_parameters() const { return m_formal_parameters; };
 
-    virtual const FlyString& name() const override { return m_name; };
-    void set_name(const FlyString& name);
+    virtual DeprecatedFlyString const& name() const override { return m_name; };
+    void set_name(DeprecatedFlyString const& name);
 
     void set_is_class_constructor() { m_is_class_constructor = true; };
 
@@ -58,13 +65,11 @@ public:
     Object* home_object() const { return m_home_object; }
     void set_home_object(Object* home_object) { m_home_object = home_object; }
 
-    struct InstanceField {
-        Variant<PropertyKey, PrivateName> name;
-        ECMAScriptFunctionObject* initializer { nullptr };
-    };
+    DeprecatedString const& source_text() const { return m_source_text; }
+    void set_source_text(DeprecatedString source_text) { m_source_text = move(source_text); }
 
-    Vector<InstanceField> const& fields() const { return m_fields; }
-    void add_field(Variant<PropertyKey, PrivateName> property_key, ECMAScriptFunctionObject* initializer);
+    Vector<ClassFieldDefinition> const& fields() const { return m_fields; }
+    void add_field(ClassFieldDefinition field) { m_fields.append(move(field)); }
 
     Vector<PrivateElement> const& private_methods() const { return m_private_methods; }
     void add_private_method(PrivateElement method) { m_private_methods.append(move(method)); };
@@ -73,9 +78,15 @@ public:
     bool has_simple_parameter_list() const { return m_has_simple_parameter_list; }
 
     // Equivalent to absence of [[Construct]]
-    virtual bool has_constructor() const override { return m_kind == FunctionKind::Regular && !m_is_arrow_function; }
+    virtual bool has_constructor() const override { return m_kind == FunctionKind::Normal && !m_is_arrow_function; }
 
     FunctionKind kind() const { return m_kind; }
+
+    // This is used by LibWeb to disassociate event handler attribute callback functions from the nearest script on the call stack.
+    // https://html.spec.whatwg.org/multipage/webappapis.html#getting-the-current-value-of-the-event-handler Step 3.11
+    void set_script_or_module(ScriptOrModule script_or_module) { m_script_or_module = move(script_or_module); }
+
+    Variant<PropertyKey, PrivateName, Empty> const& class_field_initializer_name() const { return m_class_field_initializer_name; }
 
 protected:
     virtual bool is_strict_mode() const final { return m_strict; }
@@ -83,6 +94,8 @@ protected:
     virtual Completion ordinary_call_evaluate_body();
 
 private:
+    ECMAScriptFunctionObject(DeprecatedFlyString name, DeprecatedString source_text, Statement const& ecmascript_code, Vector<FunctionParameter> parameters, i32 m_function_length, Environment* parent_environment, PrivateEnvironment* private_environment, Object& prototype, FunctionKind, bool is_strict, bool might_need_arguments_object, bool contains_direct_call_to_eval, bool is_arrow_function, Variant<PropertyKey, PrivateName, Empty> class_field_initializer_name);
+
     virtual bool is_ecmascript_function_object() const override { return true; }
     virtual void visit_edges(Visitor&) override;
 
@@ -90,32 +103,39 @@ private:
     void ordinary_call_bind_this(ExecutionContext&, Value this_argument);
 
     void async_function_start(PromiseCapability const&);
-    void async_block_start(PromiseCapability const&, ExecutionContext&);
 
     ThrowCompletionOr<void> function_declaration_instantiation(Interpreter*);
 
-    // Internal Slots of ECMAScript Function Objects, https://tc39.es/ecma262/#table-internal-slots-of-ecmascript-function-objects
-    Environment* m_environment { nullptr };                       // [[Environment]]
-    PrivateEnvironment* m_private_environment { nullptr };        // [[PrivateEnvironment]]
-    Vector<FunctionNode::Parameter> const m_formal_parameters;    // [[FormalParameters]]
-    NonnullRefPtr<Statement> m_ecmascript_code;                   // [[ECMAScriptCode]]
-    ConstructorKind m_constructor_kind { ConstructorKind::Base }; // [[ConstructorKind]]
-    Realm* m_realm { nullptr };                                   // [[Realm]]
-    ThisMode m_this_mode { ThisMode::Global };                    // [[ThisMode]]
-    bool m_strict { false };                                      // [[Strict]]
-    Object* m_home_object { nullptr };                            // [[HomeObject]]
-    Vector<InstanceField> m_fields;                               // [[Fields]]
-    Vector<PrivateElement> m_private_methods;                     // [[PrivateMethods]]
-    bool m_is_class_constructor { false };                        // [[IsClassConstructor]]
-
-    FlyString m_name;
-    Optional<Bytecode::Executable> m_bytecode_executable;
+    DeprecatedFlyString m_name;
+    OwnPtr<Bytecode::Executable> m_bytecode_executable;
+    Vector<OwnPtr<Bytecode::Executable>> m_default_parameter_bytecode_executables;
     i32 m_function_length { 0 };
-    FunctionKind m_kind { FunctionKind::Regular };
-    bool m_might_need_arguments_object { true };
-    bool m_contains_direct_call_to_eval { true };
-    bool m_is_arrow_function { false };
-    bool m_has_simple_parameter_list { false };
+
+    // Internal Slots of ECMAScript Function Objects, https://tc39.es/ecma262/#table-internal-slots-of-ecmascript-function-objects
+    GCPtr<Environment> m_environment;                                        // [[Environment]]
+    GCPtr<PrivateEnvironment> m_private_environment;                         // [[PrivateEnvironment]]
+    Vector<FunctionParameter> const m_formal_parameters;                     // [[FormalParameters]]
+    NonnullRefPtr<Statement const> m_ecmascript_code;                        // [[ECMAScriptCode]]
+    GCPtr<Realm> m_realm;                                                    // [[Realm]]
+    ScriptOrModule m_script_or_module;                                       // [[ScriptOrModule]]
+    GCPtr<Object> m_home_object;                                             // [[HomeObject]]
+    DeprecatedString m_source_text;                                          // [[SourceText]]
+    Vector<ClassFieldDefinition> m_fields;                                   // [[Fields]]
+    Vector<PrivateElement> m_private_methods;                                // [[PrivateMethods]]
+    Variant<PropertyKey, PrivateName, Empty> m_class_field_initializer_name; // [[ClassFieldInitializerName]]
+    ConstructorKind m_constructor_kind : 1 { ConstructorKind::Base };        // [[ConstructorKind]]
+    bool m_strict : 1 { false };                                             // [[Strict]]
+    bool m_is_class_constructor : 1 { false };                               // [[IsClassConstructor]]
+    ThisMode m_this_mode : 2 { ThisMode::Global };                           // [[ThisMode]]
+
+    bool m_might_need_arguments_object : 1 { true };
+    bool m_contains_direct_call_to_eval : 1 { true };
+    bool m_is_arrow_function : 1 { false };
+    bool m_has_simple_parameter_list : 1 { false };
+    FunctionKind m_kind : 3 { FunctionKind::Normal };
 };
+
+template<>
+inline bool Object::fast_is<ECMAScriptFunctionObject>() const { return is_ecmascript_function_object(); }
 
 }

@@ -9,58 +9,68 @@
 #include <Clipboard/ClipboardServerEndpoint.h>
 #include <LibGUI/Clipboard.h>
 #include <LibGfx/Bitmap.h>
-#include <LibIPC/ServerConnection.h>
+#include <LibIPC/ConnectionToServer.h>
 
 namespace GUI {
 
-class ClipboardServerConnection final
-    : public IPC::ServerConnection<ClipboardClientEndpoint, ClipboardServerEndpoint>
+class ConnectionToClipboardServer final
+    : public IPC::ConnectionToServer<ClipboardClientEndpoint, ClipboardServerEndpoint>
     , public ClipboardClientEndpoint {
-    C_OBJECT(ClipboardServerConnection);
+    IPC_CLIENT_CONNECTION(ConnectionToClipboardServer, "/tmp/session/%sid/portal/clipboard"sv)
 
 private:
-    ClipboardServerConnection()
-        : IPC::ServerConnection<ClipboardClientEndpoint, ClipboardServerEndpoint>(*this, "/tmp/portal/clipboard")
+    ConnectionToClipboardServer(NonnullOwnPtr<Core::LocalSocket> socket)
+        : IPC::ConnectionToServer<ClipboardClientEndpoint, ClipboardServerEndpoint>(*this, move(socket))
     {
     }
 
-    virtual void clipboard_data_changed(String const& mime_type) override
+    virtual void clipboard_data_changed(DeprecatedString const& mime_type) override
     {
         Clipboard::the().clipboard_data_changed({}, mime_type);
     }
 };
 
-static ClipboardServerConnection* s_connection;
+static RefPtr<ConnectionToClipboardServer> s_connection;
 
-static ClipboardServerConnection& connection()
+static ConnectionToClipboardServer& connection()
 {
     return *s_connection;
 }
 
-void Clipboard::initialize(Badge<Application>)
+ErrorOr<void> Clipboard::initialize(Badge<Application>)
 {
-    s_connection = &ClipboardServerConnection::construct().leak_ref();
+    s_connection = TRY(ConnectionToClipboardServer::try_create());
+    return {};
 }
 
 Clipboard& Clipboard::the()
 {
-    static Clipboard* s_the;
-    if (!s_the)
-        s_the = new Clipboard;
-    return *s_the;
+    static bool s_destructed = false;
+    static ScopeGuard destructed_guard([] {
+        s_destructed = true;
+    });
+    VERIFY(!s_destructed); // Catch use-after-free
+
+    static Clipboard s_the;
+    return s_the;
 }
 
 Clipboard::DataAndType Clipboard::fetch_data_and_type() const
 {
     auto response = connection().get_clipboard_data();
-    if (!response.data().is_valid())
-        return {};
-    auto data = ByteBuffer::copy(response.data().data<void>(), response.data().size());
-    if (!data.has_value())
+    auto type = response.mime_type();
+    auto metadata = response.metadata();
+
+    auto metadata_clone_or_error = metadata.clone();
+    if (metadata_clone_or_error.is_error())
         return {};
 
-    auto type = response.mime_type();
-    auto metadata = response.metadata().entries();
+    if (!response.data().is_valid())
+        return { {}, type, metadata_clone_or_error.release_value() };
+    auto data = ByteBuffer::copy(response.data().data<void>(), response.data().size());
+    if (data.is_error())
+        return {};
+
     return { data.release_value(), type, metadata };
 }
 
@@ -99,12 +109,12 @@ RefPtr<Gfx::Bitmap> Clipboard::DataAndType::as_bitmap() const
 
     // We won't actually write to the clipping_bitmap, so casting away the const is okay.
     auto clipping_data = const_cast<u8*>(data.data());
-    auto clipping_bitmap_or_error = Gfx::Bitmap::try_create_wrapper(bitmap_format, { (int)width.value(), (int)height.value() }, scale.value(), pitch.value(), clipping_data);
+    auto clipping_bitmap_or_error = Gfx::Bitmap::create_wrapper(bitmap_format, { (int)width.value(), (int)height.value() }, scale.value(), pitch.value(), clipping_data);
     if (clipping_bitmap_or_error.is_error())
         return nullptr;
     auto clipping_bitmap = clipping_bitmap_or_error.release_value_but_fixme_should_propagate_errors();
 
-    auto bitmap_or_error = Gfx::Bitmap::try_create(Gfx::BitmapFormat::BGRA8888, { (int)width.value(), (int)height.value() }, scale.value());
+    auto bitmap_or_error = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, { (int)width.value(), (int)height.value() }, scale.value());
     if (bitmap_or_error.is_error())
         return nullptr;
     auto bitmap = bitmap_or_error.release_value_but_fixme_should_propagate_errors();
@@ -119,29 +129,55 @@ RefPtr<Gfx::Bitmap> Clipboard::DataAndType::as_bitmap() const
     return bitmap;
 }
 
-void Clipboard::set_data(ReadonlyBytes data, String const& type, HashMap<String, String> const& metadata)
+ErrorOr<Clipboard::DataAndType> Clipboard::DataAndType::from_json(JsonObject const& object)
 {
+    if (!object.has("data"sv) && !object.has("mime_type"sv))
+        return Error::from_string_literal("JsonObject does not contain necessary fields");
+
+    DataAndType result;
+    result.data = object.get_deprecated_string("data"sv)->to_byte_buffer();
+    result.mime_type = *object.get_deprecated_string("mime_type"sv);
+    // FIXME: Also read metadata
+
+    return result;
+}
+
+ErrorOr<JsonObject> Clipboard::DataAndType::to_json() const
+{
+    JsonObject object;
+    object.set("data", TRY(DeprecatedString::from_utf8(data.bytes())));
+    object.set("mime_type", mime_type);
+    // FIXME: Also write metadata
+
+    return object;
+}
+
+void Clipboard::set_data(ReadonlyBytes data, DeprecatedString const& type, HashMap<DeprecatedString, DeprecatedString> const& metadata)
+{
+    if (data.is_empty()) {
+        connection().async_set_clipboard_data({}, type, metadata.clone().release_value_but_fixme_should_propagate_errors());
+        return;
+    }
+
     auto buffer_or_error = Core::AnonymousBuffer::create_with_size(data.size());
     if (buffer_or_error.is_error()) {
         dbgln("GUI::Clipboard::set_data() failed to create a buffer");
         return;
     }
     auto buffer = buffer_or_error.release_value();
-    if (!data.is_empty())
-        memcpy(buffer.data<void>(), data.data(), data.size());
-
-    connection().async_set_clipboard_data(move(buffer), type, metadata);
+    memcpy(buffer.data<void>(), data.data(), data.size());
+    connection().async_set_clipboard_data(move(buffer), type, metadata.clone().release_value_but_fixme_should_propagate_errors());
 }
 
-void Clipboard::set_bitmap(Gfx::Bitmap const& bitmap)
+void Clipboard::set_bitmap(Gfx::Bitmap const& bitmap, HashMap<DeprecatedString, DeprecatedString> const& additional_metadata)
 {
-    HashMap<String, String> metadata;
-    metadata.set("width", String::number(bitmap.width()));
-    metadata.set("height", String::number(bitmap.height()));
-    metadata.set("scale", String::number(bitmap.scale()));
-    metadata.set("format", String::number((int)bitmap.format()));
-    metadata.set("pitch", String::number(bitmap.pitch()));
-    set_data({ bitmap.scanline(0), bitmap.size_in_bytes() }, "image/x-serenityos", metadata);
+    HashMap<DeprecatedString, DeprecatedString> metadata = additional_metadata.clone().release_value_but_fixme_should_propagate_errors();
+    metadata.set("width", DeprecatedString::number(bitmap.width()));
+    metadata.set("height", DeprecatedString::number(bitmap.height()));
+    metadata.set("scale", DeprecatedString::number(bitmap.scale()));
+    metadata.set("format", DeprecatedString::number((int)bitmap.format()));
+    metadata.set("pitch", DeprecatedString::number(bitmap.pitch()));
+    set_data({ bitmap.scanline(0), bitmap.size_in_bytes() }, "image/x-serenityos", move(metadata));
 }
 
 void Clipboard::clear()
@@ -149,7 +185,7 @@ void Clipboard::clear()
     connection().async_set_clipboard_data({}, {}, {});
 }
 
-void Clipboard::clipboard_data_changed(Badge<ClipboardServerConnection>, String const& mime_type)
+void Clipboard::clipboard_data_changed(Badge<ConnectionToClipboardServer>, DeprecatedString const& mime_type)
 {
     if (on_change)
         on_change(mime_type);

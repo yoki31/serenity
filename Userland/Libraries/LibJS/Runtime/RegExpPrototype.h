@@ -12,29 +12,29 @@
 
 namespace JS {
 
-ThrowCompletionOr<Value> regexp_exec(GlobalObject& global_object, Object& regexp_object, Utf16String string);
+ThrowCompletionOr<Value> regexp_exec(VM&, Object& regexp_object, Utf16String string);
 size_t advance_string_index(Utf16View const& string, size_t index, bool unicode);
 
 class RegExpPrototype final : public PrototypeObject<RegExpPrototype, RegExpObject> {
     JS_PROTOTYPE_OBJECT(RegExpPrototype, RegExpObject, RegExp);
 
 public:
-    explicit RegExpPrototype(GlobalObject&);
-    virtual void initialize(GlobalObject&) override;
-    virtual ~RegExpPrototype() override;
+    virtual ThrowCompletionOr<void> initialize(Realm&) override;
+    virtual ~RegExpPrototype() override = default;
 
 private:
-    JS_DECLARE_NATIVE_FUNCTION(flags);
-    JS_DECLARE_NATIVE_FUNCTION(source);
+    explicit RegExpPrototype(Realm&);
 
     JS_DECLARE_NATIVE_FUNCTION(exec);
-    JS_DECLARE_NATIVE_FUNCTION(test);
-    JS_DECLARE_NATIVE_FUNCTION(to_string);
+    JS_DECLARE_NATIVE_FUNCTION(flags);
     JS_DECLARE_NATIVE_FUNCTION(symbol_match);
     JS_DECLARE_NATIVE_FUNCTION(symbol_match_all);
     JS_DECLARE_NATIVE_FUNCTION(symbol_replace);
     JS_DECLARE_NATIVE_FUNCTION(symbol_search);
+    JS_DECLARE_NATIVE_FUNCTION(source);
     JS_DECLARE_NATIVE_FUNCTION(symbol_split);
+    JS_DECLARE_NATIVE_FUNCTION(test);
+    JS_DECLARE_NATIVE_FUNCTION(to_string);
     JS_DECLARE_NATIVE_FUNCTION(compile);
 
 #define __JS_ENUMERATE(_, flag_name, ...) \

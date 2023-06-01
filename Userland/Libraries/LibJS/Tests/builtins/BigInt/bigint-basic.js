@@ -37,9 +37,20 @@ describe("correct behavior", () => {
 
     test("bitwise operators", () => {
         expect(12n & 5n).toBe(4n);
+        expect(3n & -2n).toBe(2n);
+        expect(-3n & -2n).toBe(-4n);
+        expect(-3n & 2n).toBe(0n);
+        expect(0xffff_ffffn & -1n).toBe(0xffff_ffffn);
+
         expect(1n | 2n).toBe(3n);
+        expect(0n | -1n).toBe(-1n);
+        expect(0n | -2n).toBe(-2n);
+
         expect(5n ^ 3n).toBe(6n);
+
         expect(~1n).toBe(-2n);
+        expect(~-1n).toBe(0n);
+
         expect(5n << 2n).toBe(20n);
         expect(7n >> 1n).toBe(3n);
     });
@@ -88,6 +99,16 @@ describe("correct behavior", () => {
         expect(Object(2n) == 1n).toBeFalse();
         expect(1n != Object(2n)).toBeTrue();
         expect(Object(2n) != 1n).toBeTrue();
+
+        expect(2n == "2").toBeTrue();
+        expect(2n == "0b10").toBeTrue();
+        expect(2n == "0o2").toBeTrue();
+        expect(2n == "0x2").toBeTrue();
+
+        expect(1n == "2").toBeFalse();
+        expect(1n == "0b10").toBeFalse();
+        expect(1n == "0o2").toBeFalse();
+        expect(1n == "0x2").toBeFalse();
     });
 
     test("strong equality operators", () => {
@@ -107,6 +128,70 @@ describe("correct behavior", () => {
         const b = 704179908449526267977309288010258n;
         expect(a === a).toBeTrue();
         expect(a === b).toBeFalse();
+    });
+
+    test("less-than operators", () => {
+        expect(1n < 1n).toBeFalse();
+        expect(1n < 1).toBeFalse();
+        expect(1 < 1n).toBeFalse();
+        expect(1n < 2n).toBeTrue();
+        expect(1n < 2).toBeTrue();
+        expect(1 < 2n).toBeTrue();
+        expect(1n < 1.23).toBeTrue();
+        expect(1.23 < 1n).toBeFalse();
+
+        expect(1n <= 1n).toBeTrue();
+        expect(1n <= 1).toBeTrue();
+        expect(1 <= 1n).toBeTrue();
+        expect(1n <= 2n).toBeTrue();
+        expect(1n <= 2).toBeTrue();
+        expect(1 <= 2n).toBeTrue();
+        expect(1n <= 1.23).toBeTrue();
+        expect(1.23 <= 1n).toBeFalse();
+
+        expect(1n < "1").toBeFalse();
+        expect(1n < "2").toBeTrue();
+        expect(1n < "1.23").toBeFalse();
+
+        expect(1n <= "1").toBeTrue();
+        expect(1n <= "2").toBeTrue();
+        expect(1n <= "1.23").toBeFalse();
+
+        expect(1n < "0b1").toBeFalse();
+        expect(1n < "0B10").toBeTrue();
+        expect(1n < "0o1").toBeFalse();
+        expect(1n < "0O2").toBeTrue();
+        expect(1n < "0x1").toBeFalse();
+        expect(1n < "0X2").toBeTrue();
+
+        expect(1n <= "0b1").toBeTrue();
+        expect(1n <= "0B10").toBeTrue();
+        expect(1n <= "0o1").toBeTrue();
+        expect(1n <= "0O2").toBeTrue();
+        expect(1n <= "0x1").toBeTrue();
+        expect(1n <= "0X2").toBeTrue();
+
+        expect("1" < 1n).toBeFalse();
+        expect("1" < 2n).toBeTrue();
+        expect("1.23" < 1n).toBeFalse();
+
+        expect("1" <= 1n).toBeTrue();
+        expect("1" <= 2n).toBeTrue();
+        expect("1.23" <= 1n).toBeFalse();
+
+        expect("0b1" < 1n).toBeFalse();
+        expect("0B1" < 2n).toBeTrue();
+        expect("0o1" < 1n).toBeFalse();
+        expect("0O1" < 2n).toBeTrue();
+        expect("0x1" < 1n).toBeFalse();
+        expect("0X1" < 2n).toBeTrue();
+
+        expect("0b1" <= 1n).toBeTrue();
+        expect("0B10" <= 2n).toBeTrue();
+        expect("0o1" <= 1n).toBeTrue();
+        expect("0O2" <= 2n).toBeTrue();
+        expect("0x1" <= 1n).toBeTrue();
+        expect("0X2" <= 2n).toBeTrue();
     });
 });
 

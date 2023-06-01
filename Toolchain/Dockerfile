@@ -1,4 +1,4 @@
-FROM ubuntu:21.10
+FROM ubuntu:22.10
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -8,8 +8,8 @@ RUN apt-get update -y \
         ccache \
         cmake \
         curl \
-        g++-10 \
-        gcc-10 \
+        g++-12 \
+        gcc-12 \
         e2fsprogs \
         genext2fs \
         git \
@@ -25,7 +25,8 @@ RUN apt-get update -y \
         qemu-utils \
         rsync \
         sudo \
+        texinfo \
         tzdata \
         unzip \
     && rm -rf /var/lib/apt/lists/ \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 900 --slave /usr/bin/g++ g++ /usr/bin/g++-10
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 900 --slave /usr/bin/g++ g++ /usr/bin/g++-12

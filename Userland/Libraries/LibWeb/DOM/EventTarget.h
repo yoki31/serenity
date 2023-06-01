@@ -1,72 +1,85 @@
 /*
- * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2020-2022, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
-#include <AK/FlyString.h>
-#include <AK/Function.h>
+#include <AK/DeprecatedFlyString.h>
 #include <AK/Noncopyable.h>
 #include <AK/Vector.h>
 #include <LibJS/Forward.h>
-#include <LibWeb/DOM/ExceptionOr.h>
+#include <LibWeb/Bindings/PlatformObject.h>
+#include <LibWeb/DOM/DOMEventListener.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/HTML/EventHandler.h>
+#include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::DOM {
 
-class EventTarget {
-    AK_MAKE_NONCOPYABLE(EventTarget);
-    AK_MAKE_NONMOVABLE(EventTarget);
+class EventTarget : public Bindings::PlatformObject {
+    WEB_PLATFORM_OBJECT(EventTarget, Bindings::PlatformObject);
 
 public:
-    virtual ~EventTarget();
+    virtual ~EventTarget() override;
 
-    void ref() { ref_event_target(); }
-    void unref() { unref_event_target(); }
+    static WebIDL::ExceptionOr<JS::NonnullGCPtr<EventTarget>> construct_impl(JS::Realm&);
 
-    void add_event_listener(const FlyString& event_name, RefPtr<EventListener>);
-    void remove_event_listener(const FlyString& event_name, RefPtr<EventListener>);
+    virtual bool is_focusable() const { return false; }
 
-    void remove_from_event_listener_list(NonnullRefPtr<EventListener>);
+    void add_event_listener(FlyString const& type, IDLEventListener* callback, Variant<AddEventListenerOptions, bool> const& options);
+    void remove_event_listener(FlyString const& type, IDLEventListener* callback, Variant<EventListenerOptions, bool> const& options);
 
-    virtual bool dispatch_event(NonnullRefPtr<Event>);
-    ExceptionOr<bool> dispatch_event_binding(NonnullRefPtr<Event>);
+    // NOTE: These are for internal use only. They operate as though addEventListener(type, callback) was called instead of addEventListener(type, callback, options).
+    void add_event_listener_without_options(FlyString const& type, IDLEventListener& callback);
+    void remove_event_listener_without_options(FlyString const& type, IDLEventListener& callback);
 
-    virtual JS::Object* create_wrapper(JS::GlobalObject&) = 0;
-    Bindings::ScriptExecutionContext* script_execution_context() { return m_script_execution_context; }
+    virtual bool dispatch_event(Event&);
+    WebIDL::ExceptionOr<bool> dispatch_event_binding(Event&);
 
-    virtual EventTarget* get_parent(const Event&) { return nullptr; }
+    virtual EventTarget* get_parent(Event const&) { return nullptr; }
 
-    struct EventListenerRegistration {
-        FlyString event_name;
-        NonnullRefPtr<EventListener> listener;
-    };
+    void add_an_event_listener(DOMEventListener&);
+    void remove_an_event_listener(DOMEventListener&);
+    void remove_from_event_listener_list(DOMEventListener&);
 
-    Vector<EventListenerRegistration>& listeners() { return m_listeners; }
-    const Vector<EventListenerRegistration>& listeners() const { return m_listeners; }
+    Vector<JS::Handle<DOMEventListener>> event_listener_list();
 
-    Function<void(const Event&)> activation_behavior;
+    Function<void(Event const&)> activation_behavior;
 
     // NOTE: These only exist for checkbox and radio input elements.
-    Function<void()> legacy_pre_activation_behavior;
-    Function<void()> legacy_cancelled_activation_behavior;
+    virtual void legacy_pre_activation_behavior() { }
+    virtual void legacy_cancelled_activation_behavior() { }
+    virtual void legacy_cancelled_activation_behavior_was_not_called() { }
 
-    HTML::EventHandler event_handler_attribute(FlyString const& name);
-    void set_event_handler_attribute(FlyString const& name, HTML::EventHandler);
+    WebIDL::CallbackType* event_handler_attribute(FlyString const& name);
+    void set_event_handler_attribute(FlyString const& name, WebIDL::CallbackType*);
+
+    bool has_event_listener(FlyString const& type) const;
+    bool has_event_listeners() const;
 
 protected:
-    explicit EventTarget(Bindings::ScriptExecutionContext&);
+    explicit EventTarget(JS::Realm&);
 
-    virtual void ref_event_target() = 0;
-    virtual void unref_event_target() = 0;
+    void element_event_handler_attribute_changed(FlyString const& local_name, Optional<String> const& value);
+
+    virtual JS::ThrowCompletionOr<void> initialize(JS::Realm&) override;
+    virtual void visit_edges(Cell::Visitor&) override;
 
 private:
-    // FIXME: This should not be a raw pointer.
-    Bindings::ScriptExecutionContext* m_script_execution_context { nullptr };
+    Vector<JS::NonnullGCPtr<DOMEventListener>> m_event_listener_list;
 
-    Vector<EventListenerRegistration> m_listeners;
+    // https://html.spec.whatwg.org/multipage/webappapis.html#event-handler-map
+    // Spec Note: The order of the entries of event handler map could be arbitrary. It is not observable through any algorithms that operate on the map.
+    HashMap<FlyString, JS::GCPtr<HTML::EventHandler>> m_event_handler_map;
+
+    WebIDL::CallbackType* get_current_value_of_event_handler(FlyString const& name);
+    void activate_event_handler(FlyString const& name, HTML::EventHandler& event_handler);
+    void deactivate_event_handler(FlyString const& name);
+    JS::ThrowCompletionOr<void> process_event_handler_for_event(FlyString const& name, Event& event);
 };
+
+bool is_window_reflecting_body_element_event_handler(FlyString const& name);
 
 }

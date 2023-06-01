@@ -6,12 +6,14 @@
 
 #pragma once
 
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <LibCrypto/Hash/HashFunction.h>
 
-namespace Crypto {
-namespace Hash {
+#ifndef KERNEL
+#    include <AK/DeprecatedString.h>
+#endif
+
+namespace Crypto::Hash {
 
 namespace SHA256Constants {
 constexpr static u32 RoundConstants[64] {
@@ -72,16 +74,8 @@ constexpr static u64 InitializationHashes[8] = {
 };
 }
 
-template<size_t Bytes>
-struct SHA2Digest {
-    u8 data[Bytes];
-    constexpr static size_t Size = Bytes;
-    const u8* immutable_data() const { return data; }
-    size_t data_length() const { return Bytes; }
-};
-
 // FIXME: I want template<size_t BlockSize> but the compiler gets confused
-class SHA256 final : public HashFunction<512, SHA2Digest<256 / 8>> {
+class SHA256 final : public HashFunction<512, 256> {
 public:
     using HashFunction::update;
 
@@ -90,27 +84,29 @@ public:
         reset();
     }
 
-    virtual void update(const u8*, size_t) override;
+    virtual void update(u8 const*, size_t) override;
 
     virtual DigestType digest() override;
     virtual DigestType peek() override;
 
-    inline static DigestType hash(const u8* data, size_t length)
+    static DigestType hash(u8 const* data, size_t length)
     {
         SHA256 sha;
         sha.update(data, length);
         return sha.digest();
     }
 
-    inline static DigestType hash(const ByteBuffer& buffer) { return hash(buffer.data(), buffer.size()); }
-    inline static DigestType hash(StringView buffer) { return hash((const u8*)buffer.characters_without_null_termination(), buffer.length()); }
+    static DigestType hash(ByteBuffer const& buffer) { return hash(buffer.data(), buffer.size()); }
+    static DigestType hash(StringView buffer) { return hash((u8 const*)buffer.characters_without_null_termination(), buffer.length()); }
 
-    virtual String class_name() const override
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
     {
-        return String::formatted("SHA{}", DigestSize * 8);
+        return DeprecatedString::formatted("SHA{}", DigestSize * 8);
     }
+#endif
 
-    inline virtual void reset() override
+    virtual void reset() override
     {
         m_data_length = 0;
         m_bit_length = 0;
@@ -119,7 +115,7 @@ public:
     }
 
 private:
-    inline void transform(const u8*);
+    inline void transform(u8 const*);
 
     u8 m_data_buffer[BlockSize] {};
     size_t m_data_length { 0 };
@@ -131,7 +127,7 @@ private:
     constexpr static auto Rounds = 64;
 };
 
-class SHA384 final : public HashFunction<1024, SHA2Digest<384 / 8>> {
+class SHA384 final : public HashFunction<1024, 384> {
 public:
     using HashFunction::update;
 
@@ -140,27 +136,29 @@ public:
         reset();
     }
 
-    virtual void update(const u8*, size_t) override;
+    virtual void update(u8 const*, size_t) override;
 
     virtual DigestType digest() override;
     virtual DigestType peek() override;
 
-    inline static DigestType hash(const u8* data, size_t length)
+    static DigestType hash(u8 const* data, size_t length)
     {
         SHA384 sha;
         sha.update(data, length);
         return sha.digest();
     }
 
-    inline static DigestType hash(const ByteBuffer& buffer) { return hash(buffer.data(), buffer.size()); }
-    inline static DigestType hash(StringView buffer) { return hash((const u8*)buffer.characters_without_null_termination(), buffer.length()); }
+    static DigestType hash(ByteBuffer const& buffer) { return hash(buffer.data(), buffer.size()); }
+    static DigestType hash(StringView buffer) { return hash((u8 const*)buffer.characters_without_null_termination(), buffer.length()); }
 
-    virtual String class_name() const override
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
     {
-        return String::formatted("SHA{}", DigestSize * 8);
+        return DeprecatedString::formatted("SHA{}", DigestSize * 8);
     }
+#endif
 
-    inline virtual void reset() override
+    virtual void reset() override
     {
         m_data_length = 0;
         m_bit_length = 0;
@@ -169,7 +167,7 @@ public:
     }
 
 private:
-    inline void transform(const u8*);
+    inline void transform(u8 const*);
 
     u8 m_data_buffer[BlockSize] {};
     size_t m_data_length { 0 };
@@ -177,11 +175,11 @@ private:
     u64 m_bit_length { 0 };
     u64 m_state[8];
 
-    constexpr static auto FinalBlockDataSize = BlockSize - 8;
+    constexpr static auto FinalBlockDataSize = BlockSize - 16;
     constexpr static auto Rounds = 80;
 };
 
-class SHA512 final : public HashFunction<1024, SHA2Digest<512 / 8>> {
+class SHA512 final : public HashFunction<1024, 512> {
 public:
     using HashFunction::update;
 
@@ -190,27 +188,29 @@ public:
         reset();
     }
 
-    virtual void update(const u8*, size_t) override;
+    virtual void update(u8 const*, size_t) override;
 
     virtual DigestType digest() override;
     virtual DigestType peek() override;
 
-    inline static DigestType hash(const u8* data, size_t length)
+    static DigestType hash(u8 const* data, size_t length)
     {
         SHA512 sha;
         sha.update(data, length);
         return sha.digest();
     }
 
-    inline static DigestType hash(const ByteBuffer& buffer) { return hash(buffer.data(), buffer.size()); }
-    inline static DigestType hash(StringView buffer) { return hash((const u8*)buffer.characters_without_null_termination(), buffer.length()); }
+    static DigestType hash(ByteBuffer const& buffer) { return hash(buffer.data(), buffer.size()); }
+    static DigestType hash(StringView buffer) { return hash((u8 const*)buffer.characters_without_null_termination(), buffer.length()); }
 
-    virtual String class_name() const override
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
     {
-        return String::formatted("SHA{}", DigestSize * 8);
+        return DeprecatedString::formatted("SHA{}", DigestSize * 8);
     }
+#endif
 
-    inline virtual void reset() override
+    virtual void reset() override
     {
         m_data_length = 0;
         m_bit_length = 0;
@@ -219,7 +219,7 @@ public:
     }
 
 private:
-    inline void transform(const u8*);
+    inline void transform(u8 const*);
 
     u8 m_data_buffer[BlockSize] {};
     size_t m_data_length { 0 };
@@ -227,9 +227,8 @@ private:
     u64 m_bit_length { 0 };
     u64 m_state[8];
 
-    constexpr static auto FinalBlockDataSize = BlockSize - 8;
+    constexpr static auto FinalBlockDataSize = BlockSize - 16;
     constexpr static auto Rounds = 80;
 };
 
-}
 }

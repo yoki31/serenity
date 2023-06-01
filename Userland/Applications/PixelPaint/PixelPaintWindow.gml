@@ -1,7 +1,6 @@
 @GUI::Widget {
     name: "main"
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
         spacing: 2
     }
@@ -34,6 +33,9 @@
 
             @GUI::TabWidget {
                 name: "tab_widget"
+                container_margins: [4, 5, 5, 4]
+                reorder_allowed: true
+                show_close_buttons: true
             }
 
             @PixelPaint::PaletteWidget {
@@ -44,9 +46,7 @@
         @GUI::Widget {
             fill_with_background_color: true
             fixed_width: 200
-
-            layout: @GUI::VerticalBoxLayout {
-            }
+            layout: @GUI::VerticalBoxLayout {}
 
             @GUI::GroupBox {
                 title: "Layers"
@@ -62,6 +62,34 @@
             @PixelPaint::LayerPropertiesWidget {
                 name: "layer_properties_widget"
                 max_height: 94
+            }
+
+            @GUI::GroupBox {
+                title: "Histogram"
+                preferred_height: "shrink"
+                visible: false
+                layout: @GUI::VerticalBoxLayout {
+                    margins: [6]
+                }
+
+                @PixelPaint::HistogramWidget {
+                    name: "histogram_widget"
+                    min_height: 65
+                }
+            }
+
+            @GUI::GroupBox {
+                title: "Vectorscope"
+                min_height: 80
+                visible: false
+                layout: @GUI::VerticalBoxLayout {
+                    margins: [6]
+                }
+
+                @PixelPaint::VectorscopeWidget {
+                    name: "vectorscope_widget"
+                    preferred_height: "fit"
+                }
             }
 
             @PixelPaint::ToolPropertiesWidget {

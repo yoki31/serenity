@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -15,12 +15,13 @@ class RegExpStringIteratorPrototype final : public PrototypeObject<RegExpStringI
     JS_PROTOTYPE_OBJECT(RegExpStringIteratorPrototype, RegExpStringIterator, RegExpStringIterator);
 
 public:
-    explicit RegExpStringIteratorPrototype(GlobalObject&);
     virtual ~RegExpStringIteratorPrototype() override = default;
 
-    virtual void initialize(GlobalObject&) override;
+    virtual ThrowCompletionOr<void> initialize(Realm&) override;
 
 private:
+    explicit RegExpStringIteratorPrototype(Realm&);
+
     JS_DECLARE_NATIVE_FUNCTION(next);
 };
 

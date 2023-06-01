@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2019-2020, Ryan Grieb <ryan.m.grieb@gmail.com>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -14,7 +15,7 @@
 class AddEventDialog final : public GUI::Dialog {
     C_OBJECT(AddEventDialog)
 public:
-    virtual ~AddEventDialog() override;
+    virtual ~AddEventDialog() override = default;
 
     static void show(Core::DateTime date_time, Window* parent_window = nullptr)
     {
@@ -33,7 +34,7 @@ private:
         };
 
         static NonnullRefPtr<MonthListModel> create() { return adopt_ref(*new MonthListModel); }
-        virtual ~MonthListModel() override;
+        virtual ~MonthListModel() override = default;
 
         virtual int row_count(const GUI::ModelIndex& = GUI::ModelIndex()) const override;
         virtual int column_count(const GUI::ModelIndex& = GUI::ModelIndex()) const override { return Column::__Count; }
@@ -41,7 +42,26 @@ private:
         virtual GUI::Variant data(const GUI::ModelIndex&, GUI::ModelRole) const override;
 
     private:
-        MonthListModel();
+        MonthListModel() = default;
+    };
+
+    class MeridiemListModel final : public GUI::Model {
+    public:
+        enum Column {
+            Meridiem,
+            __Count,
+        };
+
+        static NonnullRefPtr<MeridiemListModel> create() { return adopt_ref(*new MeridiemListModel); }
+        virtual ~MeridiemListModel() override = default;
+
+        virtual int row_count(const GUI::ModelIndex& = GUI::ModelIndex()) const override;
+        virtual int column_count(const GUI::ModelIndex& = GUI::ModelIndex()) const override { return Column::__Count; }
+        virtual String column_name(int) const override;
+        virtual GUI::Variant data(const GUI::ModelIndex&, GUI::ModelRole) const override;
+
+    private:
+        MeridiemListModel() = default;
     };
 
     Core::DateTime m_date_time;

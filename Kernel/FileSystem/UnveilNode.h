@@ -6,8 +6,8 @@
 
 #pragma once
 
-#include <AK/String.h>
 #include <AK/Trie.h>
+#include <Kernel/KString.h>
 
 namespace Kernel {
 
@@ -24,17 +24,37 @@ enum UnveilAccess {
 struct UnveilNode;
 
 struct UnveilMetadata {
-    String full_path;
+    NonnullOwnPtr<KString> full_path;
     UnveilAccess permissions { None };
     bool explicitly_unveiled { false };
+
+    UnveilMetadata(UnveilMetadata const&) = delete;
+    UnveilMetadata(UnveilMetadata&&) = default;
+
+    // Note: Intentionally not explicit.
+    UnveilMetadata(NonnullOwnPtr<KString>&& full_path, UnveilAccess permissions = None, bool explicitly_unveiled = false)
+        : full_path(move(full_path))
+        , permissions(permissions)
+        , explicitly_unveiled(explicitly_unveiled)
+    {
+    }
+
+    ErrorOr<UnveilMetadata> copy() const
+    {
+        return UnveilMetadata {
+            TRY(full_path->try_clone()),
+            permissions,
+            explicitly_unveiled,
+        };
+    }
 };
 
-struct UnveilNode final : public Trie<String, UnveilMetadata, Traits<String>, UnveilNode> {
-    using Trie<String, UnveilMetadata, Traits<String>, UnveilNode>::Trie;
+struct UnveilNode final : public Trie<NonnullOwnPtr<KString>, UnveilMetadata, Traits<NonnullOwnPtr<KString>>, UnveilNode> {
+    using Trie<NonnullOwnPtr<KString>, UnveilMetadata, Traits<NonnullOwnPtr<KString>>, UnveilNode>::Trie;
 
     bool was_explicitly_unveiled() const { return this->metadata_value().explicitly_unveiled; }
     UnveilAccess permissions() const { return this->metadata_value().permissions; }
-    const String& path() const { return this->metadata_value().full_path; }
+    StringView path() const { return this->metadata_value().full_path->view(); }
 };
 
 }

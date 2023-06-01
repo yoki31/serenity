@@ -12,18 +12,29 @@
 namespace Wasm {
 
 struct Names {
-    static HashMap<OpCode, String> instruction_names;
+    static HashMap<OpCode, DeprecatedString> instruction_names;
+    static HashMap<DeprecatedString, OpCode> instructions_by_name;
 };
 
-String instruction_name(OpCode const& opcode)
+DeprecatedString instruction_name(OpCode const& opcode)
 {
     return Names::instruction_names.get(opcode).value_or("<unknown>");
+}
+
+Optional<OpCode> instruction_from_name(StringView name)
+{
+    if (Names::instructions_by_name.is_empty()) {
+        for (auto& entry : Names::instruction_names)
+            Names::instructions_by_name.set(entry.value, entry.key);
+    }
+
+    return Names::instructions_by_name.get(name);
 }
 
 void Printer::print_indent()
 {
     for (size_t i = 0; i < m_indent; ++i)
-        m_stream.write_or_error("  "sv.bytes());
+        m_stream.write_until_depleted("  "sv.bytes()).release_value_but_fixme_should_propagate_errors();
 }
 
 void Printer::print(Wasm::BlockType const& type)
@@ -120,27 +131,13 @@ void Printer::print(Wasm::DataSection::Data const& data)
             [this](DataSection::Data::Passive const& value) {
                 print_indent();
                 print("(passive init {}xu8 (", value.init.size());
-                bool first = true;
-                for (auto v : value.init) {
-                    if (first)
-                        print("{:x}", v);
-                    else
-                        print(" {:x}", v);
-                    first = false;
-                }
+                print(DeprecatedString::join(' ', value.init, "{:x}"sv));
                 print(")\n");
             },
             [this](DataSection::Data::Active const& value) {
                 print_indent();
                 print("(active init {}xu8 (", value.init.size());
-                bool first = true;
-                for (auto v : value.init) {
-                    if (first)
-                        print("{:x}", v);
-                    else
-                        print(" {:x}", v);
-                    first = false;
-                }
+                print(DeprecatedString::join(' ', value.init, "{:x}"sv));
                 print("\n");
                 {
                     TemporaryChange change { m_indent, m_indent + 1 };
@@ -405,14 +402,15 @@ void Printer::print(Wasm::ImportSection::Import const& import)
     {
         TemporaryChange change { m_indent, m_indent + 1 };
         import.description().visit(
-            [this](auto const& type) { print(type); },
+            [this](auto const& type) { print(type);
+    },
             [this](TypeIndex const& index) {
-                print_indent();
-                print("(type index {})\n", index.value());
+        print_indent();
+        print("(type index {})\n", index.value());
             });
-    }
-    print_indent();
-    print(")\n");
+}
+print_indent();
+print(")\n");
 }
 
 void Printer::print(Wasm::Instruction const& instruction)
@@ -434,7 +432,13 @@ void Printer::print(Wasm::Instruction const& instruction)
             [&](TableIndex const& index) { print("(table index {})", index.value()); },
             [&](Instruction::IndirectCallArgs const& args) { print("(indirect (type index {}) (table index {}))", args.type.value(), args.table.value()); },
             [&](Instruction::MemoryArgument const& args) { print("(memory (align {}) (offset {}))", args.align, args.offset); },
-            [&](Instruction::StructuredInstructionArgs const& args) { print("(structured (else {}) (end {}))", args.else_ip.has_value() ? String::number(args.else_ip->value()) : "(none)", args.end_ip.value()); },
+            [&](Instruction::StructuredInstructionArgs const& args) {
+                print("(structured\n");
+                TemporaryChange change { m_indent, m_indent + 1 };
+                print(args.block_type);
+                print_indent();
+                print("(else {}) (end {}))", args.else_ip.has_value() ? DeprecatedString::number(args.else_ip->value()) : "(none)", args.end_ip.value());
+            },
             [&](Instruction::TableBranchArgs const& args) {
                 print("(table_branch");
                 for (auto& label : args.labels)
@@ -633,13 +637,13 @@ void Printer::print(Wasm::Value const& value)
     print_indent();
     print("{} ", value.value().visit([&]<typename T>(T const& value) {
         if constexpr (IsSame<Wasm::Reference, T>)
-            return String::formatted(
+            return DeprecatedString::formatted(
                 "addr({})",
                 value.ref().visit(
-                    [](Wasm::Reference::Null const&) { return String("null"); },
-                    [](auto const& ref) { return String::number(ref.address.value()); }));
+                    [](Wasm::Reference::Null const&) { return DeprecatedString("null"); },
+                    [](auto const& ref) { return DeprecatedString::number(ref.address.value()); }));
         else
-            return String::formatted("{}", value);
+            return DeprecatedString::formatted("{}", value);
     }));
     TemporaryChange<size_t> change { m_indent, 0 };
     print(value.type());
@@ -651,13 +655,12 @@ void Printer::print(Wasm::Reference const& value)
     print(
         "addr({})\n",
         value.ref().visit(
-            [](Wasm::Reference::Null const&) { return String("null"); },
-            [](auto const& ref) { return String::number(ref.address.value()); }));
+            [](Wasm::Reference::Null const&) { return DeprecatedString("null"); },
+            [](auto const& ref) { return DeprecatedString::number(ref.address.value()); }));
+}
 }
 
-}
-
-HashMap<Wasm::OpCode, String> Wasm::Names::instruction_names {
+HashMap<Wasm::OpCode, DeprecatedString> Wasm::Names::instruction_names {
     { Instructions::unreachable, "unreachable" },
     { Instructions::nop, "nop" },
     { Instructions::block, "block" },
@@ -666,7 +669,7 @@ HashMap<Wasm::OpCode, String> Wasm::Names::instruction_names {
     { Instructions::br, "br" },
     { Instructions::br_if, "br.if" },
     { Instructions::br_table, "br.table" },
-    { Instructions::return_, "return." },
+    { Instructions::return_, "return" },
     { Instructions::call, "call" },
     { Instructions::call_indirect, "call.indirect" },
     { Instructions::drop, "drop" },
@@ -683,16 +686,16 @@ HashMap<Wasm::OpCode, String> Wasm::Names::instruction_names {
     { Instructions::i64_load, "i64.load" },
     { Instructions::f32_load, "f32.load" },
     { Instructions::f64_load, "f64.load" },
-    { Instructions::i32_load8_s, "i32.load8.s" },
-    { Instructions::i32_load8_u, "i32.load8.u" },
-    { Instructions::i32_load16_s, "i32.load16.s" },
-    { Instructions::i32_load16_u, "i32.load16.u" },
-    { Instructions::i64_load8_s, "i64.load8.s" },
-    { Instructions::i64_load8_u, "i64.load8.u" },
-    { Instructions::i64_load16_s, "i64.load16.s" },
-    { Instructions::i64_load16_u, "i64.load16.u" },
-    { Instructions::i64_load32_s, "i64.load32.s" },
-    { Instructions::i64_load32_u, "i64.load32.u" },
+    { Instructions::i32_load8_s, "i32.load8_s" },
+    { Instructions::i32_load8_u, "i32.load8_u" },
+    { Instructions::i32_load16_s, "i32.load16_s" },
+    { Instructions::i32_load16_u, "i32.load16_u" },
+    { Instructions::i64_load8_s, "i64.load8_s" },
+    { Instructions::i64_load8_u, "i64.load8_u" },
+    { Instructions::i64_load16_s, "i64.load16_s" },
+    { Instructions::i64_load16_u, "i64.load16_u" },
+    { Instructions::i64_load32_s, "i64.load32_s" },
+    { Instructions::i64_load32_u, "i64.load32_u" },
     { Instructions::i32_store, "i32.store" },
     { Instructions::i64_store, "i64.store" },
     { Instructions::f32_store, "f32.store" },
@@ -806,31 +809,31 @@ HashMap<Wasm::OpCode, String> Wasm::Names::instruction_names {
     { Instructions::f64_min, "f64.min" },
     { Instructions::f64_max, "f64.max" },
     { Instructions::f64_copysign, "f64.copysign" },
-    { Instructions::i32_wrap_i64, "i32.wrap.i64" },
-    { Instructions::i32_trunc_sf32, "i32.trunc.sf32" },
-    { Instructions::i32_trunc_uf32, "i32.trunc.uf32" },
-    { Instructions::i32_trunc_sf64, "i32.trunc.sf64" },
-    { Instructions::i32_trunc_uf64, "i32.trunc.uf64" },
-    { Instructions::i64_extend_si32, "i64.extend.si32" },
-    { Instructions::i64_extend_ui32, "i64.extend.ui32" },
-    { Instructions::i64_trunc_sf32, "i64.trunc.sf32" },
-    { Instructions::i64_trunc_uf32, "i64.trunc.uf32" },
-    { Instructions::i64_trunc_sf64, "i64.trunc.sf64" },
-    { Instructions::i64_trunc_uf64, "i64.trunc.uf64" },
-    { Instructions::f32_convert_si32, "f32.convert.si32" },
-    { Instructions::f32_convert_ui32, "f32.convert.ui32" },
-    { Instructions::f32_convert_si64, "f32.convert.si64" },
-    { Instructions::f32_convert_ui64, "f32.convert.ui64" },
-    { Instructions::f32_demote_f64, "f32.demote.f64" },
-    { Instructions::f64_convert_si32, "f64.convert.si32" },
-    { Instructions::f64_convert_ui32, "f64.convert.ui32" },
-    { Instructions::f64_convert_si64, "f64.convert.si64" },
-    { Instructions::f64_convert_ui64, "f64.convert.ui64" },
-    { Instructions::f64_promote_f32, "f64.promote.f32" },
-    { Instructions::i32_reinterpret_f32, "i32.reinterpret.f32" },
-    { Instructions::i64_reinterpret_f64, "i64.reinterpret.f64" },
-    { Instructions::f32_reinterpret_i32, "f32.reinterpret.i32" },
-    { Instructions::f64_reinterpret_i64, "f64.reinterpret.i64" },
+    { Instructions::i32_wrap_i64, "i32.wrap_i64" },
+    { Instructions::i32_trunc_sf32, "i32.trunc_sf32" },
+    { Instructions::i32_trunc_uf32, "i32.trunc_uf32" },
+    { Instructions::i32_trunc_sf64, "i32.trunc_sf64" },
+    { Instructions::i32_trunc_uf64, "i32.trunc_uf64" },
+    { Instructions::i64_extend_si32, "i64.extend_si32" },
+    { Instructions::i64_extend_ui32, "i64.extend_ui32" },
+    { Instructions::i64_trunc_sf32, "i64.trunc_sf32" },
+    { Instructions::i64_trunc_uf32, "i64.trunc_uf32" },
+    { Instructions::i64_trunc_sf64, "i64.trunc_sf64" },
+    { Instructions::i64_trunc_uf64, "i64.trunc_uf64" },
+    { Instructions::f32_convert_si32, "f32.convert_si32" },
+    { Instructions::f32_convert_ui32, "f32.convert_ui32" },
+    { Instructions::f32_convert_si64, "f32.convert_si64" },
+    { Instructions::f32_convert_ui64, "f32.convert_ui64" },
+    { Instructions::f32_demote_f64, "f32.demote_f64" },
+    { Instructions::f64_convert_si32, "f64.convert_si32" },
+    { Instructions::f64_convert_ui32, "f64.convert_ui32" },
+    { Instructions::f64_convert_si64, "f64.convert_si64" },
+    { Instructions::f64_convert_ui64, "f64.convert_ui64" },
+    { Instructions::f64_promote_f32, "f64.promote_f32" },
+    { Instructions::i32_reinterpret_f32, "i32.reinterpret_f32" },
+    { Instructions::i64_reinterpret_f64, "i64.reinterpret_f64" },
+    { Instructions::f32_reinterpret_i32, "f32.reinterpret_i32" },
+    { Instructions::f64_reinterpret_i64, "f64.reinterpret_i64" },
     { Instructions::i32_extend8_s, "i32.extend8_s" },
     { Instructions::i32_extend16_s, "i32.extend16_s" },
     { Instructions::i64_extend8_s, "i64.extend8_s" },
@@ -839,14 +842,14 @@ HashMap<Wasm::OpCode, String> Wasm::Names::instruction_names {
     { Instructions::ref_null, "ref.null" },
     { Instructions::ref_is_null, "ref.is.null" },
     { Instructions::ref_func, "ref.func" },
-    { Instructions::i32_trunc_sat_f32_s, "i32.trunc.sat.f32.s" },
-    { Instructions::i32_trunc_sat_f32_u, "i32.trunc.sat.f32.u" },
-    { Instructions::i32_trunc_sat_f64_s, "i32.trunc.sat.f64.s" },
-    { Instructions::i32_trunc_sat_f64_u, "i32.trunc.sat.f64.u" },
-    { Instructions::i64_trunc_sat_f32_s, "i64.trunc.sat.f32.s" },
-    { Instructions::i64_trunc_sat_f32_u, "i64.trunc.sat.f32.u" },
-    { Instructions::i64_trunc_sat_f64_s, "i64.trunc.sat.f64.s" },
-    { Instructions::i64_trunc_sat_f64_u, "i64.trunc.sat.f64.u" },
+    { Instructions::i32_trunc_sat_f32_s, "i32.trunc_sat_f32_s" },
+    { Instructions::i32_trunc_sat_f32_u, "i32.trunc_sat_f32_u" },
+    { Instructions::i32_trunc_sat_f64_s, "i32.trunc_sat_f64_s" },
+    { Instructions::i32_trunc_sat_f64_u, "i32.trunc_sat_f64_u" },
+    { Instructions::i64_trunc_sat_f32_s, "i64.trunc_sat_f32_s" },
+    { Instructions::i64_trunc_sat_f32_u, "i64.trunc_sat_f32_u" },
+    { Instructions::i64_trunc_sat_f64_s, "i64.trunc_sat_f64_s" },
+    { Instructions::i64_trunc_sat_f64_u, "i64.trunc_sat_f64_u" },
     { Instructions::memory_init, "memory.init" },
     { Instructions::data_drop, "data.drop" },
     { Instructions::memory_copy, "memory.copy" },
@@ -860,3 +863,4 @@ HashMap<Wasm::OpCode, String> Wasm::Names::instruction_names {
     { Instructions::structured_else, "synthetic:else" },
     { Instructions::structured_end, "synthetic:end" },
 };
+HashMap<DeprecatedString, Wasm::OpCode> Wasm::Names::instructions_by_name;

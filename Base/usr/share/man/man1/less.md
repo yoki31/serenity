@@ -35,7 +35,8 @@ does not exist, and no command use `N`.
 | `q` | Exit less. |
 | `j` or `DOWNARROW` or `ENTER` | Go to the next line. |
 | `k` or `UPARROW` | Go to the previous line. |
-| `SPACE` | Go to the next page. |
+| `f` or `SPACE` | Go to the next page. |
+| `b` | Go to the previous page. |
 
 ## Prompts
 
@@ -74,5 +75,5 @@ All other characters are treated normally.
 
 ## See Also
 
-* [`more`(1)](more.md) For a simpler pager that less implements.
-* [`man`(1)](man.md) For serenity's manual pager, that uses less.
+* [`more`(1)](help://man/1/more) For a simpler pager that less implements.
+* [`man`(1)](help://man/1/man) For serenity's manual pager, that uses less.

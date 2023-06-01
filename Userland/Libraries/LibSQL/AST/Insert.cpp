@@ -12,77 +12,50 @@
 
 namespace SQL::AST {
 
-static bool does_value_data_type_match(SQLType expected, SQLType actual)
+ResultOr<ResultSet> Insert::execute(ExecutionContext& context) const
 {
-    if (actual == SQLType::Null) {
-        return false;
-    }
-
-    if (expected == SQLType::Integer) {
-        return actual == SQLType::Integer || actual == SQLType::Float;
-    }
-
-    return expected == actual;
-}
-
-RefPtr<SQLResult> Insert::execute(ExecutionContext& context) const
-{
-    auto table_def = context.database->get_table(m_schema_name, m_table_name);
-    if (!table_def) {
-        auto schema_name = m_schema_name;
-        if (schema_name.is_null() || schema_name.is_empty())
-            schema_name = "default";
-        return SQLResult::construct(SQLCommand::Insert, SQLErrorCode::TableDoesNotExist, String::formatted("{}.{}", schema_name, m_table_name));
-    }
+    auto table_def = TRY(context.database->get_table(m_schema_name, m_table_name));
 
     Row row(table_def);
     for (auto& column : m_column_names) {
-        if (!row.has(column)) {
-            return SQLResult::construct(SQLCommand::Insert, SQLErrorCode::ColumnDoesNotExist, column);
-        }
+        if (!row.has(column))
+            return Result { SQLCommand::Insert, SQLErrorCode::ColumnDoesNotExist, column };
     }
 
-    Vector<Row> inserted_rows;
-    inserted_rows.ensure_capacity(m_chained_expressions.size());
-    context.result = SQLResult::construct();
+    ResultSet result { SQLCommand::Insert };
+    TRY(result.try_ensure_capacity(m_chained_expressions.size()));
+
     for (auto& row_expr : m_chained_expressions) {
         for (auto& column_def : table_def->columns()) {
-            if (!m_column_names.contains_slow(column_def.name())) {
-                row[column_def.name()] = column_def.default_value();
-            }
+            if (!m_column_names.contains_slow(column_def->name()))
+                row[column_def->name()] = column_def->default_value();
         }
-        auto row_value = row_expr.evaluate(context);
-        if (context.result->has_error())
-            return context.result;
-        VERIFY(row_value.type() == SQLType::Tuple);
-        auto values = row_value.to_vector().value();
 
-        if (m_column_names.size() == 0 && values.size() != row.size()) {
-            return SQLResult::construct(SQLCommand::Insert, SQLErrorCode::InvalidNumberOfValues, "");
-        }
+        auto row_value = TRY(row_expr->evaluate(context));
+        VERIFY(row_value.type() == SQLType::Tuple);
+
+        auto values = row_value.to_vector().release_value();
+
+        if (m_column_names.is_empty() && values.size() != row.size())
+            return Result { SQLCommand::Insert, SQLErrorCode::InvalidNumberOfValues, DeprecatedString::empty() };
 
         for (auto ix = 0u; ix < values.size(); ix++) {
-            auto input_value_type = values[ix].type();
             auto& tuple_descriptor = *row.descriptor();
             // In case of having column names, this must succeed since we checked for every column name for existence in the table.
-            auto element_index = (m_column_names.size() == 0) ? ix : tuple_descriptor.find_if([&](auto element) { return element.name == m_column_names[ix]; }).index();
+            auto element_index = m_column_names.is_empty() ? ix : tuple_descriptor.find_if([&](auto element) { return element.name == m_column_names[ix]; }).index();
             auto element_type = tuple_descriptor[element_index].type;
 
-            if (!does_value_data_type_match(element_type, input_value_type)) {
-                return SQLResult::construct(SQLCommand::Insert, SQLErrorCode::InvalidValueType, table_def->columns()[element_index].name());
-            }
+            if (!values[ix].is_type_compatible_with(element_type))
+                return Result { SQLCommand::Insert, SQLErrorCode::InvalidValueType, table_def->columns()[element_index]->name() };
 
-            row[element_index] = values[ix];
+            row[element_index] = move(values[ix]);
         }
-        inserted_rows.append(row);
+
+        TRY(context.database->insert(row));
+        result.insert_row(row, {});
     }
 
-    for (auto& inserted_row : inserted_rows) {
-        context.database->insert(inserted_row);
-        // FIXME Error handling
-    }
-
-    return SQLResult::construct(SQLCommand::Insert, 0, m_chained_expressions.size(), 0);
+    return result;
 }
 
 }

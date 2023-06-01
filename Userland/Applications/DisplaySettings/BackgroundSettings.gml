@@ -1,6 +1,5 @@
 @GUI::Widget {
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
         margins: [8]
     }
@@ -29,24 +28,20 @@
 
         @GUI::IconView {
             name: "wallpaper_view"
+            preferred_width: "opportunistic_grow"
         }
 
         @GUI::Widget {
-            shrink_to_fit: true
-
-            layout: @GUI::VerticalBoxLayout {
-            }
+            preferred_width: "fit"
+            layout: @GUI::VerticalBoxLayout {}
 
             @GUI::Button {
                 name: "wallpaper_open_button"
                 tooltip: "Select wallpaper from file system"
                 text: "Browse..."
-                shrink_to_fit: true
             }
 
-            @GUI::Widget {
-                fixed_height: 12
-            }
+            @GUI::Layout::Spacer {}
 
             @GUI::Label {
                 text: "Mode:"
@@ -58,9 +53,7 @@
                 name: "mode_combo"
             }
 
-            @GUI::Widget {
-                fixed_height: 12
-            }
+            @GUI::Layout::Spacer {}
 
             @GUI::Label {
                 text: "Color:"

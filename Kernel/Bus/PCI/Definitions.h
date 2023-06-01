@@ -6,46 +6,64 @@
 
 #pragma once
 
+#include <AK/Badge.h>
+#include <AK/DistinctNumeric.h>
 #include <AK/Function.h>
-#include <AK/String.h>
 #include <AK/Types.h>
 #include <AK/Vector.h>
 #include <Kernel/Debug.h>
+#include <Kernel/Locking/Spinlock.h>
+#include <Kernel/PhysicalAddress.h>
 
-namespace Kernel {
-
-namespace PCI {
+namespace Kernel::PCI {
 
 enum class HeaderType {
     Device = 0,
     Bridge = 1,
 };
 
+enum class HeaderType0BaseRegister {
+    BAR0 = 0,
+    BAR1,
+    BAR2,
+    BAR3,
+    BAR4,
+    BAR5,
+};
+
+enum class BARSpaceType {
+    IOSpace,
+    Memory16BitSpace,
+    Memory32BitSpace,
+    Memory64BitSpace,
+};
+
 enum class RegisterOffset {
-    VENDOR_ID = 0x00,            // word
-    DEVICE_ID = 0x02,            // word
-    COMMAND = 0x04,              // word
-    STATUS = 0x06,               // word
-    REVISION_ID = 0x08,          // byte
-    PROG_IF = 0x09,              // byte
-    SUBCLASS = 0x0a,             // byte
-    CLASS = 0x0b,                // byte
-    CACHE_LINE_SIZE = 0x0c,      // byte
-    LATENCY_TIMER = 0x0d,        // byte
-    HEADER_TYPE = 0x0e,          // byte
-    BIST = 0x0f,                 // byte
-    BAR0 = 0x10,                 // u32
-    BAR1 = 0x14,                 // u32
-    BAR2 = 0x18,                 // u32
-    SECONDARY_BUS = 0x19,        // byte
-    BAR3 = 0x1C,                 // u32
-    BAR4 = 0x20,                 // u32
-    BAR5 = 0x24,                 // u32
-    SUBSYSTEM_VENDOR_ID = 0x2C,  // u16
-    SUBSYSTEM_ID = 0x2E,         // u16
-    CAPABILITIES_POINTER = 0x34, // u8
-    INTERRUPT_LINE = 0x3C,       // byte
-    INTERRUPT_PIN = 0x3D,        // byte
+    VENDOR_ID = 0x00,             // word
+    DEVICE_ID = 0x02,             // word
+    COMMAND = 0x04,               // word
+    STATUS = 0x06,                // word
+    REVISION_ID = 0x08,           // byte
+    PROG_IF = 0x09,               // byte
+    SUBCLASS = 0x0a,              // byte
+    CLASS = 0x0b,                 // byte
+    CACHE_LINE_SIZE = 0x0c,       // byte
+    LATENCY_TIMER = 0x0d,         // byte
+    HEADER_TYPE = 0x0e,           // byte
+    BIST = 0x0f,                  // byte
+    BAR0 = 0x10,                  // u32
+    BAR1 = 0x14,                  // u32
+    BAR2 = 0x18,                  // u32
+    SECONDARY_BUS = 0x19,         // byte
+    BAR3 = 0x1C,                  // u32
+    BAR4 = 0x20,                  // u32
+    BAR5 = 0x24,                  // u32
+    SUBSYSTEM_VENDOR_ID = 0x2C,   // u16
+    SUBSYSTEM_ID = 0x2E,          // u16
+    EXPANSION_ROM_POINTER = 0x30, // u32
+    CAPABILITIES_POINTER = 0x34,  // u8
+    INTERRUPT_LINE = 0x3C,        // byte
+    INTERRUPT_PIN = 0x3D,         // byte
 };
 
 enum class Limits {
@@ -60,12 +78,25 @@ static constexpr u16 value_port = 0xcfc;
 static constexpr size_t mmio_device_space_size = 4096;
 static constexpr u16 none_value = 0xffff;
 static constexpr size_t memory_range_per_bus = mmio_device_space_size * to_underlying(Limits::MaxFunctionsPerDevice) * to_underlying(Limits::MaxDevicesPerBus);
+static constexpr u32 bar_address_mask = 0xfffffff0;
+static constexpr u8 msi_control_offset = 2;
+static constexpr u16 msi_control_enable = 0x0001;
+static constexpr u8 msi_address_low_offset = 4;
+static constexpr u8 msi_address_high_or_data_offset = 8;
+static constexpr u8 msi_data_offset = 0xc;
+static constexpr u16 msi_address_format_mask = 0x80;
+static constexpr u8 msi_mmc_format_mask = 0xe;
+static constexpr u16 msix_control_table_mask = 0x07ff;
+static constexpr u8 msix_table_bir_mask = 0x7;
+static constexpr u16 msix_table_offset_mask = 0xfff8;
+static constexpr u16 msix_control_enable = 0x8000;
 
 // Taken from https://pcisig.com/sites/default/files/files/PCI_Code-ID_r_1_11__v24_Jan_2019.pdf
 enum class ClassID {
     MassStorage = 0x1,
     Multimedia = 0x4,
     Bridge = 0x6,
+    Base = 0x8,
 };
 
 namespace MassStorage {
@@ -73,6 +104,7 @@ namespace MassStorage {
 enum class SubclassID {
     IDEController = 0x1,
     SATAController = 0x6,
+    NVMeController = 0x8,
 };
 enum class SATAProgIF {
     AHCI = 0x1,
@@ -84,6 +116,7 @@ namespace Multimedia {
 
 enum class SubclassID {
     AudioController = 0x1,
+    HDACompatibleController = 0x3,
 };
 
 }
@@ -96,7 +129,16 @@ enum class SubclassID {
 
 }
 
-TYPEDEF_DISTINCT_ORDERED_ID(u8, CapabilityID);
+namespace Base {
+
+enum class SubclassID {
+    SDHostController = 0x5,
+};
+
+}
+
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u8, CapabilityID);
+
 namespace Capabilities {
 enum ID {
     Null = 0x0,
@@ -112,11 +154,11 @@ struct HardwareID {
 
     bool is_null() const { return !vendor_id && !device_id; }
 
-    bool operator==(const HardwareID& other) const
+    bool operator==(HardwareID const& other) const
     {
         return vendor_id == other.vendor_id && device_id == other.device_id;
     }
-    bool operator!=(const HardwareID& other) const
+    bool operator!=(HardwareID const& other) const
     {
         return vendor_id != other.vendor_id || device_id != other.device_id;
     }
@@ -125,18 +167,18 @@ struct HardwareID {
 class Domain {
 public:
     Domain() = delete;
-    Domain(PhysicalAddress base_address, u8 start_bus, u8 end_bus)
-        : m_base_addr(base_address)
+    Domain(u32 domain_number, u8 start_bus, u8 end_bus)
+        : m_domain_number(domain_number)
         , m_start_bus(start_bus)
         , m_end_bus(end_bus)
     {
     }
     u8 start_bus() const { return m_start_bus; }
     u8 end_bus() const { return m_end_bus; }
-    PhysicalAddress paddr() const { return m_base_addr; }
+    u32 domain_number() const { return m_domain_number; }
 
 private:
-    PhysicalAddress m_base_addr;
+    u32 m_domain_number;
     u8 m_start_bus;
     u8 m_end_bus;
 };
@@ -159,43 +201,32 @@ public:
     {
     }
 
-    Address(const Address& address)
-        : m_domain(address.domain())
-        , m_bus(address.bus())
-        , m_device(address.device())
-        , m_function(address.function())
-    {
-    }
+    Address(Address const& address) = default;
 
     bool is_null() const { return !m_bus && !m_device && !m_function; }
     operator bool() const { return !is_null(); }
 
     // Disable default implementations that would use surprising integer promotion.
-    bool operator<=(const Address&) const = delete;
-    bool operator>=(const Address&) const = delete;
-    bool operator<(const Address&) const = delete;
-    bool operator>(const Address&) const = delete;
+    bool operator<=(Address const&) const = delete;
+    bool operator>=(Address const&) const = delete;
+    bool operator<(Address const&) const = delete;
+    bool operator>(Address const&) const = delete;
 
-    bool operator==(const Address& other) const
+    bool operator==(Address const& other) const
     {
         if (this == &other)
             return true;
         return m_domain == other.m_domain && m_bus == other.m_bus && m_device == other.m_device && m_function == other.m_function;
     }
-    bool operator!=(const Address& other) const
+    bool operator!=(Address const& other) const
     {
         return !(*this == other);
     }
 
-    u16 domain() const { return m_domain; }
+    u32 domain() const { return m_domain; }
     u8 bus() const { return m_bus; }
     u8 device() const { return m_device; }
     u8 function() const { return m_function; }
-
-    u32 io_address_for_field(u8 field) const
-    {
-        return 0x80000000u | (m_bus << 16u) | (m_device << 11u) | (m_function << 8u) | (field & 0xfc);
-    }
 
 private:
     u32 m_domain { 0 };
@@ -206,7 +237,7 @@ private:
 
 class Capability {
 public:
-    Capability(const Address& address, u8 id, u8 ptr)
+    Capability(Address address, u8 id, u8 ptr)
         : m_address(address)
         , m_id(id)
         , m_ptr(ptr)
@@ -215,32 +246,32 @@ public:
 
     CapabilityID id() const { return m_id; }
 
-    u8 read8(u32) const;
-    u16 read16(u32) const;
-    u32 read32(u32) const;
-    void write8(u32, u8);
-    void write16(u32, u16);
-    void write32(u32, u32);
+    u8 read8(size_t offset) const;
+    u16 read16(size_t offset) const;
+    u32 read32(size_t offset) const;
+    void write8(size_t offset, u8 value) const;
+    void write16(size_t offset, u16 value) const;
+    void write32(size_t offset, u32 value) const;
 
 private:
-    Address m_address;
+    const Address m_address;
     const CapabilityID m_id;
     const u8 m_ptr;
 };
 
-TYPEDEF_DISTINCT_ORDERED_ID(u8, ClassCode);
-TYPEDEF_DISTINCT_ORDERED_ID(u8, SubclassCode);
-TYPEDEF_DISTINCT_ORDERED_ID(u8, ProgrammingInterface);
-TYPEDEF_DISTINCT_ORDERED_ID(u8, RevisionID);
-TYPEDEF_DISTINCT_ORDERED_ID(u16, SubsystemID);
-TYPEDEF_DISTINCT_ORDERED_ID(u16, SubsystemVendorID);
-TYPEDEF_DISTINCT_ORDERED_ID(u8, InterruptLine);
-TYPEDEF_DISTINCT_ORDERED_ID(u8, InterruptPin);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u8, ClassCode);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u8, SubclassCode);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u8, ProgrammingInterface);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u8, RevisionID);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u16, SubsystemID);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u16, SubsystemVendorID);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u8, InterruptLine);
+AK_TYPEDEF_DISTINCT_ORDERED_ID(u8, InterruptPin);
 
 class Access;
-class DeviceIdentifier {
+class EnumerableDeviceIdentifier {
 public:
-    DeviceIdentifier(Address address, HardwareID hardware_id, RevisionID revision_id, ClassCode class_code, SubclassCode subclass_code, ProgrammingInterface prog_if, SubsystemID subsystem_id, SubsystemVendorID subsystem_vendor_id, InterruptLine interrupt_line, InterruptPin interrupt_pin, Vector<Capability> capabilities)
+    EnumerableDeviceIdentifier(Address address, HardwareID hardware_id, RevisionID revision_id, ClassCode class_code, SubclassCode subclass_code, ProgrammingInterface prog_if, SubsystemID subsystem_id, SubsystemVendorID subsystem_vendor_id, InterruptLine interrupt_line, InterruptPin interrupt_pin, Vector<Capability> const& capabilities)
         : m_address(address)
         , m_hardware_id(hardware_id)
         , m_revision_id(revision_id)
@@ -254,14 +285,14 @@ public:
         , m_capabilities(capabilities)
     {
         if constexpr (PCI_DEBUG) {
-            for (const auto& capability : capabilities)
+            for (auto const& capability : capabilities)
                 dbgln("{} has capability {}", address, capability.id());
         }
     }
 
-    Vector<Capability> capabilities() const { return m_capabilities; }
-    const HardwareID& hardware_id() const { return m_hardware_id; }
-    const Address& address() const { return m_address; }
+    Vector<Capability> const& capabilities() const { return m_capabilities; }
+    HardwareID const& hardware_id() const { return m_hardware_id; }
+    Address const& address() const { return m_address; }
 
     RevisionID revision_id() const { return m_revision_id; }
     ClassCode class_code() const { return m_class_code; }
@@ -282,7 +313,7 @@ public:
         m_prog_if = new_progif;
     }
 
-private:
+protected:
     Address m_address;
     HardwareID m_hardware_id;
 
@@ -299,9 +330,80 @@ private:
     Vector<Capability> m_capabilities;
 };
 
+class MSIxInfo {
+public:
+    MSIxInfo(u16 table_size, u8 table_bar, u32 table_offset)
+        : table_size(table_size)
+        , table_bar(table_bar)
+        , table_offset(table_offset)
+    {
+    }
+
+    MSIxInfo() = default;
+
+    u16 table_size {};
+    u8 table_bar {};
+    u32 table_offset {};
+};
+
+class MSIInfo {
+public:
+    MSIInfo(bool message_address_64_bit_support, u8 count)
+        : message_address_64_bit_format(message_address_64_bit_support)
+        , count(count)
+    {
+    }
+
+    MSIInfo() = default;
+
+    bool message_address_64_bit_format { false };
+    u8 count {};
+};
+
+class DeviceIdentifier
+    : public RefCounted<DeviceIdentifier>
+    , public EnumerableDeviceIdentifier {
+    AK_MAKE_NONCOPYABLE(DeviceIdentifier);
+
+public:
+    static ErrorOr<NonnullRefPtr<DeviceIdentifier>> from_enumerable_identifier(EnumerableDeviceIdentifier const& other_identifier);
+
+    void initialize();
+    bool is_msix_capable() const { return m_msix_info.table_size > 0; }
+    u8 get_msix_table_bar() const { return m_msix_info.table_bar; }
+    u32 get_msix_table_offset() const { return m_msix_info.table_offset; }
+
+    bool is_msi_capable() const { return m_msi_info.count > 0; }
+    bool is_msi_64bit_address_format() { return m_msi_info.message_address_64_bit_format; };
+
+    Spinlock<LockRank::None>& operation_lock() { return m_operation_lock; }
+    Spinlock<LockRank::None>& operation_lock() const { return m_operation_lock; }
+
+    virtual ~DeviceIdentifier() = default;
+
+private:
+    DeviceIdentifier(EnumerableDeviceIdentifier const& other_identifier)
+        : EnumerableDeviceIdentifier(other_identifier.address(),
+            other_identifier.hardware_id(),
+            other_identifier.revision_id(),
+            other_identifier.class_code(),
+            other_identifier.subclass_code(),
+            other_identifier.prog_if(),
+            other_identifier.subsystem_id(),
+            other_identifier.subsystem_vendor_id(),
+            other_identifier.interrupt_line(),
+            other_identifier.interrupt_pin(),
+            other_identifier.capabilities())
+    {
+    }
+
+    mutable Spinlock<LockRank::None> m_operation_lock;
+    MSIxInfo m_msix_info {};
+    MSIInfo m_msi_info {};
+};
+
 class Domain;
 class Device;
-}
 
 }
 
@@ -311,7 +413,7 @@ struct AK::Formatter<Kernel::PCI::Address> : Formatter<FormatString> {
     {
         return Formatter<FormatString>::format(
             builder,
-            "PCI [{:04x}:{:02x}:{:02x}:{:02x}]", value.domain(), value.bus(), value.device(), value.function());
+            "PCI [{:04x}:{:02x}:{:02x}:{:02x}]"sv, value.domain(), value.bus(), value.device(), value.function());
     }
 };
 
@@ -321,6 +423,6 @@ struct AK::Formatter<Kernel::PCI::HardwareID> : Formatter<FormatString> {
     {
         return Formatter<FormatString>::format(
             builder,
-            "PCI::HardwareID [{:04x}:{:04x}]", value.vendor_id, value.device_id);
+            "PCI::HardwareID [{:04x}:{:04x}]"sv, value.vendor_id, value.device_id);
     }
 };

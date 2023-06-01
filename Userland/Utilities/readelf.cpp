@@ -1,25 +1,28 @@
 /*
- * Copyright (c) 2020, the SerenityOS developers.
+ * Copyright (c) 2020-2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/String.h>
+#include <AK/CharacterTypes.h>
+#include <AK/DeprecatedString.h>
+#include <AK/LexicalPath.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <LibCore/ArgsParser.h>
-#include <LibCore/File.h>
 #include <LibCore/MappedFile.h>
+#include <LibCore/System.h>
 #include <LibELF/DynamicLoader.h>
 #include <LibELF/DynamicObject.h>
 #include <LibELF/Image.h>
 #include <LibELF/Validation.h>
+#include <LibMain/Main.h>
 #include <ctype.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
 
-static const char* object_program_header_type_to_string(ElfW(Word) type)
+static char const* object_program_header_type_to_string(ElfW(Word) type)
 {
     switch (type) {
     case PT_NULL:
@@ -63,7 +66,7 @@ static const char* object_program_header_type_to_string(ElfW(Word) type)
     }
 }
 
-static const char* object_section_header_type_to_string(ElfW(Word) type)
+static char const* object_section_header_type_to_string(ElfW(Word) type)
 {
     switch (type) {
     case SHT_NULL:
@@ -102,6 +105,8 @@ static const char* object_section_header_type_to_string(ElfW(Word) type)
         return "GROUP";
     case SHT_SYMTAB_SHNDX:
         return "SYMTAB_SHNDX";
+    case SHT_RELR:
+        return "RELR";
     case SHT_LOOS:
         return "SOOS";
     case SHT_SUNW_dof:
@@ -133,7 +138,7 @@ static const char* object_section_header_type_to_string(ElfW(Word) type)
     }
 }
 
-static const char* object_symbol_type_to_string(ElfW(Word) type)
+static char const* object_symbol_type_to_string(ElfW(Word) type)
 {
     switch (type) {
     case STT_NOTYPE:
@@ -148,6 +153,8 @@ static const char* object_symbol_type_to_string(ElfW(Word) type)
         return "FILE";
     case STT_TLS:
         return "TLS";
+    case STT_GNU_IFUNC:
+        return "IFUNC";
     case STT_LOPROC:
         return "LOPROC";
     case STT_HIPROC:
@@ -157,7 +164,7 @@ static const char* object_symbol_type_to_string(ElfW(Word) type)
     }
 }
 
-static const char* object_symbol_binding_to_string(ElfW(Word) type)
+static char const* object_symbol_binding_to_string(ElfW(Word) type)
 {
     switch (type) {
     case STB_LOCAL:
@@ -177,33 +184,10 @@ static const char* object_symbol_binding_to_string(ElfW(Word) type)
     }
 }
 
-static const char* object_relocation_type_to_string(ElfW(Word) type)
+static char const* object_relocation_type_to_string(ElfW(Word) type)
 {
     switch (type) {
-#if ARCH(I386)
-    case R_386_NONE:
-        return "R_386_NONE";
-    case R_386_32:
-        return "R_386_32";
-    case R_386_PC32:
-        return "R_386_PC32";
-    case R_386_GOT32:
-        return "R_386_GOT32";
-    case R_386_PLT32:
-        return "R_386_PLT32";
-    case R_386_COPY:
-        return "R_386_COPY";
-    case R_386_GLOB_DAT:
-        return "R_386_GLOB_DAT";
-    case R_386_JMP_SLOT:
-        return "R_386_JMP_SLOT";
-    case R_386_RELATIVE:
-        return "R_386_RELATIVE";
-    case R_386_TLS_TPOFF:
-        return "R_386_TLS_TPOFF";
-    case R_386_TLS_TPOFF32:
-        return "R_386_TLS_TPOFF32";
-#else
+#if ARCH(X86_64)
     case R_X86_64_NONE:
         return "R_X86_64_NONE";
     case R_X86_64_64:
@@ -222,14 +206,11 @@ static const char* object_relocation_type_to_string(ElfW(Word) type)
     }
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath map_fixed"));
 
-    const char* path;
+    DeprecatedString path {};
     static bool display_all = false;
     static bool display_elf_header = false;
     static bool display_program_headers = false;
@@ -242,6 +223,7 @@ int main(int argc, char** argv)
     static bool display_unwind_info = false;
     static bool display_dynamic_section = false;
     static bool display_hardening = false;
+    StringView string_dump_section {};
 
     Core::ArgsParser args_parser;
     args_parser.add_option(display_all, "Display all", "all", 'a');
@@ -256,12 +238,13 @@ int main(int argc, char** argv)
     args_parser.add_option(display_relocations, "Display relocations", "relocs", 'r');
     args_parser.add_option(display_unwind_info, "Display unwind info", "unwind", 'u');
     args_parser.add_option(display_hardening, "Display security hardening info", "checksec", 'c');
+    args_parser.add_option(string_dump_section, "Display the contents of a section as strings", "string-dump", 'p', "section-name");
     args_parser.add_positional_argument(path, "ELF path", "path");
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
-    if (argc < 3) {
-        args_parser.print_usage(stderr, argv[0]);
-        return -1;
+    if (arguments.argc < 3) {
+        args_parser.print_usage(stderr, arguments.strings[0]);
+        return Error::from_errno(EINVAL);
     }
 
     if (display_headers) {
@@ -283,6 +266,8 @@ int main(int argc, char** argv)
         display_hardening = true;
     }
 
+    path = LexicalPath::absolute_path(TRY(Core::System::getcwd()), path);
+
     auto file_or_error = Core::MappedFile::map(path);
 
     if (file_or_error.is_error()) {
@@ -298,20 +283,21 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    String interpreter_path;
-
-    if (!ELF::validate_program_headers(*(const ElfW(Ehdr)*)elf_image_data.data(), elf_image_data.size(), (const u8*)elf_image_data.data(), elf_image_data.size(), &interpreter_path)) {
+    StringBuilder interpreter_path_builder;
+    auto result_or_error = ELF::validate_program_headers(*(const ElfW(Ehdr)*)elf_image_data.data(), elf_image_data.size(), elf_image_data, &interpreter_path_builder);
+    if (result_or_error.is_error() || !result_or_error.value()) {
         warnln("Invalid ELF headers");
         return -1;
     }
+    auto interpreter_path = interpreter_path_builder.string_view();
 
     auto& header = *reinterpret_cast<const ElfW(Ehdr)*>(elf_image_data.data());
 
     RefPtr<ELF::DynamicObject> object = nullptr;
 
     if (elf_image.is_dynamic()) {
-        if (interpreter_path.is_null()) {
-            interpreter_path = "/usr/lib/Loader.so";
+        if (interpreter_path.is_empty()) {
+            interpreter_path = "/usr/lib/Loader.so"sv;
             warnln("Warning: Dynamic ELF object has no interpreter path. Using: {}", interpreter_path);
         }
 
@@ -319,24 +305,17 @@ int main(int argc, char** argv)
 
         if (interpreter_file_or_error.is_error()) {
             warnln("Unable to map interpreter file {}: {}", interpreter_path, interpreter_file_or_error.error());
-            return -1;
+        } else {
+            auto interpreter_image_data = interpreter_file_or_error.value()->bytes();
+
+            ELF::Image interpreter_image(interpreter_image_data);
+
+            if (!interpreter_image.is_valid()) {
+                warnln("ELF interpreter image is invalid");
+            }
         }
 
-        auto interpreter_image_data = interpreter_file_or_error.value()->bytes();
-
-        ELF::Image interpreter_image(interpreter_image_data);
-
-        if (!interpreter_image.is_valid()) {
-            warnln("ELF interpreter image is invalid");
-            return -1;
-        }
-
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) {
-            outln("Unable to open file {}", path);
-            return 1;
-        }
-
+        int fd = TRY(Core::System::open(path, O_RDONLY));
         auto result = ELF::DynamicLoader::try_create(fd, path);
         if (result.is_error()) {
             outln("{}", result.error().text);
@@ -360,7 +339,7 @@ int main(int argc, char** argv)
 
         out("  Magic:                             ");
         for (char i : StringView { header.e_ident, sizeof(header.e_ident) }) {
-            if (isprint(i)) {
+            if (is_ascii_printable(i)) {
                 out("{:c} ", i);
             } else {
                 out("{:02x} ", i);
@@ -368,8 +347,8 @@ int main(int argc, char** argv)
         }
         outln();
 
-        outln("  Type:                              {} ({})", header.e_type, ELF::Image::object_file_type_to_string(header.e_type).value_or("(?)"));
-        outln("  Machine:                           {} ({})", header.e_machine, ELF::Image::object_machine_type_to_string(header.e_machine).value_or("(?)"));
+        outln("  Type:                              {} ({})", header.e_type, ELF::Image::object_file_type_to_string(header.e_type).value_or("(?)"sv));
+        outln("  Machine:                           {} ({})", header.e_machine, ELF::Image::object_machine_type_to_string(header.e_machine).value_or("(?)"sv));
         outln("  Version:                           {:#x}", header.e_version);
         outln("  Entry point address:               {:#x}", header.e_entry);
         outln("  Start of program headers:          {} (bytes into file)", header.e_phoff);
@@ -384,11 +363,7 @@ int main(int argc, char** argv)
         outln();
     }
 
-#if ARCH(I386)
-    auto addr_padding = "";
-#else
     auto addr_padding = "        ";
-#endif
 
     if (display_section_headers) {
         if (!display_all) {
@@ -417,7 +392,7 @@ int main(int argc, char** argv)
 
     if (display_program_headers) {
         if (!display_all) {
-            outln("ELF file type is {} ({})", header.e_type, ELF::Image::object_file_type_to_string(header.e_type).value_or("(?)"));
+            outln("ELF file type is {} ({})", header.e_type, ELF::Image::object_file_type_to_string(header.e_type).value_or("(?)"sv));
             outln("Entry point {:#x}\n", header.e_entry);
             outln("There are {} program headers, starting at offset {}", header.e_phnum, header.e_phoff);
             outln();
@@ -461,17 +436,17 @@ int main(int argc, char** argv)
                 found_dynamic_section = true;
 
                 if (section.entry_count()) {
-                    outln("Dynamic section '{}' at offset {:#08x} contains {} entries.", section.name().to_string(), section.offset(), section.entry_count());
+                    outln("Dynamic section '{}' at offset {:#08x} contains {} entries.", section.name().to_deprecated_string(), section.offset(), section.entry_count());
                 } else {
-                    outln("Dynamic section '{}' at offset {:#08x} contains zero entries.", section.name().to_string(), section.offset());
+                    outln("Dynamic section '{}' at offset {:#08x} contains zero entries.", section.name().to_deprecated_string(), section.offset());
                 }
 
                 return IterationDecision::Break;
             });
 
-            Vector<String> libraries;
+            Vector<DeprecatedString> libraries;
             object->for_each_needed_library([&libraries](StringView entry) {
-                libraries.append(String::formatted("{}", entry));
+                libraries.append(DeprecatedString::formatted("{}", entry));
             });
 
             auto library_index = 0;
@@ -531,6 +506,16 @@ int main(int argc, char** argv)
                     outln();
                 });
             }
+
+            outln();
+
+            size_t relr_count = 0;
+            object->for_each_relr_relocation([&relr_count](auto) { ++relr_count; });
+            if (relr_count != 0) {
+                outln("Relocation section '.relr.dyn' at offset {:#08x} contains {} entries:", object->relr_relocation_section().offset(), object->relr_relocation_section().entry_count());
+                outln("{:>8x} offsets", relr_count);
+                object->for_each_relr_relocation([](auto offset) { outln("{:p}", offset); });
+            }
         } else {
             outln("No relocations in this file.");
         }
@@ -540,7 +525,7 @@ int main(int argc, char** argv)
 
     if (display_unwind_info) {
         // TODO: Unwind info
-        outln("Decoding of unwind sections for machine type {} is not supported.", ELF::Image::object_machine_type_to_string(header.e_machine).value_or("?"));
+        outln("Decoding of unwind sections for machine type {} is not supported.", ELF::Image::object_machine_type_to_string(header.e_machine).value_or("?"sv));
         outln();
     }
 
@@ -716,5 +701,19 @@ int main(int argc, char** argv)
         outln();
     }
 
+    if (!string_dump_section.is_null()) {
+        auto maybe_section = elf_image.lookup_section(string_dump_section);
+        if (maybe_section.has_value()) {
+            outln("String dump of section \'{}\':", string_dump_section);
+            StringView data(maybe_section->raw_data(), maybe_section->size());
+            data.for_each_split_view('\0', SplitBehavior::Nothing, [&data](auto string) {
+                auto offset = string.characters_without_null_termination() - data.characters_without_null_termination();
+                outln("[{:6x}] {}", offset, string);
+            });
+        } else {
+            warnln("Could not find section \'{}\'", string_dump_section);
+            return 1;
+        }
+    }
     return 0;
 }

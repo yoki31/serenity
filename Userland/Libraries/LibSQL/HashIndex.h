@@ -24,7 +24,7 @@ namespace SQL {
 class HashBucket : public IndexNode
     , public Weakable<HashBucket> {
 public:
-    HashBucket(HashIndex&, u32 index, u32 local_depth, u32 pointer);
+    HashBucket(HashIndex&, Block::Index index, u32 local_depth, Block::Index pointer);
     ~HashBucket() override = default;
     Optional<u32> get(Key&);
     bool insert(Key const&);
@@ -35,7 +35,7 @@ public:
     [[nodiscard]] u32 size() { return entries().size(); }
     [[nodiscard]] size_t length() const;
     [[nodiscard]] u32 size() const { return m_entries.size(); }
-    [[nodiscard]] u32 index() const { return m_index; }
+    [[nodiscard]] Block::Index index() const { return m_index; }
     void serialize(Serializer&) const;
     void deserialize(Serializer&);
     [[nodiscard]] HashIndex const& hash_index() const { return m_hash_index; }
@@ -45,12 +45,12 @@ public:
 
 private:
     Optional<size_t> find_key_in_bucket(Key const&);
-    void set_index(u32 index) { m_index = index; }
+    void set_index(Block::Index index) { m_index = index; }
     void set_local_depth(u32 depth) { m_local_depth = depth; }
 
     HashIndex& m_hash_index;
     u32 m_local_depth { 1 };
-    u32 m_index { 0 };
+    Block::Index m_index { 0 };
     Vector<Key> m_entries;
     bool m_inflated { false };
 
@@ -79,10 +79,10 @@ public:
     void list_hash();
 
 private:
-    HashIndex(Serializer&, NonnullRefPtr<TupleDescriptor> const&, u32);
+    HashIndex(Serializer&, NonnullRefPtr<TupleDescriptor> const&, Block::Index);
 
     void expand();
-    void write_directory_to_write_ahead_log();
+    void write_directory();
     HashBucket* append_bucket(u32 index, u32 local_depth, u32 pointer);
     HashBucket* get_bucket_for_insert(Key const&);
     [[nodiscard]] HashBucket* get_bucket_by_index(u32 index);
@@ -104,7 +104,7 @@ public:
     void serialize(Serializer&) const;
     [[nodiscard]] u32 number_of_pointers() const { return min(max_pointers_in_node(), m_hash_index.size() - m_offset); }
     [[nodiscard]] bool is_last() const { return m_is_last; }
-    static constexpr size_t max_pointers_in_node() { return (BLOCKSIZE - 3 * sizeof(u32)) / (2 * sizeof(u32)); }
+    static constexpr size_t max_pointers_in_node() { return (Block::DATA_SIZE - 3 * sizeof(u32)) / (2 * sizeof(u32)); }
 
 private:
     HashIndex& m_hash_index;
@@ -118,9 +118,7 @@ public:
     [[nodiscard]] bool is_end() const { return !m_current; }
 
     bool operator==(HashIndexIterator const& other) const;
-    bool operator!=(HashIndexIterator const& other) const { return !(*this == other); }
     bool operator==(Key const& other) const;
-    bool operator!=(Key const& other) const { return !(*this == other); }
 
     HashIndexIterator operator++()
     {

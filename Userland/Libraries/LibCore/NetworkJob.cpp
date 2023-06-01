@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,16 +11,12 @@
 
 namespace Core {
 
-NetworkJob::NetworkJob(OutputStream& output_stream)
+NetworkJob::NetworkJob(Stream& output_stream)
     : m_output_stream(output_stream)
 {
 }
 
-NetworkJob::~NetworkJob()
-{
-}
-
-void NetworkJob::start(NonnullRefPtr<Core::Socket>)
+void NetworkJob::start(Core::Socket&)
 {
 }
 
@@ -37,7 +34,7 @@ void NetworkJob::did_finish(NonnullRefPtr<NetworkResponse>&& response)
     NonnullRefPtr<NetworkJob> protector(*this);
 
     m_response = move(response);
-    dbgln_if(CNETWORKJOB_DEBUG, "{} job did_finish", *this);
+    dbgln_if(NETWORKJOB_DEBUG, "{} job did_finish", *this);
     VERIFY(on_finish);
     on_finish(true);
     shutdown(ShutdownMode::DetachFromSocket);
@@ -53,7 +50,7 @@ void NetworkJob::did_fail(Error error)
     NonnullRefPtr<NetworkJob> protector(*this);
 
     m_error = error;
-    dbgln_if(CNETWORKJOB_DEBUG, "{}{{{:p}}} job did_fail! error: {} ({})", class_name(), this, (unsigned)error, to_string(error));
+    dbgln_if(NETWORKJOB_DEBUG, "{}{{{:p}}} job did_fail! error: {} ({})", class_name(), this, (unsigned)error, to_string(error));
     VERIFY(on_finish);
     on_finish(false);
     shutdown(ShutdownMode::DetachFromSocket);
@@ -72,7 +69,7 @@ void NetworkJob::did_progress(Optional<u32> total_size, u32 downloaded)
         on_progress(total_size, downloaded);
 }
 
-const char* to_string(NetworkJob::Error error)
+char const* to_string(NetworkJob::Error error)
 {
     switch (error) {
     case NetworkJob::Error::ProtocolFailed:

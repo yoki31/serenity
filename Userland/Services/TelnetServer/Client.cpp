@@ -5,65 +5,104 @@
  */
 
 #include "Client.h"
+
 #include <AK/ByteBuffer.h>
 #include <AK/MemoryStream.h>
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <AK/Types.h>
+#include <LibCore/EventLoop.h>
 #include <LibCore/Notifier.h>
-#include <LibCore/TCPSocket.h>
+#include <LibCore/Socket.h>
 #include <stdio.h>
 #include <unistd.h>
 
-Client::Client(int id, RefPtr<Core::TCPSocket> socket, int ptm_fd)
+Client::Client(int id, NonnullOwnPtr<Core::TCPSocket> socket, int ptm_fd)
     : m_id(id)
     , m_socket(move(socket))
     , m_ptm_fd(ptm_fd)
-    , m_ptm_notifier(Core::Notifier::construct(ptm_fd, Core::Notifier::Read))
+    , m_ptm_notifier(Core::Notifier::construct(ptm_fd, Core::Notifier::Type::Read))
 {
-    m_socket->on_ready_to_read = [this] { drain_socket(); };
-    m_ptm_notifier->on_ready_to_read = [this] { drain_pty(); };
-    m_parser.on_command = [this](const Command& command) { handle_command(command); };
+    m_socket->on_ready_to_read = [this] {
+        auto result = drain_socket();
+        if (result.is_error()) {
+            dbgln("Failed to drain the socket: {}", result.error());
+            Core::deferred_invoke([this, strong_this = NonnullRefPtr(*this)] { quit(); });
+        }
+    };
+
+    m_ptm_notifier->on_activation = [this] {
+        auto result = drain_pty();
+        if (result.is_error()) {
+            dbgln("Failed to drain the PTY: {}", result.error());
+            Core::deferred_invoke([this, strong_this = NonnullRefPtr(*this)] { quit(); });
+        }
+    };
+
+    m_parser.on_command = [this](Command const& command) {
+        auto result = handle_command(command);
+        if (result.is_error()) {
+            dbgln("Failed to handle the command: {}", result.error());
+            Core::deferred_invoke([this, strong_this = NonnullRefPtr(*this)] { quit(); });
+        }
+    };
+
     m_parser.on_data = [this](StringView data) { handle_data(data); };
     m_parser.on_error = [this]() { handle_error(); };
-    send_commands({
+}
+
+ErrorOr<NonnullRefPtr<Client>> Client::create(int id, NonnullOwnPtr<Core::TCPSocket> socket, int ptm_fd)
+{
+    auto client = adopt_ref(*new Client(id, move(socket), ptm_fd));
+
+    auto result = client->send_commands({
         { CMD_WILL, SUB_SUPPRESS_GO_AHEAD },
         { CMD_WILL, SUB_ECHO },
         { CMD_DO, SUB_SUPPRESS_GO_AHEAD },
         { CMD_DONT, SUB_ECHO },
     });
+    if (result.is_error()) {
+        client->quit();
+        return result.release_error();
+    }
+
+    return client;
 }
 
-void Client::drain_socket()
+ErrorOr<void> Client::drain_socket()
 {
     NonnullRefPtr<Client> protect(*this);
-    while (m_socket->can_read()) {
-        auto buf = m_socket->read(1024);
 
-        m_parser.write(buf);
+    auto buffer = TRY(ByteBuffer::create_uninitialized(1024));
 
-        if (m_socket->eof()) {
-            quit();
+    while (TRY(m_socket->can_read_without_blocking())) {
+        auto read_bytes = TRY(m_socket->read_some(buffer));
+
+        m_parser.write(StringView { read_bytes });
+
+        if (m_socket->is_eof()) {
+            Core::deferred_invoke([this, strong_this = NonnullRefPtr(*this)] { quit(); });
             break;
         }
     }
+
+    return {};
 }
 
-void Client::drain_pty()
+ErrorOr<void> Client::drain_pty()
 {
     u8 buffer[BUFSIZ];
     ssize_t nread = read(m_ptm_fd, buffer, sizeof(buffer));
     if (nread < 0) {
-        perror("read(ptm)");
-        quit();
-        return;
+        Core::deferred_invoke([this, strong_this = NonnullRefPtr(*this)] { quit(); });
+        return static_cast<ErrnoCode>(errno);
     }
     if (nread == 0) {
-        quit();
-        return;
+        Core::deferred_invoke([this, strong_this = NonnullRefPtr(*this)] { quit(); });
+        return {};
     }
-    send_data(StringView(buffer, (size_t)nread));
+
+    return send_data({ buffer, (size_t)nread });
 }
 
 void Client::handle_data(StringView data)
@@ -71,7 +110,7 @@ void Client::handle_data(StringView data)
     write(m_ptm_fd, data.characters_without_null_termination(), data.length());
 }
 
-void Client::handle_command(const Command& command)
+ErrorOr<void> Client::handle_command(Command const& command)
 {
     switch (command.command) {
     case CMD_DO:
@@ -87,10 +126,10 @@ void Client::handle_command(const Command& command)
         case SUB_ECHO:
             // we always want to be the ones in control of the output. tell
             // the client to disable local echo.
-            send_command({ CMD_DONT, SUB_ECHO });
+            TRY(send_command({ CMD_DONT, SUB_ECHO }));
             break;
         case SUB_SUPPRESS_GO_AHEAD:
-            send_command({ CMD_DO, SUB_SUPPRESS_GO_AHEAD });
+            TRY(send_command({ CMD_DO, SUB_SUPPRESS_GO_AHEAD }));
             break;
         default:
             // don't respond to unknown commands
@@ -102,14 +141,16 @@ void Client::handle_command(const Command& command)
         // won't do.
         break;
     }
+
+    return {};
 }
 
 void Client::handle_error()
 {
-    quit();
+    Core::deferred_invoke([this, strong_this = NonnullRefPtr(*this)] { quit(); });
 }
 
-void Client::send_data(StringView data)
+ErrorOr<void> Client::send_data(StringView data)
 {
     bool fast = true;
     for (size_t i = 0; i < data.length(); i++) {
@@ -119,8 +160,8 @@ void Client::send_data(StringView data)
     }
 
     if (fast) {
-        m_socket->write(data);
-        return;
+        TRY(m_socket->write_until_depleted({ data.characters_without_null_termination(), data.length() }));
+        return {};
     }
 
     StringBuilder builder;
@@ -129,10 +170,10 @@ void Client::send_data(StringView data)
 
         switch (c) {
         case '\n':
-            builder.append("\r\n");
+            builder.append("\r\n"sv);
             break;
         case IAC:
-            builder.append("\xff\xff");
+            builder.append("\xff\xff"sv);
             break;
         default:
             builder.append(c);
@@ -140,24 +181,30 @@ void Client::send_data(StringView data)
         }
     }
 
-    m_socket->write(builder.to_string());
+    auto builder_contents = TRY(builder.to_byte_buffer());
+    TRY(m_socket->write_until_depleted(builder_contents));
+    return {};
 }
 
-void Client::send_command(Command command)
+ErrorOr<void> Client::send_command(Command command)
 {
-    send_commands({ command });
+    return send_commands({ command });
 }
 
-void Client::send_commands(Vector<Command> commands)
+ErrorOr<void> Client::send_commands(Vector<Command> commands)
 {
-    auto buffer = ByteBuffer::create_uninitialized(commands.size() * 3).release_value(); // FIXME: Handle possible OOM situation.
-    OutputMemoryStream stream { buffer };
+    auto buffer = TRY(ByteBuffer::create_uninitialized(commands.size() * 3));
+    FixedMemoryStream stream { buffer.span() };
 
-    for (auto& command : commands)
-        stream << (u8)IAC << command.command << command.subcommand;
+    for (auto& command : commands) {
+        MUST(stream.write_value<u8>(IAC));
+        MUST(stream.write_value(command.command));
+        MUST(stream.write_value(command.subcommand));
+    }
 
-    VERIFY(stream.is_end());
-    m_socket->write(buffer.data(), buffer.size());
+    VERIFY(TRY(stream.tell()) == buffer.size());
+    TRY(m_socket->write_until_depleted({ buffer.data(), buffer.size() }));
+    return {};
 }
 
 void Client::quit()

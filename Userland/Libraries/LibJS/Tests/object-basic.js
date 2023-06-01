@@ -151,6 +151,54 @@ describe("side effects", () => {
     });
 });
 
+describe("shorthanded properties with special names", () => {
+    test("keywords cannot be used", () => {
+        expect("({ function, })").not.toEval();
+        expect("({ var, })").not.toEval();
+        expect("({ const, })").not.toEval();
+        expect("({ class, })").not.toEval();
+    });
+
+    test("reserved words are allowed in non-strict mode", () => {
+        {
+            var implements = 3;
+            expect({ implements }).toEqual({ implements: 3 });
+        }
+        {
+            var public = "a";
+            expect({ public }).toEqual({ public: "a" });
+        }
+        {
+            var let = 9;
+            expect({ let }).toEqual({ let: 9 });
+        }
+        {
+            var await = 8;
+            expect({ await }).toEqual({ await: 8 });
+        }
+        {
+            var async = 7;
+            expect({ async }).toEqual({ async: 7 });
+        }
+        {
+            var yield = 6;
+            expect({ yield }).toEqual({ yield: 6 });
+        }
+    });
+
+    test("reserved words are not allowed in strict mode", () => {
+        expect('"use strict"; var implements = 3; ({ implements })').not.toEval();
+        expect("\"use strict\"; var public = 'a'; ({ public })").not.toEval();
+        expect('"use strict"; var let = 9; ({ let, })').not.toEval();
+        expect('"use strict"; var yield = 6; ({ yield, })').not.toEval();
+    });
+
+    test("special non reserved words are allowed even in strict mode", () => {
+        expect('"use strict"; var await = 8; ({ await, })').toEval();
+        expect('"use strict"; var async = 7; ({ async, })').toEval();
+    });
+});
+
 describe("errors", () => {
     test("syntax errors", () => {
         expect("({ foo: function() { super.bar; } })").not.toEval();
@@ -165,5 +213,44 @@ describe("errors", () => {
         expect("({ set foo(...bar) {} })").not.toEval();
         expect("({ set foo(bar, baz) {} })").not.toEval();
         expect("({ ...foo: bar })").not.toEval();
+    });
+});
+
+describe("naming of anon functions", () => {
+    test("method has name", () => {
+        expect({ func() {} }.func.name).toBe("func");
+    });
+
+    test("getter has name", () => {
+        expect(Object.getOwnPropertyDescriptor({ get func() {} }, "func").get.name).toBe(
+            "get func"
+        );
+    });
+
+    test("setter has name", () => {
+        expect(Object.getOwnPropertyDescriptor({ set func(v) {} }, "func").set.name).toBe(
+            "set func"
+        );
+    });
+
+    test("anon function property", () => {
+        expect({ func: function () {} }.func.name).toBe("func");
+    });
+
+    test("anon function from within parenthesis", () => {
+        expect({ func: function () {} }.func.name).toBe("func");
+    });
+
+    test("anon function from indirect expression", () => {
+        expect({ func: (0, function () {}) }.func.name).toBe("");
+    });
+
+    test("function from function call does not get named", () => {
+        function f() {
+            return function () {};
+        }
+
+        expect(f().name).toBe("");
+        expect({ func: f() }.func.name).toBe("");
     });
 });

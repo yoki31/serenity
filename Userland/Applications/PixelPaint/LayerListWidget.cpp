@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, Mustafa Quraish <mustafa@serenityos.org>
+ * Copyright (c) 2022, Tobias Christiansen <tobyase@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -68,7 +69,7 @@ void LayerListWidget::resize_event(GUI::ResizeEvent& event)
     relayout_gadgets();
 }
 
-void LayerListWidget::get_gadget_rects(Gadget const& gadget, Gfx::IntRect& outer_rect, Gfx::IntRect& thumbnail_rect, Gfx::IntRect& text_rect)
+void LayerListWidget::get_gadget_rects(Gadget const& gadget, bool is_masked, Gfx::IntRect& outer_rect, Gfx::IntRect& outer_thumbnail_rect, Gfx::IntRect& inner_thumbnail_rect, Gfx::IntRect& outer_mask_thumbnail_rect, Gfx::IntRect& inner_mask_thumbnail_rect, Gfx::IntRect& text_rect)
 {
     outer_rect = gadget.rect;
     outer_rect.translate_by(0, -vertical_scrollbar().value());
@@ -77,10 +78,35 @@ void LayerListWidget::get_gadget_rects(Gadget const& gadget, Gfx::IntRect& outer
         outer_rect.translate_by(0, gadget.movement_delta.y());
     }
 
-    thumbnail_rect = { outer_rect.x(), outer_rect.y(), outer_rect.height(), outer_rect.height() };
-    thumbnail_rect.shrink(8, 8);
+    auto const& layer = m_image->layer(gadget.layer_index);
 
-    text_rect = { thumbnail_rect.right() + 10, outer_rect.y(), outer_rect.width(), outer_rect.height() };
+    outer_thumbnail_rect = { outer_rect.x(), outer_rect.y(), outer_rect.height(), outer_rect.height() };
+    outer_thumbnail_rect.shrink(8, 8);
+
+    Gfx::IntSize thumbnail_size;
+    if (layer.size().width() > layer.size().height()) {
+        float ratio = static_cast<float>(layer.size().height()) / static_cast<float>(layer.size().width());
+        thumbnail_size.set_width(outer_thumbnail_rect.width());
+        thumbnail_size.set_height(outer_thumbnail_rect.width() * ratio);
+    } else {
+        float ratio = static_cast<float>(layer.size().width()) / static_cast<float>(layer.size().height());
+        thumbnail_size.set_height(outer_thumbnail_rect.height());
+        thumbnail_size.set_width(outer_thumbnail_rect.height() * ratio);
+    }
+
+    inner_thumbnail_rect = { 0, 0, thumbnail_size.width(), thumbnail_size.height() };
+    inner_thumbnail_rect.center_within(outer_thumbnail_rect);
+
+    if (is_masked) {
+        outer_mask_thumbnail_rect = { outer_thumbnail_rect.right() + 4, outer_thumbnail_rect.y(), outer_thumbnail_rect.width(), outer_thumbnail_rect.height() };
+        inner_mask_thumbnail_rect = { 0, 0, thumbnail_size.width(), thumbnail_size.height() };
+        inner_mask_thumbnail_rect.center_within(outer_mask_thumbnail_rect);
+    } else {
+        outer_mask_thumbnail_rect = outer_thumbnail_rect;
+        inner_mask_thumbnail_rect = inner_thumbnail_rect;
+    }
+
+    text_rect = { outer_mask_thumbnail_rect.right() + 9, outer_rect.y(), outer_rect.width(), outer_rect.height() };
     text_rect.intersect(outer_rect);
 }
 
@@ -99,10 +125,15 @@ void LayerListWidget::paint_event(GUI::PaintEvent& event)
     auto paint_gadget = [&](auto& gadget) {
         auto& layer = m_image->layer(gadget.layer_index);
 
+        auto is_masked = layer.is_masked();
+
         Gfx::IntRect adjusted_rect;
-        Gfx::IntRect thumbnail_rect;
+        Gfx::IntRect outer_thumbnail_rect;
+        Gfx::IntRect inner_thumbnail_rect;
+        Gfx::IntRect outer_mask_thumbnail_rect;
+        Gfx::IntRect inner_mask_thumbnail_rect;
         Gfx::IntRect text_rect;
-        get_gadget_rects(gadget, adjusted_rect, thumbnail_rect, text_rect);
+        get_gadget_rects(gadget, is_masked, adjusted_rect, outer_thumbnail_rect, inner_thumbnail_rect, outer_mask_thumbnail_rect, inner_mask_thumbnail_rect, text_rect);
 
         if (gadget.is_moving) {
             painter.fill_rect(adjusted_rect, palette().selection().lightened(1.5f));
@@ -111,14 +142,36 @@ void LayerListWidget::paint_event(GUI::PaintEvent& event)
         }
 
         painter.draw_rect(adjusted_rect, palette().color(ColorRole::BaseText));
-        painter.draw_scaled_bitmap(thumbnail_rect, layer.bitmap(), layer.bitmap().rect());
+        painter.draw_scaled_bitmap(inner_thumbnail_rect, layer.display_bitmap(), layer.display_bitmap().rect(), 1.f, Gfx::Painter::ScalingMode::BoxSampling);
 
+        if (is_masked)
+            painter.draw_scaled_bitmap(inner_mask_thumbnail_rect, *layer.mask_bitmap(), layer.mask_bitmap()->rect(), 1.f, Gfx::Painter::ScalingMode::BoxSampling);
+
+        Color border_color = layer.is_visible() ? palette().color(ColorRole::BaseText) : palette().color(ColorRole::DisabledText);
+
+        // FIXME: This needs cleaning up
         if (layer.is_visible()) {
             painter.draw_text(text_rect, layer.name(), Gfx::TextAlignment::CenterLeft, layer.is_selected() ? palette().selection_text() : palette().button_text());
-            painter.draw_rect(thumbnail_rect, palette().color(ColorRole::BaseText));
+            switch (layer.edit_mode()) {
+            case Layer::EditMode::Content:
+                if (is_masked) {
+                    painter.draw_rect_with_thickness(inner_thumbnail_rect.inflated(4, 4), Color::Yellow, 2);
+                    painter.draw_rect(inner_mask_thumbnail_rect, border_color);
+                } else {
+                    painter.draw_rect(inner_thumbnail_rect, border_color);
+                }
+                break;
+            case Layer::EditMode::Mask:
+                painter.draw_rect(inner_thumbnail_rect, border_color);
+                if (is_masked)
+                    painter.draw_rect_with_thickness(inner_mask_thumbnail_rect.inflated(4, 4), Color::Yellow, 2);
+                break;
+            }
         } else {
             painter.draw_text(text_rect, layer.name(), Gfx::TextAlignment::CenterLeft, palette().color(ColorRole::DisabledText));
-            painter.draw_rect(thumbnail_rect, palette().color(ColorRole::DisabledText));
+            painter.draw_rect(inner_thumbnail_rect, border_color);
+            if (is_masked)
+                painter.draw_rect(inner_mask_thumbnail_rect, border_color);
         }
     };
 
@@ -130,16 +183,58 @@ void LayerListWidget::paint_event(GUI::PaintEvent& event)
     if (m_moving_gadget_index.has_value())
         paint_gadget(m_gadgets[m_moving_gadget_index.value()]);
 
-    Gfx::StylePainter::paint_frame(painter, rect(), palette(), Gfx::FrameShape::Box, Gfx::FrameShadow::Sunken, 2);
+    Gfx::StylePainter::paint_frame(painter, rect(), palette(), Gfx::FrameStyle::SunkenBox);
 }
 
-Optional<size_t> LayerListWidget::gadget_at(Gfx::IntPoint const& position)
+Optional<size_t> LayerListWidget::gadget_at(Gfx::IntPoint position)
 {
     for (size_t i = 0; i < m_gadgets.size(); ++i) {
         if (m_gadgets[i].rect.contains(position))
             return i;
     }
     return {};
+}
+
+void LayerListWidget::doubleclick_event(GUI::MouseEvent& event)
+{
+    if (!m_image)
+        return;
+    if (event.button() != GUI::MouseButton::Primary)
+        return;
+
+    Gfx::IntPoint translated_event_point = { 0, vertical_scrollbar().value() + event.y() };
+
+    auto maybe_gadget_index = gadget_at(translated_event_point);
+    if (!maybe_gadget_index.has_value())
+        return;
+    auto gadget_index = maybe_gadget_index.value();
+
+    // FIXME: Allow for a double click to change the selected gadget
+    if (m_selected_gadget_index != gadget_index)
+        return;
+
+    auto& gadget = m_gadgets[gadget_index];
+    auto& layer = m_image->layer(to_layer_index(gadget_index));
+
+    auto is_masked = layer.is_masked();
+
+    if (!is_masked)
+        return;
+
+    Gfx::IntRect adjusted_rect;
+    Gfx::IntRect outer_thumbnail_rect;
+    Gfx::IntRect inner_thumbnail_rect;
+    Gfx::IntRect outer_mask_thumbnail_rect;
+    Gfx::IntRect inner_mask_thumbnail_rect;
+    Gfx::IntRect text_rect;
+    get_gadget_rects(gadget, is_masked, adjusted_rect, outer_thumbnail_rect, inner_thumbnail_rect, outer_mask_thumbnail_rect, inner_mask_thumbnail_rect, text_rect);
+
+    if (outer_thumbnail_rect.contains(event.position()))
+        layer.set_edit_mode(Layer::EditMode::Content);
+    else if (outer_mask_thumbnail_rect.contains(event.position()))
+        layer.set_edit_mode(Layer::EditMode::Mask);
+
+    update();
 }
 
 void LayerListWidget::mousedown_event(GUI::MouseEvent& event)
@@ -184,7 +279,7 @@ void LayerListWidget::mousemove_event(GUI::MouseEvent& event)
     VERIFY(gadget.is_moving);
 
     gadget.movement_delta.set_y(delta.y());
-    auto inner_rect_max_height = widget_inner_rect().height() - 2 + vertical_scrollbar().max();
+    auto inner_rect_max_height = widget_inner_rect().height() - 1 + vertical_scrollbar().max();
 
     if (delta.y() < 0 && gadget.rect.y() < -delta.y())
         gadget.movement_delta.set_y(-gadget.rect.y());
@@ -192,7 +287,7 @@ void LayerListWidget::mousemove_event(GUI::MouseEvent& event)
         gadget.movement_delta.set_y(inner_rect_max_height - gadget.rect.bottom());
 
     m_automatic_scroll_delta = automatic_scroll_delta_from_position(event.position());
-    set_automatic_scrolling_timer(vertical_scrollbar().is_scrollable() && !m_automatic_scroll_delta.is_null());
+    set_automatic_scrolling_timer_active(vertical_scrollbar().is_scrollable() && !m_automatic_scroll_delta.is_zero());
 
     relayout_gadgets();
 }
@@ -212,7 +307,7 @@ void LayerListWidget::mouseup_event(GUI::MouseEvent& event)
         new_index = m_image->layer_count() - 1;
 
     m_moving_gadget_index = {};
-    set_automatic_scrolling_timer(false);
+    set_automatic_scrolling_timer_active(false);
 
     auto old_layer_index = to_layer_index(old_index);
     auto new_layer_index = to_layer_index(new_index);
@@ -234,7 +329,7 @@ void LayerListWidget::context_menu_event(GUI::ContextMenuEvent& event)
         on_context_menu_request(event);
 }
 
-void LayerListWidget::on_automatic_scrolling_timer_fired()
+void LayerListWidget::automatic_scrolling_timer_did_fire()
 {
     auto& gadget = m_gadgets[m_moving_gadget_index.value()];
     VERIFY(gadget.is_moving);
@@ -248,15 +343,15 @@ void LayerListWidget::on_automatic_scrolling_timer_fired()
     if (vertical_scrollbar().is_max() && m_automatic_scroll_delta.y() > 0)
         return;
 
-    vertical_scrollbar().set_value(vertical_scrollbar().value() + m_automatic_scroll_delta.y());
+    vertical_scrollbar().increase_slider_by(m_automatic_scroll_delta.y());
     gadget.movement_delta.set_y(gadget.movement_delta.y() + m_automatic_scroll_delta.y());
 
-    auto inner_rect_max_height = widget_inner_rect().height() - 2 + vertical_scrollbar().max();
+    auto inner_rect_max_height = widget_inner_rect().height() - 1 + vertical_scrollbar().max();
     auto gadget_absolute_position = gadget.rect.y() + gadget.movement_delta.y();
 
     if (gadget_absolute_position < 0)
         gadget.movement_delta.set_y(-gadget.rect.y());
-    else if (gadget_absolute_position + gadget.rect.height() >= inner_rect_max_height)
+    else if (gadget_absolute_position + gadget.rect.height() >= inner_rect_max_height - 1)
         gadget.movement_delta.set_y(inner_rect_max_height - gadget.rect.bottom());
     else
         relayout_gadgets();
@@ -295,10 +390,18 @@ void LayerListWidget::image_did_modify_layer_properties(size_t layer_index)
 void LayerListWidget::image_did_modify_layer_bitmap(size_t layer_index)
 {
     Gfx::IntRect adjusted_rect;
-    Gfx::IntRect thumbnail_rect;
+    Gfx::IntRect outer_thumbnail_rect;
+    Gfx::IntRect inner_thumbnail_rect;
+    Gfx::IntRect outer_mask_thumbnail_rect;
+    Gfx::IntRect inner_mask_thumbnail_rect;
     Gfx::IntRect text_rect;
-    get_gadget_rects(m_gadgets[to_gadget_index(layer_index)], adjusted_rect, thumbnail_rect, text_rect);
-    update(thumbnail_rect);
+
+    auto is_masked = m_image->layer(layer_index).is_masked();
+
+    get_gadget_rects(m_gadgets[to_gadget_index(layer_index)], is_masked, adjusted_rect, outer_thumbnail_rect, inner_thumbnail_rect, outer_mask_thumbnail_rect, inner_mask_thumbnail_rect, text_rect);
+    update(outer_thumbnail_rect);
+    if (is_masked)
+        update(outer_mask_thumbnail_rect);
 }
 
 void LayerListWidget::image_did_modify_layer_stack()

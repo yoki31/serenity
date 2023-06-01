@@ -54,7 +54,7 @@ struct lconv {
     char int_n_sign_posn;
 };
 
-struct lconv* localeconv();
-char* setlocale(int category, const char* locale);
+struct lconv* localeconv(void);
+char* setlocale(int category, char const* locale);
 
 __END_DECLS

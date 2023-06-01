@@ -7,7 +7,6 @@
 #pragma once
 
 #include <AK/Function.h>
-#include <AK/String.h>
 #include <AK/StringView.h>
 #include <AK/Types.h>
 
@@ -17,7 +16,7 @@
 
 class Parser {
 public:
-    Function<void(const Command&)> on_command;
+    Function<void(Command const&)> on_command;
     Function<void(StringView)> on_data;
     Function<void()> on_error;
 
@@ -30,8 +29,6 @@ protected:
         ReadSubcommand,
         Error,
     };
-
-    void write(const String& str);
 
 private:
     State m_state { State::Free };

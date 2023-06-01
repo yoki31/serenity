@@ -19,16 +19,6 @@ constexpr unsigned int_hash(u32 key)
     return key;
 }
 
-constexpr unsigned double_hash(u32 key)
-{
-    key = ~key + (key >> 23);
-    key ^= (key << 12);
-    key ^= (key >> 7);
-    key ^= (key << 2);
-    key ^= (key >> 20);
-    return key;
-}
-
 constexpr unsigned pair_int_hash(u32 key1, u32 key2)
 {
     return int_hash((int_hash(key1) * 209) ^ (int_hash(key2 * 413)));
@@ -49,7 +39,7 @@ constexpr unsigned ptr_hash(FlatPtr ptr)
         return int_hash(ptr);
 }
 
-inline unsigned ptr_hash(const void* ptr)
+inline unsigned ptr_hash(void const* ptr)
 {
     return ptr_hash(FlatPtr(ptr));
 }

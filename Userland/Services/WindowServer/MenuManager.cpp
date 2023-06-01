@@ -6,7 +6,7 @@
  */
 
 #include <AK/Badge.h>
-#include <WindowServer/ClientConnection.h>
+#include <WindowServer/ConnectionFromClient.h>
 #include <WindowServer/MenuManager.h>
 #include <WindowServer/Screen.h>
 #include <WindowServer/WindowManager.h>
@@ -26,11 +26,7 @@ MenuManager::MenuManager()
     s_the = this;
 }
 
-MenuManager::~MenuManager()
-{
-}
-
-bool MenuManager::is_open(const Menu& menu) const
+bool MenuManager::is_open(Menu const& menu) const
 {
     for (size_t i = 0; i < m_open_menu_stack.size(); ++i) {
         if (&menu == m_open_menu_stack[i].ptr())
@@ -41,7 +37,7 @@ bool MenuManager::is_open(const Menu& menu) const
 
 void MenuManager::refresh()
 {
-    ClientConnection::for_each_client([&](ClientConnection& client) {
+    ConnectionFromClient::for_each_client([&](ConnectionFromClient& client) {
         client.for_each_menu([&](Menu& menu) {
             menu.redraw();
             return IterationDecision::Continue;
@@ -59,7 +55,7 @@ void MenuManager::event(Core::Event& event)
     }
 
     if (static_cast<Event&>(event).is_key_event()) {
-        auto& key_event = static_cast<const KeyEvent&>(event);
+        auto& key_event = static_cast<KeyEvent const&>(event);
 
         if (key_event.type() == Event::KeyUp && key_event.key() == Key_Escape) {
             close_everyone();
@@ -72,11 +68,12 @@ void MenuManager::event(Core::Event& event)
 
             if (auto* shortcut_item_indices = m_current_menu->items_with_alt_shortcut(key_event.code_point())) {
                 VERIFY(!shortcut_item_indices->is_empty());
-                // FIXME: If there are multiple items with the same Alt shortcut, we should cycle through them
-                //        with each keypress instead of activating immediately.
-                auto index = shortcut_item_indices->at(0);
+                auto it = shortcut_item_indices->find_if([&](int const& i) { return i > m_current_menu->hovered_item_index(); });
+                auto index = shortcut_item_indices->at(it.is_end() ? 0 : it.index());
                 auto& item = m_current_menu->item(index);
                 m_current_menu->set_hovered_index(index);
+                if (shortcut_item_indices->size() > 1)
+                    return;
                 if (item.is_submenu())
                     m_current_menu->descend_into_submenu_at_hovered_item();
                 else
@@ -89,7 +86,7 @@ void MenuManager::event(Core::Event& event)
         if (event.type() == Event::KeyDown) {
 
             if (key_event.key() == Key_Left) {
-                auto it = m_open_menu_stack.find_if([&](const auto& other) { return m_current_menu == other.ptr(); });
+                auto it = m_open_menu_stack.find_if([&](auto const& other) { return m_current_menu == other.ptr(); });
                 VERIFY(!it.is_end());
 
                 // Going "back" a menu should be the previous menu in the stack
@@ -101,7 +98,7 @@ void MenuManager::event(Core::Event& event)
                     else {
                         auto* target_menu = previous_menu(m_current_menu);
                         if (target_menu) {
-                            target_menu->ensure_menu_window(target_menu->rect_in_window_menubar().bottom_left().translated(wm.window_with_active_menu()->frame().rect().location()).translated(wm.window_with_active_menu()->frame().menubar_rect().location()));
+                            target_menu->ensure_menu_window(target_menu->rect_in_window_menubar().bottom_left().moved_up(1).translated(wm.window_with_active_menu()->frame().rect().location()).translated(wm.window_with_active_menu()->frame().menubar_rect().location()));
                             open_menu(*target_menu);
                             wm.window_with_active_menu()->invalidate_menubar();
                         }
@@ -118,7 +115,7 @@ void MenuManager::event(Core::Event& event)
                 else if (m_open_menu_stack.size() <= 1 && wm.window_with_active_menu()) {
                     auto* target_menu = next_menu(m_current_menu);
                     if (target_menu) {
-                        target_menu->ensure_menu_window(target_menu->rect_in_window_menubar().bottom_left().translated(wm.window_with_active_menu()->frame().rect().location()).translated(wm.window_with_active_menu()->frame().menubar_rect().location()));
+                        target_menu->ensure_menu_window(target_menu->rect_in_window_menubar().bottom_left().moved_up(1).translated(wm.window_with_active_menu()->frame().rect().location()).translated(wm.window_with_active_menu()->frame().menubar_rect().location()));
                         open_menu(*target_menu);
                         wm.window_with_active_menu()->invalidate_menubar();
                         close_everyone_not_in_lineage(*target_menu);
@@ -137,6 +134,17 @@ void MenuManager::event(Core::Event& event)
                     m_current_menu->open_hovered_item(key_event.modifiers() & KeyModifier::Mod_Ctrl);
                 return;
             }
+
+            if (key_event.key() == Key_Space) {
+                auto* hovered_item = m_current_menu->hovered_item();
+                if (!hovered_item || !hovered_item->is_enabled())
+                    return;
+                if (!hovered_item->is_checkable())
+                    return;
+
+                m_current_menu->open_hovered_item(true);
+            }
+
             m_current_menu->dispatch_event(event);
         }
     }
@@ -160,7 +168,7 @@ void MenuManager::handle_mouse_event(MouseEvent& mouse_event)
     bool event_is_inside_current_menu = window->rect().contains(mouse_event.position());
     if (event_is_inside_current_menu) {
         WindowManager::the().set_hovered_window(window);
-        WindowManager::the().deliver_mouse_event(*window, mouse_event, true);
+        WindowManager::the().deliver_mouse_event(*window, mouse_event);
         return;
     }
 
@@ -190,19 +198,19 @@ void MenuManager::handle_mouse_event(MouseEvent& mouse_event)
     }
 
     if (mouse_event.type() == Event::MouseMove) {
-        for (auto& menu : m_open_menu_stack) {
+        for (auto& menu : m_open_menu_stack.in_reverse()) {
             if (!menu)
                 continue;
             if (!menu->menu_window()->rect().contains(mouse_event.position()))
                 continue;
             WindowManager::the().set_hovered_window(menu->menu_window());
-            WindowManager::the().deliver_mouse_event(*menu->menu_window(), mouse_event, true);
+            WindowManager::the().deliver_mouse_event(*menu->menu_window(), mouse_event);
             break;
         }
     }
 }
 
-void MenuManager::close_all_menus_from_client(Badge<ClientConnection>, ClientConnection& client)
+void MenuManager::close_all_menus_from_client(Badge<ConnectionFromClient>, ConnectionFromClient& client)
 {
     if (!has_open_menu())
         return;
@@ -222,6 +230,14 @@ void MenuManager::close_everyone()
     clear_current_menu();
 }
 
+Menu* MenuManager::closest_open_ancestor_of(Menu const& other) const
+{
+    for (auto& menu : m_open_menu_stack.in_reverse())
+        if (menu->is_menu_ancestor_of(other))
+            return menu.ptr();
+    return nullptr;
+}
+
 void MenuManager::close_everyone_not_in_lineage(Menu& menu)
 {
     Vector<Menu&> menus_to_close;
@@ -235,7 +251,7 @@ void MenuManager::close_everyone_not_in_lineage(Menu& menu)
     close_menus(menus_to_close);
 }
 
-void MenuManager::close_menus(const Vector<Menu&>& menus)
+void MenuManager::close_menus(Vector<Menu&>& menus)
 {
     for (auto& menu : menus) {
         if (&menu == m_current_menu)
@@ -316,17 +332,14 @@ void MenuManager::open_menu(Menu& menu, bool as_current_menu)
 
 void MenuManager::clear_current_menu()
 {
-    Menu* previous_current_menu = m_current_menu;
-    m_current_menu = nullptr;
-    if (previous_current_menu) {
-        // When closing the last menu, restore the previous active input window
+    if (m_current_menu) {
         auto& wm = WindowManager::the();
-        wm.restore_active_input_window(m_previous_input_window);
         if (auto* window = wm.window_with_active_menu()) {
             window->invalidate_menubar();
         }
         wm.set_window_with_active_menu(nullptr);
     }
+    m_current_menu = nullptr;
 }
 
 void MenuManager::set_current_menu(Menu* menu)
@@ -341,19 +354,7 @@ void MenuManager::set_current_menu(Menu* menu)
         return;
     }
 
-    Menu* previous_current_menu = m_current_menu;
     m_current_menu = menu;
-
-    auto& wm = WindowManager::the();
-    if (!previous_current_menu) {
-        // When opening the first menu, store the current active input window
-        if (auto* active_input = wm.active_input_window())
-            m_previous_input_window = *active_input;
-        else
-            m_previous_input_window = nullptr;
-    }
-
-    wm.set_active_input_window(m_current_menu->menu_window());
 }
 
 Menu* MenuManager::previous_menu(Menu* current)

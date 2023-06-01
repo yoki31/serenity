@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the SerenityOS developers.
+ * Copyright (c) 2021-2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,14 +10,14 @@
 #include <AK/NonnullRefPtr.h>
 #include <AK/Vector.h>
 #include <LibCore/DirIterator.h>
+#include <LibGUI/ConnectionToWindowServer.h>
 #include <LibGUI/Model.h>
-#include <LibGUI/WindowServerConnection.h>
 #include <LibGfx/CursorParams.h>
 
 class MouseCursorModel final : public GUI::Model {
 public:
     static NonnullRefPtr<MouseCursorModel> create() { return adopt_ref(*new MouseCursorModel); }
-    virtual ~MouseCursorModel() override { }
+    virtual ~MouseCursorModel() override = default;
 
     enum Column {
         Bitmap,
@@ -33,7 +33,7 @@ public:
         case Column::Bitmap:
             return {};
         case Column::Name:
-            return "Name";
+            return "Name"_short_string;
         }
         VERIFY_NOT_REACHED();
     }
@@ -60,20 +60,20 @@ public:
     {
         m_cursors.clear();
 
-        Core::DirIterator iterator(String::formatted("/res/cursor-themes/{}", GUI::WindowServerConnection::the().get_cursor_theme()), Core::DirIterator::Flags::SkipDots);
+        Core::DirIterator iterator(DeprecatedString::formatted("/res/cursor-themes/{}", GUI::ConnectionToWindowServer::the().get_cursor_theme()), Core::DirIterator::Flags::SkipDots);
 
         while (iterator.has_next()) {
             auto path = iterator.next_full_path();
-            if (path.ends_with(".ini"))
+            if (path.ends_with(".ini"sv))
                 continue;
-            if (path.contains("2x"))
+            if (path.contains("2x"sv))
                 continue;
             Cursor cursor;
             cursor.path = move(path);
             cursor.name = LexicalPath::basename(cursor.path);
 
             // FIXME: Animated cursor bitmaps
-            auto cursor_bitmap = Gfx::Bitmap::try_load_from_file(cursor.path).release_value_but_fixme_should_propagate_errors();
+            auto cursor_bitmap = Gfx::Bitmap::load_from_file(cursor.path).release_value_but_fixme_should_propagate_errors();
             auto cursor_bitmap_rect = cursor_bitmap->rect();
 
             cursor.params = Gfx::CursorParams::parse_from_filename(cursor.name, cursor_bitmap_rect.center()).constrained(*cursor_bitmap);
@@ -86,12 +86,12 @@ public:
     }
 
 private:
-    MouseCursorModel() { }
+    MouseCursorModel() = default;
 
     struct Cursor {
         RefPtr<Gfx::Bitmap> bitmap;
-        String path;
-        String name;
+        DeprecatedString path;
+        DeprecatedString name;
         Gfx::CursorParams params;
     };
 
@@ -101,7 +101,7 @@ private:
 class FileIconsModel final : public GUI::Model {
 public:
     static NonnullRefPtr<FileIconsModel> create() { return adopt_ref(*new FileIconsModel); }
-    virtual ~FileIconsModel() override { }
+    virtual ~FileIconsModel() override = default;
 
     enum Column {
         BigIcon,
@@ -120,7 +120,7 @@ public:
         case Column::LittleIcon:
             return {};
         case Column::Name:
-            return "Name";
+            return "Name"_short_string;
         }
         VERIFY_NOT_REACHED();
     }
@@ -155,10 +155,10 @@ public:
 
         while (big_iterator.has_next()) {
             auto path = big_iterator.next_full_path();
-            if (!path.contains("filetype-") && !path.contains("app-"))
+            if (!path.contains("filetype-"sv) && !path.contains("app-"sv))
                 continue;
             IconSet icon_set;
-            icon_set.big_icon = Gfx::Bitmap::try_load_from_file(path).release_value_but_fixme_should_propagate_errors();
+            icon_set.big_icon = Gfx::Bitmap::load_from_file(path).release_value_but_fixme_should_propagate_errors();
             icon_set.name = LexicalPath::basename(path);
             m_icon_sets.append(move(icon_set));
         }
@@ -169,10 +169,10 @@ public:
 
         while (little_iterator.has_next()) {
             auto path = little_iterator.next_full_path();
-            if (!path.contains("filetype-") && !path.contains("app-"))
+            if (!path.contains("filetype-"sv) && !path.contains("app-"sv))
                 continue;
             IconSet icon_set;
-            icon_set.little_icon = Gfx::Bitmap::try_load_from_file(path).release_value_but_fixme_should_propagate_errors();
+            icon_set.little_icon = Gfx::Bitmap::load_from_file(path).release_value_but_fixme_should_propagate_errors();
             icon_set.name = LexicalPath::basename(path);
             for (size_t i = 0; i < big_icons_found; i++) {
                 if (icon_set.name == m_icon_sets[i].name) {
@@ -189,12 +189,12 @@ public:
     }
 
 private:
-    FileIconsModel() { }
+    FileIconsModel() = default;
 
     struct IconSet {
         RefPtr<Gfx::Bitmap> big_icon;
         RefPtr<Gfx::Bitmap> little_icon;
-        String name;
+        DeprecatedString name;
     };
 
     Vector<IconSet> m_icon_sets;

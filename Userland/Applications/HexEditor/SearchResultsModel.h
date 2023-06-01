@@ -6,16 +6,16 @@
 
 #pragma once
 
+#include <AK/DeprecatedString.h>
 #include <AK/Hex.h>
 #include <AK/NonnullRefPtr.h>
-#include <AK/String.h>
 #include <AK/Utf8View.h>
 #include <AK/Vector.h>
 #include <LibGUI/Model.h>
 
 struct Match {
-    int offset;
-    String value;
+    u64 offset;
+    DeprecatedString value;
 };
 
 class SearchResultsModel final : public GUI::Model {
@@ -25,7 +25,7 @@ public:
         Value
     };
 
-    explicit SearchResultsModel(const Vector<Match>&& matches)
+    explicit SearchResultsModel(Vector<Match> const&& matches)
         : m_matches(move(matches))
     {
     }
@@ -44,9 +44,9 @@ public:
     {
         switch (column) {
         case Column::Offset:
-            return "Offset";
+            return "Offset"_short_string;
         case Column::Value:
-            return "Value";
+            return "Value"_short_string;
         }
         VERIFY_NOT_REACHED();
     }
@@ -63,7 +63,7 @@ public:
             auto& match = m_matches.at(index.row());
             switch (index.column()) {
             case Column::Offset:
-                return String::formatted("{:#08X}", match.offset);
+                return DeprecatedString::formatted("{:#08X}", match.offset);
             case Column::Value: {
                 Utf8View utf8_view(match.value);
                 if (!utf8_view.validate())

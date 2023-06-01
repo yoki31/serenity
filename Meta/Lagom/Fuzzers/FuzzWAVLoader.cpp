@@ -4,20 +4,30 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Stream.h>
 #include <LibAudio/WavLoader.h>
 #include <stddef.h>
 #include <stdint.h>
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
 {
-    auto wav_data = ByteBuffer::copy(data, size).release_value();
-    auto wav = make<Audio::WavLoaderPlugin>(wav_data);
+    if (!data)
+        return 0;
+    auto wav_data = ReadonlyBytes { data, size };
+    auto wav_or_error = Audio::WavLoaderPlugin::create(wav_data);
 
-    if (!wav->sniff())
-        return 1;
+    if (wav_or_error.is_error())
+        return 0;
 
-    while (wav->get_more_samples())
-        ;
+    auto wav = wav_or_error.release_value();
+
+    for (;;) {
+        auto samples = wav->load_chunks(4 * KiB);
+        if (samples.is_error())
+            return 0;
+        if (samples.value().size() == 0)
+            break;
+    }
 
     return 0;
 }

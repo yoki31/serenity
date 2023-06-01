@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2021-2022, Linus Groh <linusg@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,6 +7,7 @@
 #pragma once
 
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/ExecutionContext.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/Realm.h>
 
@@ -16,7 +17,6 @@ class ShadowRealm final : public Object {
     JS_OBJECT(ShadowRealm, Object);
 
 public:
-    ShadowRealm(Realm&, ExecutionContext, Object& prototype);
     virtual ~ShadowRealm() override = default;
 
     [[nodiscard]] Realm const& shadow_realm() const { return m_shadow_realm; }
@@ -25,15 +25,18 @@ public:
     [[nodiscard]] ExecutionContext& execution_context() { return m_execution_context; }
 
 private:
+    ShadowRealm(Realm&, ExecutionContext, Object& prototype);
+
     virtual void visit_edges(Visitor&) override;
 
     // 3.5 Properties of ShadowRealm Instances, https://tc39.es/proposal-shadowrealm/#sec-properties-of-shadowrealm-instances
-    Realm& m_shadow_realm;                // [[ShadowRealm]]
+    NonnullGCPtr<Realm> m_shadow_realm;   // [[ShadowRealm]]
     ExecutionContext m_execution_context; // [[ExecutionContext]]
 };
 
-ThrowCompletionOr<Value> perform_shadow_realm_eval(GlobalObject&, StringView source_text, Realm& caller_realm, Realm& eval_realm);
-ThrowCompletionOr<Value> shadow_realm_import_value(GlobalObject&, String specifier_string, String export_name_string, Realm& caller_realm, Realm& eval_realm, ExecutionContext& eval_context);
-ThrowCompletionOr<Value> get_wrapped_value(GlobalObject&, Realm& caller_realm, Value);
+ThrowCompletionOr<void> copy_name_and_length(VM&, FunctionObject& function, FunctionObject& target, Optional<StringView> prefix = {}, Optional<unsigned> arg_count = {});
+ThrowCompletionOr<Value> perform_shadow_realm_eval(VM&, StringView source_text, Realm& caller_realm, Realm& eval_realm);
+ThrowCompletionOr<Value> shadow_realm_import_value(VM&, DeprecatedString specifier_string, DeprecatedString export_name_string, Realm& caller_realm, Realm& eval_realm, ExecutionContext& eval_context);
+ThrowCompletionOr<Value> get_wrapped_value(VM&, Realm& caller_realm, Value);
 
 }

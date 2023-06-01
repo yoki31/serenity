@@ -7,22 +7,19 @@
 
 #pragma once
 
+#include <AK/StringView.h>
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/VM.h>
 
 namespace JS {
 
 class Accessor final : public Cell {
-public:
-    static Accessor* create(VM& vm, FunctionObject* getter, FunctionObject* setter)
-    {
-        return vm.heap().allocate_without_global_object<Accessor>(getter, setter);
-    }
+    JS_CELL(Accessor, Cell);
 
-    Accessor(FunctionObject* getter, FunctionObject* setter)
-        : m_getter(getter)
-        , m_setter(setter)
+public:
+    static NonnullGCPtr<Accessor> create(VM& vm, FunctionObject* getter, FunctionObject* setter)
     {
+        return vm.heap().allocate_without_realm<Accessor>(getter, setter);
     }
 
     FunctionObject* getter() const { return m_getter; }
@@ -31,32 +28,22 @@ public:
     FunctionObject* setter() const { return m_setter; }
     void set_setter(FunctionObject* setter) { m_setter = setter; }
 
-    Value call_getter(Value this_value)
-    {
-        if (!m_getter)
-            return js_undefined();
-        return TRY_OR_DISCARD(vm().call(*m_getter, this_value));
-    }
-
-    void call_setter(Value this_value, Value setter_value)
-    {
-        if (!m_setter)
-            return;
-        // FIXME: It might be nice if we had a way to communicate to our caller if an exception happened after this.
-        [[maybe_unused]] auto rc = vm().call(*m_setter, this_value, setter_value);
-    }
-
     void visit_edges(Cell::Visitor& visitor) override
     {
+        Base::visit_edges(visitor);
         visitor.visit(m_getter);
         visitor.visit(m_setter);
     }
 
 private:
-    const char* class_name() const override { return "Accessor"; };
+    Accessor(FunctionObject* getter, FunctionObject* setter)
+        : m_getter(getter)
+        , m_setter(setter)
+    {
+    }
 
-    FunctionObject* m_getter { nullptr };
-    FunctionObject* m_setter { nullptr };
+    GCPtr<FunctionObject> m_getter;
+    GCPtr<FunctionObject> m_setter;
 };
 
 }

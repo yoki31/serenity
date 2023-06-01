@@ -1,18 +1,21 @@
 /*
  * Copyright (c) 2021, Daniel Bertalan <dani@danielbertalan.dev>
+ * Copyright (c) 2022, Alex Major
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #define __USE_MISC
 #define TTYDEFCHARS
-#include <AK/Array.h>
+#include <AK/CharacterTypes.h>
+#include <AK/DeprecatedString.h>
 #include <AK/Optional.h>
 #include <AK/Result.h>
 #include <AK/ScopeGuard.h>
-#include <AK/String.h>
 #include <AK/StringView.h>
 #include <AK/Vector.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <ctype.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -46,55 +49,55 @@ struct ControlCharacter {
 };
 
 constexpr TermiosFlag all_iflags[] = {
-    { "ignbrk", IGNBRK, IGNBRK },
-    { "brkint", BRKINT, BRKINT },
-    { "ignpar", IGNPAR, IGNPAR },
-    { "parmer", PARMRK, PARMRK },
-    { "inpck", INPCK, INPCK },
-    { "istrip", ISTRIP, ISTRIP },
-    { "inlcr", INLCR, INLCR },
-    { "igncr", IGNCR, IGNCR },
-    { "icrnl", ICRNL, ICRNL },
-    { "iuclc", IUCLC, IUCLC },
-    { "ixon", IXON, IXON },
-    { "ixany", IXANY, IXANY },
-    { "ixoff", IXOFF, IXOFF },
-    { "imaxbel", IMAXBEL, IMAXBEL },
-    { "iutf8", IUTF8, IUTF8 }
+    { "ignbrk"sv, IGNBRK, IGNBRK },
+    { "brkint"sv, BRKINT, BRKINT },
+    { "ignpar"sv, IGNPAR, IGNPAR },
+    { "parmer"sv, PARMRK, PARMRK },
+    { "inpck"sv, INPCK, INPCK },
+    { "istrip"sv, ISTRIP, ISTRIP },
+    { "inlcr"sv, INLCR, INLCR },
+    { "igncr"sv, IGNCR, IGNCR },
+    { "icrnl"sv, ICRNL, ICRNL },
+    { "iuclc"sv, IUCLC, IUCLC },
+    { "ixon"sv, IXON, IXON },
+    { "ixany"sv, IXANY, IXANY },
+    { "ixoff"sv, IXOFF, IXOFF },
+    { "imaxbel"sv, IMAXBEL, IMAXBEL },
+    { "iutf8"sv, IUTF8, IUTF8 }
 };
 
 constexpr TermiosFlag all_oflags[] = {
-    { "opost", OPOST, OPOST },
-    { "olcuc", OLCUC, OPOST },
-    { "onlcr", ONLCR, ONLCR },
-    { "onlret", ONLRET, ONLRET },
-    { "ofill", OFILL, OFILL },
-    { "ofdel", OFDEL, OFDEL },
+    { "opost"sv, OPOST, OPOST },
+    { "olcuc"sv, OLCUC, OPOST },
+    { "onlcr"sv, ONLCR, ONLCR },
+    { "onlret"sv, ONLRET, ONLRET },
+    { "ofill"sv, OFILL, OFILL },
+    { "ofdel"sv, OFDEL, OFDEL },
 };
 
 constexpr TermiosFlag all_cflags[] = {
-    { "cs5", CS5, CSIZE },
-    { "cs6", CS6, CSIZE },
-    { "cs7", CS7, CSIZE },
-    { "cs8", CS8, CSIZE },
-    { "cstopb", CSTOPB, CSTOPB },
-    { "cread", CREAD, CREAD },
-    { "parenb", PARENB, PARENB },
-    { "parodd", PARODD, PARODD },
-    { "hupcl", HUPCL, HUPCL },
-    { "clocal", CLOCAL, CLOCAL },
+    { "cs5"sv, CS5, CSIZE },
+    { "cs6"sv, CS6, CSIZE },
+    { "cs7"sv, CS7, CSIZE },
+    { "cs8"sv, CS8, CSIZE },
+    { "cstopb"sv, CSTOPB, CSTOPB },
+    { "cread"sv, CREAD, CREAD },
+    { "parenb"sv, PARENB, PARENB },
+    { "parodd"sv, PARODD, PARODD },
+    { "hupcl"sv, HUPCL, HUPCL },
+    { "clocal"sv, CLOCAL, CLOCAL },
 };
 
 constexpr TermiosFlag all_lflags[] = {
-    { "isig", ISIG, ISIG },
-    { "icanon", ICANON, ICANON },
-    { "echo", ECHO, ECHO },
-    { "echoe", ECHOE, ECHOE },
-    { "echok", ECHOK, ECHOK },
-    { "echonl", ECHONL, ECHONL },
-    { "noflsh", NOFLSH, NOFLSH },
-    { "tostop", TOSTOP, TOSTOP },
-    { "iexten", IEXTEN, IEXTEN }
+    { "isig"sv, ISIG, ISIG },
+    { "icanon"sv, ICANON, ICANON },
+    { "echo"sv, ECHO, ECHO },
+    { "echoe"sv, ECHOE, ECHOE },
+    { "echok"sv, ECHOK, ECHOK },
+    { "echonl"sv, ECHONL, ECHONL },
+    { "noflsh"sv, NOFLSH, NOFLSH },
+    { "tostop"sv, TOSTOP, TOSTOP },
+    { "iexten"sv, IEXTEN, IEXTEN }
 };
 
 constexpr BaudRate baud_rates[] = {
@@ -132,29 +135,29 @@ constexpr BaudRate baud_rates[] = {
 };
 
 constexpr ControlCharacter control_characters[] = {
-    { "intr", VINTR },
-    { "quit", VQUIT },
-    { "erase", VERASE },
-    { "kill", VKILL },
-    { "eof", VEOF },
+    { "intr"sv, VINTR },
+    { "quit"sv, VQUIT },
+    { "erase"sv, VERASE },
+    { "kill"sv, VKILL },
+    { "eof"sv, VEOF },
     /* time and min are handled separately */
-    { "swtc", VSWTC },
-    { "start", VSTART },
-    { "stop", VSTOP },
-    { "susp", VSUSP },
-    { "eol", VEOL },
-    { "reprint", VREPRINT },
-    { "discard", VDISCARD },
-    { "werase", VWERASE },
-    { "lnext", VLNEXT },
-    { "eol2", VEOL2 }
+    { "swtc"sv, VSWTC },
+    { "start"sv, VSTART },
+    { "stop"sv, VSTOP },
+    { "susp"sv, VSUSP },
+    { "eol"sv, VEOL },
+    { "reprint"sv, VREPRINT },
+    { "discard"sv, VDISCARD },
+    { "werase"sv, VWERASE },
+    { "lnext"sv, VLNEXT },
+    { "eol2"sv, VEOL2 }
 };
 
 Optional<speed_t> numeric_value_to_speed(unsigned long);
 Optional<unsigned long> speed_to_numeric_value(speed_t);
 
-void print_stty_readable(const termios&);
-void print_human_readable(const termios&, const winsize&, bool);
+void print_stty_readable(termios const&);
+void print_human_readable(termios const&, winsize const&, bool);
 Result<void, int> apply_stty_readable_modes(StringView, termios&);
 Result<void, int> apply_modes(size_t, char**, termios&, winsize&);
 
@@ -176,7 +179,7 @@ Optional<unsigned long> speed_to_numeric_value(speed_t speed)
     return {};
 }
 
-void print_stty_readable(const termios& modes)
+void print_stty_readable(termios const& modes)
 {
     out("{:x}:{:x}:{:x}:{:x}", modes.c_iflag, modes.c_oflag, modes.c_cflag, modes.c_lflag);
     for (size_t i = 0; i < NCCS; ++i)
@@ -184,7 +187,7 @@ void print_stty_readable(const termios& modes)
     out(":{:x}:{:x}\n", modes.c_ispeed, modes.c_ospeed);
 }
 
-void print_human_readable(const termios& modes, const winsize& ws, bool verbose_mode)
+void print_human_readable(termios const& modes, winsize const& ws, bool verbose_mode)
 {
     auto print_speed = [&] {
         if (verbose_mode && modes.c_ispeed != modes.c_ospeed) {
@@ -202,14 +205,14 @@ void print_human_readable(const termios& modes, const winsize& ws, bool verbose_
     auto escape_character = [&](u8 ch) {
         StringBuilder sb;
         if (ch <= 0x20) {
-            sb.append("^");
+            sb.append('^');
             sb.append(ch + 0x40);
         } else if (ch == 0x7f) {
-            sb.append("^?");
+            sb.append("^?"sv);
         } else {
             sb.append(ch);
         }
-        return sb.to_string();
+        return sb.to_deprecated_string();
     };
 
     auto print_control_characters = [&] {
@@ -263,9 +266,9 @@ Result<void, int> apply_stty_readable_modes(StringView mode_string, termios& t)
     auto parse_hex = [&](StringView v) {
         tcflag_t ret = 0;
         for (auto c : v) {
-            c = tolower(c);
+            c = to_ascii_lowercase(c);
             ret *= 16;
-            if (isdigit(c)) {
+            if (is_ascii_digit(c)) {
                 ret += c - '0';
             } else {
                 VERIFY(c >= 'a' && c <= 'f');
@@ -292,7 +295,7 @@ Result<void, int> apply_modes(size_t parameter_count, char** raw_parameters, ter
     Vector<StringView> parameters;
     parameters.ensure_capacity(parameter_count);
     for (size_t i = 0; i < parameter_count; ++i)
-        parameters.append(StringView(raw_parameters[i]));
+        parameters.append(StringView { raw_parameters[i], strlen(raw_parameters[i]) });
 
     auto parse_baud = [&](size_t idx) -> Optional<speed_t> {
         auto maybe_numeric_value = parameters[idx].to_uint<uint32_t>();
@@ -308,8 +311,8 @@ Result<void, int> apply_modes(size_t parameter_count, char** raw_parameters, ter
     auto looks_like_stty_readable = [&](size_t idx) {
         bool contains_colon = false;
         for (auto c : parameters[idx]) {
-            c = tolower(c);
-            if (!isdigit(c) && !(c >= 'a' && c <= 'f') && c != ':')
+            c = to_ascii_lowercase(c);
+            if (!is_ascii_digit(c) && !(c >= 'a' && c <= 'f') && c != ':')
                 return false;
             if (c == ':')
                 contains_colon = true;
@@ -324,23 +327,23 @@ Result<void, int> apply_modes(size_t parameter_count, char** raw_parameters, ter
             // We should add the _POSIX_VDISABLE macro.
             return 0;
         } else if (parameters[idx][0] == '^' && parameters[idx].length() == 2) {
-            return toupper(parameters[idx][1]) - 0x40;
-        } else if (parameters[idx].starts_with("0x")) {
+            return to_ascii_uppercase(parameters[idx][1]) - 0x40;
+        } else if (parameters[idx].starts_with("0x"sv)) {
             cc_t value = 0;
             if (parameters[idx].length() == 2) {
                 warnln("Invalid hexadecimal character code {}", parameters[idx]);
                 return {};
             }
             for (size_t i = 2; i < parameters[idx].length(); ++i) {
-                char ch = tolower(parameters[idx][i]);
-                if (!isdigit(ch) && !(ch >= 'a' && ch <= 'f')) {
+                char ch = to_ascii_lowercase(parameters[idx][i]);
+                if (!is_ascii_digit(ch) && !(ch >= 'a' && ch <= 'f')) {
                     warnln("Invalid hexadecimal character code {}", parameters[idx]);
                     return {};
                 }
-                value = 16 * value + (isdigit(ch)) ? (ch - '0') : (ch - 'a');
+                value = 16 * value + (is_ascii_digit(ch) ? (ch - '0') : (ch - 'a'));
             }
             return value;
-        } else if (parameters[idx].starts_with("0")) {
+        } else if (parameters[idx].starts_with("0"sv)) {
             cc_t value = 0;
             for (size_t i = 1; i < parameters[idx].length(); ++i) {
                 char ch = parameters[idx][i];
@@ -351,7 +354,7 @@ Result<void, int> apply_modes(size_t parameter_count, char** raw_parameters, ter
                 value = 8 * value + (ch - '0');
             }
             return value;
-        } else if (isdigit(parameters[idx][0])) {
+        } else if (is_ascii_digit(parameters[idx][0])) {
             auto maybe_value = parameters[idx].to_uint<cc_t>();
             if (!maybe_value.has_value()) {
                 warnln("Invalid decimal character code {}", parameters[idx]);
@@ -447,7 +450,7 @@ Result<void, int> apply_modes(size_t parameter_count, char** raw_parameters, ter
             auto maybe_error = apply_stty_readable_modes(parameters[parameter_idx], t);
             if (maybe_error.is_error())
                 return maybe_error.error();
-        } else if (isdigit(parameters[parameter_idx][0])) {
+        } else if (is_ascii_digit(parameters[parameter_idx][0])) {
             auto new_baud = parse_baud(parameter_idx);
             if (!new_baud.has_value()) {
                 warnln("Invalid baud rate {}", parameters[parameter_idx]);
@@ -527,28 +530,19 @@ Result<void, int> apply_modes(size_t parameter_count, char** raw_parameters, ter
     return {};
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio tty rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio tty rpath"));
+    TRY(Core::System::unveil("/dev", "r"));
+    TRY(Core::System::unveil(nullptr, nullptr));
 
-    if (unveil("/dev", "r") < 0) {
-        perror("unveil");
-        return 1;
-    }
-
-    if (unveil(nullptr, nullptr) < 0) {
-        perror("unveil");
-        return 1;
-    }
-
-    String device_file;
+    DeprecatedString device_file;
     bool stty_readable = false;
     bool all_settings = false;
 
     // Core::ArgsParser can't handle the weird syntax of stty, so we use getopt_long instead.
+    int argc = arguments.argc;
+    char** argv = arguments.argv;
     opterr = 0; // We handle unknown flags gracefully by starting to parse the arguments in `apply_modes`.
     int optc;
     bool should_quit = false;
@@ -588,35 +582,24 @@ int main(int argc, char** argv)
 
     ScopeGuard file_close_guard = [&] { close(terminal_fd); };
 
-    termios initial_termios;
-    if (tcgetattr(terminal_fd, &initial_termios) < 0) {
-        perror("tcgetattr");
-        exit(1);
-    }
+    termios initial_termios = TRY(Core::System::tcgetattr(terminal_fd));
 
     winsize initial_winsize;
-    if (ioctl(terminal_fd, TIOCGWINSZ, &initial_winsize) < 0) {
-        perror("ioctl(TIOCGWINSZ)");
-        exit(1);
-    }
+    TRY(Core::System::ioctl(terminal_fd, TIOCGWINSZ, &initial_winsize));
 
     if (optind < argc) {
         if (stty_readable || all_settings) {
             warnln("Modes cannot be set when printing settings");
             exit(1);
         }
+
         auto result = apply_modes(argc - optind, argv + optind, initial_termios, initial_winsize);
         if (result.is_error())
             return result.error();
 
-        if (tcsetattr(terminal_fd, TCSADRAIN, &initial_termios) < 0) {
-            perror("tcsetattr");
-            exit(1);
-        }
-        if (ioctl(terminal_fd, TIOCSWINSZ, &initial_winsize) < 0) {
-            perror("ioctl(TIOCSWINSZ)");
-            exit(1);
-        }
+        TRY(Core::System::tcsetattr(terminal_fd, TCSADRAIN, initial_termios));
+        TRY(Core::System::ioctl(terminal_fd, TIOCSWINSZ, &initial_winsize));
+
     } else if (stty_readable) {
         print_stty_readable(initial_termios);
     } else {

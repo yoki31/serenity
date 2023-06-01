@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/Assertions.h>
+#include <AK/String.h>
 
 namespace Web::CSS {
 
@@ -14,6 +15,8 @@ class Display {
 public:
     Display() = default;
     ~Display() = default;
+
+    ErrorOr<String> to_string() const;
 
     bool operator==(Display const& other) const
     {
@@ -31,8 +34,6 @@ public:
         }
         VERIFY_NOT_REACHED();
     }
-
-    bool operator!=(Display const& other) const { return !(*this == other); }
 
     enum class Outside {
         Block,
@@ -69,6 +70,11 @@ public:
         None,
     };
 
+    enum class ListItem {
+        No,
+        Yes,
+    };
+
     enum class Type {
         OutsideAndInside,
         Internal,
@@ -95,35 +101,44 @@ public:
 
     Type type() const { return m_type; }
 
-    bool it_outside_and_inside() const { return m_type == Type::OutsideAndInside; }
+    bool is_outside_and_inside() const { return m_type == Type::OutsideAndInside; }
 
     Outside outside() const
     {
-        VERIFY(it_outside_and_inside());
+        VERIFY(is_outside_and_inside());
         return m_value.outside_inside.outside;
     }
 
-    bool is_block_outside() const { return it_outside_and_inside() && outside() == Outside::Block; }
-    bool is_inline_outside() const { return it_outside_and_inside() && outside() == Outside::Inline; }
-    bool is_list_item() const { return it_outside_and_inside() && m_value.outside_inside.list_item == ListItem::Yes; }
+    bool is_block_outside() const { return is_outside_and_inside() && outside() == Outside::Block; }
+    bool is_inline_outside() const { return is_outside_and_inside() && outside() == Outside::Inline; }
+    bool is_inline_block() const { return is_inline_outside() && is_flow_root_inside(); }
+
+    ListItem list_item() const
+    {
+        VERIFY(is_outside_and_inside());
+        return m_value.outside_inside.list_item;
+    }
+
+    bool is_list_item() const { return is_outside_and_inside() && list_item() == ListItem::Yes; }
 
     Inside inside() const
     {
-        VERIFY(it_outside_and_inside());
+        VERIFY(is_outside_and_inside());
         return m_value.outside_inside.inside;
     }
 
-    bool is_flow_inside() const { return it_outside_and_inside() && inside() == Inside::Flow; }
-    bool is_flow_root_inside() const { return it_outside_and_inside() && inside() == Inside::FlowRoot; }
-    bool is_table_inside() const { return it_outside_and_inside() && inside() == Inside::Table; }
-    bool is_flex_inside() const { return it_outside_and_inside() && inside() == Inside::Flex; }
-    bool is_grid_inside() const { return it_outside_and_inside() && inside() == Inside::Grid; }
-    bool is_ruby_inside() const { return it_outside_and_inside() && inside() == Inside::Ruby; }
+    bool is_flow_inside() const { return is_outside_and_inside() && inside() == Inside::Flow; }
+    bool is_flow_root_inside() const { return is_outside_and_inside() && inside() == Inside::FlowRoot; }
+    bool is_table_inside() const { return is_outside_and_inside() && inside() == Inside::Table; }
+    bool is_flex_inside() const { return is_outside_and_inside() && inside() == Inside::Flex; }
+    bool is_grid_inside() const { return is_outside_and_inside() && inside() == Inside::Grid; }
+    bool is_ruby_inside() const { return is_outside_and_inside() && inside() == Inside::Ruby; }
 
     enum class Short {
         None,
         Contents,
         Block,
+        Flow,
         FlowRoot,
         Inline,
         InlineBlock,
@@ -135,14 +150,8 @@ public:
         Grid,
         InlineGrid,
         Ruby,
-        BlockRuby,
         Table,
         InlineTable,
-    };
-
-    enum class ListItem {
-        No,
-        Yes,
     };
 
     static Display from_short(Short short_)
@@ -154,10 +163,12 @@ public:
             return Display { Box::Contents };
         case Short::Block:
             return Display { Outside::Block, Inside::Flow };
-        case Short::FlowRoot:
-            return Display { Outside::Block, Inside::FlowRoot };
         case Short::Inline:
             return Display { Outside::Inline, Inside::Flow };
+        case Short::Flow:
+            return Display { Outside::Block, Inside::Flow };
+        case Short::FlowRoot:
+            return Display { Outside::Block, Inside::FlowRoot };
         case Short::InlineBlock:
             return Display { Outside::Inline, Inside::FlowRoot };
         case Short::RunIn:
@@ -176,8 +187,6 @@ public:
             return Display { Outside::Inline, Inside::Grid };
         case Short::Ruby:
             return Display { Outside::Inline, Inside::Ruby };
-        case Short::BlockRuby:
-            return Display { Outside::Block, Inside::Ruby };
         case Short::Table:
             return Display { Outside::Block, Inside::Table };
         case Short::InlineTable:

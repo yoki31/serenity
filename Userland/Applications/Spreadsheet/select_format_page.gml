@@ -1,21 +1,18 @@
 @GUI::Widget {
     name: "select_format"
-
     layout: @GUI::VerticalBoxLayout {
         margins: [20]
     }
 
     @GUI::Label {
         text: "Please double-check the guessed file type\nor select the correct one below"
-        text_aliignment: "TopLeft"
+        text_alignment: "TopLeft"
         fixed_height: 32
     }
 
     @GUI::Widget {
         fixed_height: 25
-
-        layout: @GUI::HorizontalBoxLayout {
-        }
+        layout: @GUI::HorizontalBoxLayout {}
 
         @GUI::Label {
             text: "Type: "
@@ -28,6 +25,5 @@
         }
     }
 
-    @GUI::Widget {
-    }
+    @GUI::Layout::Spacer {}
 }

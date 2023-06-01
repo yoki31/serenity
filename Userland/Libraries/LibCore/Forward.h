@@ -10,10 +10,12 @@ namespace Core {
 
 class AnonymousBuffer;
 class ArgsParser;
+class BufferedSocketBase;
 class ChildEvent;
 class ConfigFile;
 class CustomEvent;
 class DateTime;
+class DeprecatedFile;
 class DirIterator;
 class DeferredInvocationContext;
 class ElapsedTimer;
@@ -23,6 +25,7 @@ class File;
 class IODevice;
 class LocalServer;
 class LocalSocket;
+class MappedFile;
 class MimeData;
 class NetworkJob;
 class NetworkResponse;
@@ -31,6 +34,8 @@ class Object;
 class ObjectClassRegistration;
 class ProcessStatisticsReader;
 class Socket;
+template<typename Result>
+class Promise;
 class SocketAddress;
 class TCPServer;
 class TCPSocket;

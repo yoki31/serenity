@@ -35,8 +35,13 @@ void SimpleIndexedPropertyStorage::grow_storage_if_needed()
 {
     if (m_array_size <= m_packed_elements.size())
         return;
-    // Grow storage by 25% at a time.
-    m_packed_elements.resize(m_array_size + (m_array_size / 4));
+
+    if (m_array_size <= m_packed_elements.capacity()) {
+        m_packed_elements.resize_and_keep_capacity(m_array_size);
+    } else {
+        // When the array is actually full grow storage by 25% at a time.
+        m_packed_elements.resize_and_keep_capacity(m_array_size + (m_array_size / 4));
+    }
 }
 
 void SimpleIndexedPropertyStorage::put(u32 index, Value value, PropertyAttributes attributes)
@@ -73,7 +78,7 @@ ValueAndAttributes SimpleIndexedPropertyStorage::take_last()
 bool SimpleIndexedPropertyStorage::set_array_like_size(size_t new_size)
 {
     m_array_size = new_size;
-    m_packed_elements.resize(new_size);
+    m_packed_elements.resize_and_keep_capacity(new_size);
     return true;
 }
 
@@ -172,13 +177,15 @@ bool GenericIndexedPropertyStorage::set_array_like_size(size_t new_size)
     return !any_failed;
 }
 
-IndexedPropertyIterator::IndexedPropertyIterator(const IndexedProperties& indexed_properties, u32 staring_index, bool skip_empty)
+IndexedPropertyIterator::IndexedPropertyIterator(IndexedProperties const& indexed_properties, u32 staring_index, bool skip_empty)
     : m_indexed_properties(indexed_properties)
     , m_index(staring_index)
     , m_skip_empty(skip_empty)
 {
-    if (m_skip_empty)
+    if (m_skip_empty) {
+        m_cached_indices = m_indexed_properties.indices();
         skip_empty_indices();
+    }
 }
 
 IndexedPropertyIterator& IndexedPropertyIterator::operator++()
@@ -196,15 +203,14 @@ IndexedPropertyIterator& IndexedPropertyIterator::operator*()
     return *this;
 }
 
-bool IndexedPropertyIterator::operator!=(const IndexedPropertyIterator& other) const
+bool IndexedPropertyIterator::operator!=(IndexedPropertyIterator const& other) const
 {
     return m_index != other.m_index;
 }
 
 void IndexedPropertyIterator::skip_empty_indices()
 {
-    auto indices = m_indexed_properties.indices();
-    for (auto i : indices) {
+    for (auto i : m_cached_indices) {
         if (i < m_index)
             continue;
         m_index = i;
@@ -215,11 +221,14 @@ void IndexedPropertyIterator::skip_empty_indices()
 
 Optional<ValueAndAttributes> IndexedProperties::get(u32 index) const
 {
+    if (!m_storage)
+        return {};
     return m_storage->get(index);
 }
 
 void IndexedProperties::put(u32 index, Value value, PropertyAttributes attributes)
 {
+    ensure_storage();
     if (m_storage->is_simple_storage() && (attributes != default_attributes || index > (array_like_size() + SPARSE_ARRAY_HOLE_THRESHOLD))) {
         switch_to_generic_storage();
     }
@@ -229,28 +238,14 @@ void IndexedProperties::put(u32 index, Value value, PropertyAttributes attribute
 
 void IndexedProperties::remove(u32 index)
 {
+    VERIFY(m_storage);
     VERIFY(m_storage->has_index(index));
     m_storage->remove(index);
 }
 
-ValueAndAttributes IndexedProperties::take_first(Object* this_object)
-{
-    auto first = m_storage->take_first();
-    if (first.value.is_accessor())
-        return { first.value.as_accessor().call_getter(this_object), first.attributes };
-    return first;
-}
-
-ValueAndAttributes IndexedProperties::take_last(Object* this_object)
-{
-    auto last = m_storage->take_last();
-    if (last.value.is_accessor())
-        return { last.value.as_accessor().call_getter(this_object), last.attributes };
-    return last;
-}
-
 bool IndexedProperties::set_array_like_size(size_t new_size)
 {
+    ensure_storage();
     auto current_array_like_size = array_like_size();
 
     // We can't use simple storage for lengths that don't fit in an i32.
@@ -267,8 +262,10 @@ bool IndexedProperties::set_array_like_size(size_t new_size)
 
 size_t IndexedProperties::real_size() const
 {
+    if (!m_storage)
+        return 0;
     if (m_storage->is_simple_storage()) {
-        auto& packed_elements = static_cast<const SimpleIndexedPropertyStorage&>(*m_storage).elements();
+        auto& packed_elements = static_cast<SimpleIndexedPropertyStorage const&>(*m_storage).elements();
         size_t size = 0;
         for (auto& element : packed_elements) {
             if (!element.is_empty())
@@ -276,14 +273,16 @@ size_t IndexedProperties::real_size() const
         }
         return size;
     }
-    return static_cast<const GenericIndexedPropertyStorage&>(*m_storage).size();
+    return static_cast<GenericIndexedPropertyStorage const&>(*m_storage).size();
 }
 
 Vector<u32> IndexedProperties::indices() const
 {
+    if (!m_storage)
+        return {};
     if (m_storage->is_simple_storage()) {
-        const auto& storage = static_cast<const SimpleIndexedPropertyStorage&>(*m_storage);
-        const auto& elements = storage.elements();
+        auto const& storage = static_cast<SimpleIndexedPropertyStorage const&>(*m_storage);
+        auto const& elements = storage.elements();
         Vector<u32> indices;
         indices.ensure_capacity(storage.array_like_size());
         for (size_t i = 0; i < elements.size(); ++i) {
@@ -292,7 +291,7 @@ Vector<u32> IndexedProperties::indices() const
         }
         return indices;
     }
-    const auto& storage = static_cast<const GenericIndexedPropertyStorage&>(*m_storage);
+    auto const& storage = static_cast<GenericIndexedPropertyStorage const&>(*m_storage);
     auto indices = storage.sparse_elements().keys();
     quick_sort(indices);
     return indices;
@@ -300,8 +299,18 @@ Vector<u32> IndexedProperties::indices() const
 
 void IndexedProperties::switch_to_generic_storage()
 {
+    if (!m_storage) {
+        m_storage = make<GenericIndexedPropertyStorage>();
+        return;
+    }
     auto& storage = static_cast<SimpleIndexedPropertyStorage&>(*m_storage);
     m_storage = make<GenericIndexedPropertyStorage>(move(storage));
+}
+
+void IndexedProperties::ensure_storage()
+{
+    if (!m_storage)
+        m_storage = make<SimpleIndexedPropertyStorage>();
 }
 
 }

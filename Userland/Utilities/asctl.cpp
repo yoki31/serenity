@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2021, kleines Filmröllchen <malu.bertsch@gmail.com>
+ * Copyright (c) 2021, kleines Filmröllchen <filmroellchen@serenityos.org>
  * Copyright (c) 2021, David Isaksson <davidisaksson93@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -8,11 +8,11 @@
 
 #include <AK/Variant.h>
 #include <AK/Vector.h>
-#include <LibAudio/Buffer.h>
-#include <LibAudio/ClientConnection.h>
+#include <LibAudio/ConnectionToServer.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/EventLoop.h>
-#include <LibCore/File.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <math.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
@@ -24,31 +24,35 @@ enum AudioVariable : u32 {
 };
 
 // asctl: audio server control utility
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
     Core::EventLoop loop;
-    auto audio_client = Audio::ClientConnection::construct();
+    auto audio_client = TRY(Audio::ConnectionToServer::try_create());
+    audio_client->async_pause_playback();
 
-    String command = String::empty();
-    Vector<String> arguments;
+    StringView command;
+    Vector<StringView> command_arguments;
     bool human_mode = false;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("Send control signals to the audio server and hardware.");
     args_parser.add_option(human_mode, "Print human-readable output", "human-readable", 'h');
     args_parser.add_positional_argument(command, "Command, either (g)et or (s)et\n\n\tThe get command accepts a list of variables to print.\n\tThey are printed in the given order.\n\tIf no value is specified, all are printed.\n\n\tThe set command accepts a any number of variables\n\tfollowed by the value they should be set to.\n\n\tPossible variables are (v)olume, (m)ute, sample(r)ate.\n", "command");
-    args_parser.add_positional_argument(arguments, "Arguments for the command", "args", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.add_positional_argument(command_arguments, "Arguments for the command", "args", Core::ArgsParser::Required::No);
+    args_parser.parse(arguments);
 
-    if (command.equals_ignoring_case("get") || command == "g") {
+    TRY(Core::System::unveil(nullptr, nullptr));
+    TRY(Core::System::pledge("stdio rpath wpath recvfd thread"));
+
+    if (command.equals_ignoring_ascii_case("get"sv) || command == "g") {
         // Get variables
         Vector<AudioVariable> values_to_print;
-        if (arguments.is_empty()) {
+        if (command_arguments.is_empty()) {
             values_to_print.append(AudioVariable::Volume);
             values_to_print.append(AudioVariable::Mute);
             values_to_print.append(AudioVariable::SampleRate);
         } else {
-            for (auto& variable : arguments) {
+            for (auto& variable : command_arguments) {
                 if (variable.is_one_of("v"sv, "volume"sv))
                     values_to_print.append(AudioVariable::Volume);
                 else if (variable.is_one_of("m"sv, "mute"sv))
@@ -65,7 +69,7 @@ int main(int argc, char** argv)
         for (auto to_print : values_to_print) {
             switch (to_print) {
             case AudioVariable::Volume: {
-                auto volume = static_cast<int>(round(audio_client->get_main_mix_volume() * 100));
+                auto volume = lround(audio_client->get_main_mix_volume() * 100);
                 if (human_mode)
                     outln("Volume: {}%", volume);
                 else
@@ -73,7 +77,7 @@ int main(int argc, char** argv)
                 break;
             }
             case AudioVariable::Mute: {
-                bool muted = audio_client->get_muted();
+                bool muted = audio_client->is_main_mix_muted();
                 if (human_mode)
                     outln("Muted: {}", muted ? "Yes" : "No");
                 else
@@ -92,32 +96,32 @@ int main(int argc, char** argv)
         }
         if (!human_mode)
             outln();
-    } else if (command.equals_ignoring_case("set") || command == "s") {
+    } else if (command.equals_ignoring_ascii_case("set"sv) || command == "s") {
         // Set variables
         HashMap<AudioVariable, Variant<int, bool>> values_to_set;
-        for (size_t i = 0; i < arguments.size(); ++i) {
-            if (i == arguments.size() - 1) {
+        for (size_t i = 0; i < command_arguments.size(); ++i) {
+            if (i == command_arguments.size() - 1) {
                 warnln("Error: value missing for last variable");
                 return 1;
             }
-            auto& variable = arguments[i];
+            auto& variable = command_arguments[i];
             if (variable.is_one_of("v"sv, "volume"sv)) {
-                auto volume = arguments[++i].to_int();
+                auto volume = command_arguments[++i].to_int();
                 if (!volume.has_value()) {
-                    warnln("Error: {} is not an integer volume", arguments[i - 1]);
+                    warnln("Error: {} is not an integer volume", command_arguments[i - 1]);
                     return 1;
                 }
                 if (volume.value() < 0 || volume.value() > 100) {
-                    warnln("Error: {} is not between 0 and 100", arguments[i - 1]);
+                    warnln("Error: {} is not between 0 and 100", command_arguments[i - 1]);
                     return 1;
                 }
                 values_to_set.set(AudioVariable::Volume, volume.value());
             } else if (variable.is_one_of("m"sv, "mute"sv)) {
-                String& mute_text = arguments[++i];
+                auto& mute_text = command_arguments[++i];
                 bool mute;
-                if (mute_text.equals_ignoring_case("true") || mute_text == "1") {
+                if (mute_text.equals_ignoring_ascii_case("true"sv) || mute_text == "1") {
                     mute = true;
-                } else if (mute_text.equals_ignoring_case("false") || mute_text == "0") {
+                } else if (mute_text.equals_ignoring_ascii_case("false"sv) || mute_text == "0") {
                     mute = false;
                 } else {
                     warnln("Error: {} is not one of {{0, 1, true, false}}", mute_text);
@@ -125,14 +129,14 @@ int main(int argc, char** argv)
                 }
                 values_to_set.set(AudioVariable::Mute, mute);
             } else if (variable.is_one_of("r"sv, "samplerate"sv)) {
-                auto sample_rate = arguments[++i].to_int();
+                auto sample_rate = command_arguments[++i].to_int();
                 if (!sample_rate.has_value()) {
-                    warnln("Error: {} is not an integer sample rate", arguments[i - 1]);
+                    warnln("Error: {} is not an integer sample rate", command_arguments[i - 1]);
                     return 1;
                 }
                 values_to_set.set(AudioVariable::SampleRate, sample_rate.value());
             } else {
-                warnln("Error: Unrecognized variable {}", arguments[i]);
+                warnln("Error: Unrecognized variable {}", command_arguments[i]);
                 return 1;
             }
         }
@@ -146,7 +150,7 @@ int main(int argc, char** argv)
             }
             case AudioVariable::Mute: {
                 bool& mute = to_set.value.get<bool>();
-                audio_client->set_muted(mute);
+                audio_client->set_main_mix_muted(mute);
                 break;
             }
             case AudioVariable::SampleRate: {

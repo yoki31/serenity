@@ -56,10 +56,16 @@ public:
         return value;
     }
 
-    const T& head() const
+    T const& head() const
     {
         VERIFY(!is_empty());
         return m_segments.first()->data[m_index_into_first];
+    }
+
+    T& tail()
+    {
+        VERIFY(!is_empty());
+        return m_segments.last()->data.last();
     }
 
     void clear()
@@ -83,4 +89,6 @@ private:
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::Queue;
+#endif

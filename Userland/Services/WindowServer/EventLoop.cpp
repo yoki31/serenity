@@ -6,11 +6,11 @@
 
 #include <AK/Debug.h>
 #include <Kernel/API/MousePacket.h>
-#include <WindowServer/ClientConnection.h>
+#include <WindowServer/ConnectionFromClient.h>
 #include <WindowServer/Cursor.h>
 #include <WindowServer/EventLoop.h>
 #include <WindowServer/Screen.h>
-#include <WindowServer/WMClientConnection.h>
+#include <WindowServer/WMConnectionFromClient.h>
 #include <WindowServer/WindowManager.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -19,56 +19,26 @@
 namespace WindowServer {
 
 EventLoop::EventLoop()
-    : m_window_server(Core::LocalServer::construct())
-    , m_wm_server(Core::LocalServer::construct())
 {
-    m_keyboard_fd = open("/dev/keyboard0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    m_mouse_fd = open("/dev/mouse0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    m_keyboard_fd = open("/dev/input/keyboard/0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    m_mouse_fd = open("/dev/input/mouse/0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 
-    bool ok = m_window_server->take_over_from_system_server("/tmp/portal/window");
-    VERIFY(ok);
-    ok = m_wm_server->take_over_from_system_server("/tmp/portal/wm");
-    VERIFY(ok);
-
-    m_window_server->on_ready_to_accept = [this] {
-        auto client_socket = m_window_server->accept();
-        if (!client_socket) {
-            dbgln("WindowServer: accept failed.");
-            return;
-        }
-        static int s_next_client_id = 0;
-        int client_id = ++s_next_client_id;
-        IPC::new_client_connection<ClientConnection>(client_socket.release_nonnull(), client_id);
-    };
-
-    m_wm_server->on_ready_to_accept = [this] {
-        auto client_socket = m_wm_server->accept();
-        if (!client_socket) {
-            dbgln("WindowServer: WM accept failed.");
-            return;
-        }
-        static int s_next_wm_id = 0;
-        int wm_id = ++s_next_wm_id;
-        IPC::new_client_connection<WMClientConnection>(client_socket.release_nonnull(), wm_id);
-    };
+    m_window_server = MUST(IPC::MultiServer<ConnectionFromClient>::try_create("/tmp/portal/window"));
+    m_wm_server = MUST(IPC::MultiServer<WMConnectionFromClient>::try_create("/tmp/portal/wm"));
 
     if (m_keyboard_fd >= 0) {
-        m_keyboard_notifier = Core::Notifier::construct(m_keyboard_fd, Core::Notifier::Read);
-        m_keyboard_notifier->on_ready_to_read = [this] { drain_keyboard(); };
+        m_keyboard_notifier = Core::Notifier::construct(m_keyboard_fd, Core::Notifier::Type::Read);
+        m_keyboard_notifier->on_activation = [this] { drain_keyboard(); };
     } else {
-        dbgln("Couldn't open /dev/keyboard0");
+        dbgln("Couldn't open /dev/input/keyboard/0");
     }
 
     if (m_mouse_fd >= 0) {
-        m_mouse_notifier = Core::Notifier::construct(m_mouse_fd, Core::Notifier::Read);
-        m_mouse_notifier->on_ready_to_read = [this] { drain_mouse(); };
+        m_mouse_notifier = Core::Notifier::construct(m_mouse_fd, Core::Notifier::Type::Read);
+        m_mouse_notifier->on_activation = [this] { drain_mouse(); };
     } else {
-        dbgln("Couldn't open /dev/mouse0");
+        dbgln("Couldn't open /dev/input/mouse/0");
     }
-}
-
-EventLoop::~EventLoop()
-{
 }
 
 void EventLoop::drain_mouse()
@@ -90,7 +60,7 @@ void EventLoop::drain_mouse()
     bool state_is_sent = false;
     for (size_t i = 0; i < npackets; ++i) {
         auto& packet = packets[i];
-        dbgln_if(WSMESSAGELOOP_DEBUG, "EventLoop: Mouse X {}, Y {}, Z {}, relative={}", packet.x, packet.y, packet.z, packet.is_relative);
+        dbgln_if(WSMESSAGELOOP_DEBUG, "EventLoop: Mouse X {}, Y {}, Z {}, W {}, relative={}", packet.x, packet.y, packet.z, packet.w, packet.is_relative);
 
         state.is_relative = packet.is_relative;
         if (packet.is_relative) {
@@ -100,8 +70,14 @@ void EventLoop::drain_mouse()
             state.x = packet.x;
             state.y = packet.y;
         }
-        state.z += packet.z;
+        state.w += packet.w;
         state_is_sent = false;
+
+        // Invert scroll direction if checked in the settings.
+        if (WindowManager::the().is_natural_scroll())
+            state.z -= packet.z;
+        else
+            state.z += packet.z;
 
         if (packet.buttons != state.buttons) {
             state.buttons = packet.buttons;
@@ -109,7 +85,7 @@ void EventLoop::drain_mouse()
 
             // Swap primary (1) and secondary (2) buttons if checked in Settings.
             // Doing the swap here avoids all emulator and hardware issues.
-            if (WindowManager::the().get_buttons_switched()) {
+            if (WindowManager::the().are_mouse_buttons_switched()) {
                 bool has_primary = state.buttons & MousePacket::Button::LeftButton;
                 bool has_secondary = state.buttons & MousePacket::Button::RightButton;
                 state.buttons = state.buttons & ~(MousePacket::Button::LeftButton | MousePacket::Button::RightButton);
@@ -126,12 +102,13 @@ void EventLoop::drain_mouse()
                 state.x = 0;
                 state.y = 0;
                 state.z = 0;
+                state.w = 0;
             }
         }
     }
     if (state_is_sent)
         return;
-    if (state.is_relative && (state.x || state.y || state.z))
+    if (state.is_relative && (state.x || state.y || state.z || state.w))
         screen_input.on_receive_mouse_data(state);
     if (!state.is_relative)
         screen_input.on_receive_mouse_data(state);

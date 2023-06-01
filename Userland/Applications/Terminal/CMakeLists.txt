@@ -4,12 +4,9 @@ serenity_component(
     TARGETS Terminal utmpupdate
 )
 
-compile_gml(TerminalSettingsWindow.gml TerminalSettingsWindowGML.h terminal_settings_window_gml)
-
 set(SOURCES
-    TerminalSettingsWindowGML.h
     main.cpp
 )
 
 serenity_app(Terminal ICON app-terminal)
-target_link_libraries(Terminal LibGUI LibVT LibMain)
+target_link_libraries(Terminal PRIVATE LibConfig LibCore LibFileSystem LibDesktop LibGfx LibGUI LibVT LibMain)

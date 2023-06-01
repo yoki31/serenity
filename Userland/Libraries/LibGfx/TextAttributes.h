@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, Tobias Christiansen <tobyase@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -12,10 +13,17 @@
 namespace Gfx {
 
 struct TextAttributes {
+    enum class UnderlineStyle {
+        Solid,
+        Wavy
+    };
+
     Color color;
-    Optional<Color> background_color;
-    bool underline { false };
+    Optional<Color> background_color {};
     bool bold { false };
+
+    Optional<UnderlineStyle> underline_style {};
+    Optional<Color> underline_color {};
 };
 
 }

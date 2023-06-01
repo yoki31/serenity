@@ -1,6 +1,5 @@
 @GUI::Widget {
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
         margins: [4]
     }
@@ -12,25 +11,19 @@
     }
 
     @GUI::Widget {
-        layout: @GUI::VerticalBoxLayout {
-        }
-
+        layout: @GUI::VerticalBoxLayout {}
         name: "icon_view_container"
     }
 
     @GUI::Label {
         name: "description_label"
         text_alignment: "CenterLeft"
-        thickness: 2
-        shadow: "Sunken"
-        shape: "Container"
+        style: "SunkenContainer"
         max_height: 24
     }
 
     @GUI::Widget {
-        layout: @GUI::HorizontalBoxLayout {
-        }
-
+        layout: @GUI::HorizontalBoxLayout {}
         max_height: 24
 
         @GUI::Label {
@@ -45,9 +38,7 @@
     }
 
     @GUI::Widget {
-        layout: @GUI::HorizontalBoxLayout {
-        }
-
+        layout: @GUI::HorizontalBoxLayout {}
         max_height: 24
 
         @GUI::Label {
@@ -69,9 +60,7 @@
     }
 
     @GUI::Widget {
-        layout: @GUI::HorizontalBoxLayout {
-        }
-
+        layout: @GUI::HorizontalBoxLayout {}
         max_height: 24
 
         @GUI::Label {
@@ -84,21 +73,16 @@
             name: "full_path_label"
             text_alignment: "CenterLeft"
             text: ""
-            thickness: 2
-            shadow: "Sunken"
-            shape: "Container"
+            style: "SunkenContainer"
             max_height: 22
         }
     }
 
     @GUI::Widget {
-        layout: @GUI::HorizontalBoxLayout {
-        }
-
+        layout: @GUI::HorizontalBoxLayout {}
         max_height: 24
 
-        @GUI::Widget {
-        }
+        @GUI::Layout::Spacer {}
 
         @GUI::Button {
             name: "ok_button"

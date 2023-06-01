@@ -7,24 +7,23 @@
 #include "ChessEngine.h"
 #include <LibCore/EventLoop.h>
 #include <LibCore/File.h>
-#include <unistd.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 
-int main()
+ErrorOr<int> serenity_main(Main::Arguments)
 {
-    if (pledge("stdio recvfd sendfd unix rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio recvfd sendfd unix"));
     Core::EventLoop loop;
-    if (pledge("stdio recvfd sendfd unix", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
-    if (unveil(nullptr, nullptr) < 0) {
-        perror("unveil");
-        return 1;
-    }
+    TRY(Core::System::unveil(nullptr, nullptr));
 
-    auto engine = ChessEngine::construct(Core::File::standard_input(), Core::File::standard_output());
+    auto infile = TRY(Core::File::standard_input());
+    TRY(infile->set_blocking(false));
+    auto outfile = TRY(Core::File::standard_output());
+    TRY(outfile->set_blocking(false));
+    auto engine = TRY(ChessEngine::try_create(move(infile), move(outfile)));
+    engine->on_quit = [&](auto status_code) {
+        loop.quit(status_code);
+    };
+
     return loop.exec();
 }

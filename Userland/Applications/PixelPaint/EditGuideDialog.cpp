@@ -13,28 +13,28 @@
 
 namespace PixelPaint {
 
-EditGuideDialog::EditGuideDialog(GUI::Window* parent_window, String const& offset, Guide::Orientation orientation)
+EditGuideDialog::EditGuideDialog(GUI::Window* parent_window, DeprecatedString const& offset, Guide::Orientation orientation)
     : Dialog(parent_window)
     , m_offset(offset)
     , m_orientation(orientation)
 {
-    set_title("Create new Guide");
+    set_title("Create New Guide");
     set_icon(parent_window->icon());
-    resize(200, 120);
+    resize(200, 130);
     set_resizable(false);
 
-    auto& main_widget = set_main_widget<GUI::Widget>();
-    if (!main_widget.load_from_gml(edit_guide_dialog_gml))
-        VERIFY_NOT_REACHED();
+    auto main_widget = set_main_widget<GUI::Widget>().release_value_but_fixme_should_propagate_errors();
+    main_widget->load_from_gml(edit_guide_dialog_gml).release_value_but_fixme_should_propagate_errors();
 
-    auto horizontal_radio = main_widget.find_descendant_of_type_named<GUI::RadioButton>("orientation_horizontal_radio");
-    auto vertical_radio = main_widget.find_descendant_of_type_named<GUI::RadioButton>("orientation_vertical_radio");
-    auto offset_text_box = main_widget.find_descendant_of_type_named<GUI::TextBox>("offset_text_box");
-    auto ok_button = main_widget.find_descendant_of_type_named<GUI::Button>("ok_button");
-    auto cancel_button = main_widget.find_descendant_of_type_named<GUI::Button>("cancel_button");
+    auto horizontal_radio = main_widget->find_descendant_of_type_named<GUI::RadioButton>("orientation_horizontal_radio");
+    auto vertical_radio = main_widget->find_descendant_of_type_named<GUI::RadioButton>("orientation_vertical_radio");
+    auto ok_button = main_widget->find_descendant_of_type_named<GUI::Button>("ok_button");
+    auto cancel_button = main_widget->find_descendant_of_type_named<GUI::Button>("cancel_button");
+    m_offset_text_box = main_widget->find_descendant_of_type_named<GUI::TextBox>("offset_text_box");
+
     VERIFY(horizontal_radio);
     VERIFY(ok_button);
-    VERIFY(offset_text_box);
+    VERIFY(!m_offset_text_box.is_null());
     VERIFY(vertical_radio);
     VERIFY(cancel_button);
 
@@ -47,35 +47,36 @@ EditGuideDialog::EditGuideDialog(GUI::Window* parent_window, String const& offse
     }
 
     if (!offset.is_empty())
-        offset_text_box->set_text(offset);
+        m_offset_text_box->set_text(offset);
 
     horizontal_radio->on_checked = [this](bool checked) { m_is_horizontal_checked = checked; };
     vertical_radio->on_checked = [this](bool checked) { m_is_vertical_checked = checked; };
 
-    ok_button->on_click = [this, &offset_text_box](auto) {
+    ok_button->on_click = [this](auto) {
         if (m_is_vertical_checked) {
             m_orientation = Guide::Orientation::Vertical;
         } else if (m_is_horizontal_checked) {
             m_orientation = Guide::Orientation::Horizontal;
         } else {
-            done(ExecResult::ExecAborted);
+            done(ExecResult::Aborted);
             return;
         }
 
-        if (offset_text_box->text().is_empty())
-            done(ExecResult::ExecAborted);
+        if (m_offset_text_box->text().is_empty())
+            done(ExecResult::Aborted);
 
-        m_offset = offset_text_box->text();
+        m_offset = m_offset_text_box->text();
 
-        done(ExecResult::ExecOK);
+        done(ExecResult::OK);
     };
+    ok_button->set_default(true);
 
     cancel_button->on_click = [this](auto) {
-        done(ExecResult::ExecCancel);
+        done(ExecResult::Cancel);
     };
 }
 
-Optional<float> EditGuideDialog::offset_as_pixel(const ImageEditor& editor)
+Optional<float> EditGuideDialog::offset_as_pixel(ImageEditor const& editor)
 {
     float offset = 0;
     if (m_offset.ends_with('%')) {

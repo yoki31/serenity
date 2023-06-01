@@ -33,6 +33,20 @@ describe("basic behavior", () => {
             )
         ).toBe(12);
     });
+
+    test("name has 'bound' prefix", () => {
+        function foo() {}
+        const boundFoo = foo.bind(123);
+        expect(foo.name).toBe("foo");
+        expect(boundFoo.name).toBe("bound foo");
+    });
+
+    test("prototype is inherited from target function", () => {
+        function foo() {}
+        Object.setPrototypeOf(foo, Array.prototype);
+        const boundFoo = Function.prototype.bind.call(foo, 123);
+        expect(Object.getPrototypeOf(boundFoo)).toBe(Array.prototype);
+    });
 });
 
 describe("bound function arguments", () => {
@@ -112,6 +126,19 @@ describe("bound function |this|", () => {
     test("arrow functions cannot be bound", () => {
         expect((() => this).bind("foo")()).toBe(globalThis);
     });
+
+    test("length of original function is used for bound function", () => {
+        [0, 1, 2147483647, 2147483648, 2147483649].forEach(value => {
+            function emptyFunction() {}
+
+            Object.defineProperty(emptyFunction, "length", { value });
+
+            expect(emptyFunction.bind().length).toBe(value);
+            expect(emptyFunction.bind(null).length).toBe(value);
+            expect(emptyFunction.bind(null, 0).length).toBe(Math.max(0, value - 1));
+            expect(emptyFunction.bind(null, 0, 1, 2).length).toBe(Math.max(0, value - 3));
+        });
+    });
 });
 
 describe("bound function constructors", () => {
@@ -144,6 +171,6 @@ describe("errors", () => {
     test("does not accept non-function values", () => {
         expect(() => {
             Function.prototype.bind.call("foo");
-        }).toThrowWithMessage(TypeError, "Not an object of type Function");
+        }).toThrowWithMessage(TypeError, "foo is not a function");
     });
 });

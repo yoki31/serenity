@@ -16,10 +16,9 @@ class MapIterator final : public Object {
     JS_OBJECT(MapIterator, Object);
 
 public:
-    static MapIterator* create(GlobalObject&, Map& map, Object::PropertyKind iteration_kind);
+    static NonnullGCPtr<MapIterator> create(Realm&, Map& map, Object::PropertyKind iteration_kind);
 
-    explicit MapIterator(Map& map, Object::PropertyKind iteration_kind, Object& prototype);
-    virtual ~MapIterator() override;
+    virtual ~MapIterator() override = default;
 
     Map& map() const { return m_map; }
     bool done() const { return m_done; }
@@ -28,12 +27,14 @@ public:
 private:
     friend class MapIteratorPrototype;
 
+    explicit MapIterator(Map& map, Object::PropertyKind iteration_kind, Object& prototype);
+
     virtual void visit_edges(Cell::Visitor&) override;
 
-    Map& m_map;
+    NonnullGCPtr<Map> m_map;
     bool m_done { false };
     Object::PropertyKind m_iteration_kind;
-    OrderedHashMap<Value, Value, ValueTraits>::IteratorType m_iterator;
+    Map::ConstIterator m_iterator;
 };
 
 }

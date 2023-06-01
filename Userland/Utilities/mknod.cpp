@@ -5,15 +5,11 @@
  */
 
 #include <AK/Format.h>
-#include <stdio.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <unistd.h>
-
-constexpr unsigned encoded_device(unsigned major, unsigned minor)
-{
-    return (minor & 0xff) | (major << 8) | ((minor & ~0xff) << 12);
-}
+#include <sys/sysmacros.h>
 
 static int usage()
 {
@@ -21,27 +17,24 @@ static int usage()
     return 1;
 }
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio dpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio dpath"));
 
     // FIXME: Add some kind of option for specifying the file permissions.
-    if (argc < 3)
+    if (arguments.strings.size() < 3)
         return usage();
 
-    if (argv[2][0] == 'p') {
-        if (argc != 3)
+    if (arguments.strings[2].starts_with('p')) {
+        if (arguments.strings.size() != 3)
             return usage();
-    } else if (argc != 5) {
+    } else if (arguments.strings.size() != 5) {
         return usage();
     }
 
-    const char* name = argv[1];
+    auto name = arguments.strings[1];
     mode_t mode = 0666;
-    switch (argv[2][0]) {
+    switch (arguments.strings[2][0]) {
     case 'c':
     case 'u':
         mode |= S_IFCHR;
@@ -58,15 +51,12 @@ int main(int argc, char** argv)
 
     int major = 0;
     int minor = 0;
-    if (argc == 5) {
-        major = atoi(argv[3]);
-        minor = atoi(argv[4]);
+    if (arguments.strings.size() == 5) {
+        major = atoi(arguments.argv[3]);
+        minor = atoi(arguments.argv[4]);
     }
 
-    int rc = mknod(name, mode, encoded_device(major, minor));
-    if (rc < 0) {
-        perror("mknod");
-        return 1;
-    }
+    TRY(Core::System::mknod(name, mode, makedev(major, minor)));
+
     return 0;
 }

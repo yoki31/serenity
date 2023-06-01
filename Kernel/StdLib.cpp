@@ -6,14 +6,13 @@
 
 #include <AK/Assertions.h>
 #include <AK/MemMem.h>
-#include <AK/String.h>
 #include <AK/Types.h>
+#include <Kernel/Arch/SafeMem.h>
 #include <Kernel/Arch/SmapDisabler.h>
-#include <Kernel/Heap/kmalloc.h>
 #include <Kernel/Memory/MemoryManager.h>
 #include <Kernel/StdLib.h>
 
-ErrorOr<NonnullOwnPtr<Kernel::KString>> try_copy_kstring_from_user(Userspace<const char*> user_str, size_t user_str_size)
+ErrorOr<NonnullOwnPtr<Kernel::KString>> try_copy_kstring_from_user(Userspace<char const*> user_str, size_t user_str_size)
 {
     bool is_user = Kernel::Memory::is_user_range(user_str.vaddr(), user_str_size);
     if (!is_user)
@@ -22,7 +21,7 @@ ErrorOr<NonnullOwnPtr<Kernel::KString>> try_copy_kstring_from_user(Userspace<con
     void* fault_at;
     ssize_t length = Kernel::safe_strnlen(user_str.unsafe_userspace_ptr(), user_str_size, fault_at);
     if (length < 0) {
-        dbgln("copy_kstring_from_user({:p}, {}) failed at {} (strnlen)", static_cast<const void*>(user_str.unsafe_userspace_ptr()), user_str_size, VirtualAddress { fault_at });
+        dbgln("copy_kstring_from_user({:p}, {}) failed at {} (strnlen)", static_cast<void const*>(user_str.unsafe_userspace_ptr()), user_str_size, VirtualAddress { fault_at });
         return EFAULT;
     }
     char* buffer;
@@ -34,36 +33,36 @@ ErrorOr<NonnullOwnPtr<Kernel::KString>> try_copy_kstring_from_user(Userspace<con
         return new_string;
 
     if (!Kernel::safe_memcpy(buffer, user_str.unsafe_userspace_ptr(), (size_t)length, fault_at)) {
-        dbgln("copy_kstring_from_user({:p}, {}) failed at {} (memcpy)", static_cast<const void*>(user_str.unsafe_userspace_ptr()), user_str_size, VirtualAddress { fault_at });
+        dbgln("copy_kstring_from_user({:p}, {}) failed at {} (memcpy)", static_cast<void const*>(user_str.unsafe_userspace_ptr()), user_str_size, VirtualAddress { fault_at });
         return EFAULT;
     }
     return new_string;
 }
 
-ErrorOr<Time> copy_time_from_user(timespec const* ts_user)
+ErrorOr<Duration> copy_time_from_user(timespec const* ts_user)
 {
     timespec ts {};
     TRY(copy_from_user(&ts, ts_user, sizeof(timespec)));
-    return Time::from_timespec(ts);
+    return Duration::from_timespec(ts);
 }
 
-ErrorOr<Time> copy_time_from_user(timeval const* tv_user)
+ErrorOr<Duration> copy_time_from_user(timeval const* tv_user)
 {
     timeval tv {};
     TRY(copy_from_user(&tv, tv_user, sizeof(timeval)));
-    return Time::from_timeval(tv);
+    return Duration::from_timeval(tv);
 }
 
 template<>
-ErrorOr<Time> copy_time_from_user<const timeval>(Userspace<timeval const*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
+ErrorOr<Duration> copy_time_from_user<timeval const>(Userspace<timeval const*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
 template<>
-ErrorOr<Time> copy_time_from_user<timeval>(Userspace<timeval*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
+ErrorOr<Duration> copy_time_from_user<timeval>(Userspace<timeval*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
 template<>
-ErrorOr<Time> copy_time_from_user<const timespec>(Userspace<timespec const*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
+ErrorOr<Duration> copy_time_from_user<timespec const>(Userspace<timespec const*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
 template<>
-ErrorOr<Time> copy_time_from_user<timespec>(Userspace<timespec*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
+ErrorOr<Duration> copy_time_from_user<timespec>(Userspace<timespec*> src) { return copy_time_from_user(src.unsafe_userspace_ptr()); }
 
-Optional<u32> user_atomic_fetch_add_relaxed(volatile u32* var, u32 val)
+Optional<u32> user_atomic_fetch_add_relaxed(u32 volatile* var, u32 val)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -74,7 +73,7 @@ Optional<u32> user_atomic_fetch_add_relaxed(volatile u32* var, u32 val)
     return Kernel::safe_atomic_fetch_add_relaxed(var, val);
 }
 
-Optional<u32> user_atomic_exchange_relaxed(volatile u32* var, u32 val)
+Optional<u32> user_atomic_exchange_relaxed(u32 volatile* var, u32 val)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -85,7 +84,7 @@ Optional<u32> user_atomic_exchange_relaxed(volatile u32* var, u32 val)
     return Kernel::safe_atomic_exchange_relaxed(var, val);
 }
 
-Optional<u32> user_atomic_load_relaxed(volatile u32* var)
+Optional<u32> user_atomic_load_relaxed(u32 volatile* var)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -96,7 +95,7 @@ Optional<u32> user_atomic_load_relaxed(volatile u32* var)
     return Kernel::safe_atomic_load_relaxed(var);
 }
 
-bool user_atomic_store_relaxed(volatile u32* var, u32 val)
+bool user_atomic_store_relaxed(u32 volatile* var, u32 val)
 {
     if (FlatPtr(var) & 3)
         return false; // not aligned!
@@ -107,7 +106,7 @@ bool user_atomic_store_relaxed(volatile u32* var, u32 val)
     return Kernel::safe_atomic_store_relaxed(var, val);
 }
 
-Optional<bool> user_atomic_compare_exchange_relaxed(volatile u32* var, u32& expected, u32 val)
+Optional<bool> user_atomic_compare_exchange_relaxed(u32 volatile* var, u32& expected, u32 val)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -119,7 +118,7 @@ Optional<bool> user_atomic_compare_exchange_relaxed(volatile u32* var, u32& expe
     return Kernel::safe_atomic_compare_exchange_relaxed(var, expected, val);
 }
 
-Optional<u32> user_atomic_fetch_and_relaxed(volatile u32* var, u32 val)
+Optional<u32> user_atomic_fetch_and_relaxed(u32 volatile* var, u32 val)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -130,7 +129,7 @@ Optional<u32> user_atomic_fetch_and_relaxed(volatile u32* var, u32 val)
     return Kernel::safe_atomic_fetch_and_relaxed(var, val);
 }
 
-Optional<u32> user_atomic_fetch_and_not_relaxed(volatile u32* var, u32 val)
+Optional<u32> user_atomic_fetch_and_not_relaxed(u32 volatile* var, u32 val)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -141,7 +140,7 @@ Optional<u32> user_atomic_fetch_and_not_relaxed(volatile u32* var, u32 val)
     return Kernel::safe_atomic_fetch_and_not_relaxed(var, val);
 }
 
-Optional<u32> user_atomic_fetch_or_relaxed(volatile u32* var, u32 val)
+Optional<u32> user_atomic_fetch_or_relaxed(u32 volatile* var, u32 val)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -152,7 +151,7 @@ Optional<u32> user_atomic_fetch_or_relaxed(volatile u32* var, u32 val)
     return Kernel::safe_atomic_fetch_or_relaxed(var, val);
 }
 
-Optional<u32> user_atomic_fetch_xor_relaxed(volatile u32* var, u32 val)
+Optional<u32> user_atomic_fetch_xor_relaxed(u32 volatile* var, u32 val)
 {
     if (FlatPtr(var) & 3)
         return {}; // not aligned!
@@ -207,7 +206,7 @@ ErrorOr<void> memset_user(void* dest_ptr, int c, size_t n)
     return {};
 }
 
-#if defined(__clang__) && defined(ENABLE_KERNEL_LTO)
+#if defined(AK_COMPILER_CLANG) && defined(ENABLE_KERNEL_LTO)
 // Due to a chicken-and-egg situation, certain linker-defined symbols that are added on-demand (like the GOT)
 // need to be present before LTO bitcode files are compiled. And since we don't link to any native object files,
 // the linker does not know that _GLOBAL_OFFSET_TABLE_ is needed, so it doesn't define it, so linking as a PIE fails.
@@ -221,68 +220,9 @@ FlatPtr missing_got_workaround()
 
 extern "C" {
 
-const void* memmem(const void* haystack, size_t haystack_length, const void* needle, size_t needle_length)
+void const* memmem(void const* haystack, size_t haystack_length, void const* needle, size_t needle_length)
 {
     return AK::memmem(haystack, haystack_length, needle, needle_length);
-}
-
-size_t strnlen(const char* str, size_t maxlen)
-{
-    size_t len = 0;
-    for (; len < maxlen && *str; str++)
-        len++;
-    return len;
-}
-
-int strcmp(const char* s1, const char* s2)
-{
-    for (; *s1 == *s2; ++s1, ++s2) {
-        if (*s1 == 0)
-            return 0;
-    }
-    return *(const u8*)s1 < *(const u8*)s2 ? -1 : 1;
-}
-
-int memcmp(const void* v1, const void* v2, size_t n)
-{
-    auto* s1 = (const u8*)v1;
-    auto* s2 = (const u8*)v2;
-    while (n-- > 0) {
-        if (*s1++ != *s2++)
-            return s1[-1] < s2[-1] ? -1 : 1;
-    }
-    return 0;
-}
-
-int strncmp(const char* s1, const char* s2, size_t n)
-{
-    if (!n)
-        return 0;
-    do {
-        if (*s1 != *s2++)
-            return *(const unsigned char*)s1 - *(const unsigned char*)--s2;
-        if (*s1++ == 0)
-            break;
-    } while (--n);
-    return 0;
-}
-
-char* strstr(const char* haystack, const char* needle)
-{
-    char nch;
-    char hch;
-
-    if ((nch = *needle++) != 0) {
-        size_t len = strlen(needle);
-        do {
-            do {
-                if ((hch = *haystack++) == 0)
-                    return nullptr;
-            } while (hch != nch);
-        } while (strncmp(haystack, needle, len) != 0);
-        --haystack;
-    }
-    return const_cast<char*>(haystack);
 }
 
 // Functions that are automatically called by the C++ compiler.

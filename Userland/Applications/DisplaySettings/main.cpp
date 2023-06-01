@@ -1,39 +1,49 @@
 /*
  * Copyright (c) 2019-2020, Jesse Buhagiar <jooster669@gmail.com>
  * Copyright (c) 2021, Andreas Kling <kling@serenityos.org>
- * Copyright (c) 2021, Sam Atkins <atkinssj@serenityos.org>
+ * Copyright (c) 2021-2022, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "BackgroundSettingsWidget.h"
 #include "DesktopSettingsWidget.h"
+#include "EffectsSettingsWidget.h"
 #include "FontSettingsWidget.h"
 #include "MonitorSettingsWidget.h"
+#include "ThemesSettingsWidget.h"
 #include <LibConfig/Client.h>
+#include <LibCore/ArgsParser.h>
+#include <LibCore/System.h>
 #include <LibGUI/Application.h>
 #include <LibGUI/Icon.h>
 #include <LibGUI/SettingsWindow.h>
-#include <stdio.h>
-#include <unistd.h>
+#include <LibMain/Main.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio thread recvfd sendfd rpath cpath wpath unix", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio thread recvfd sendfd rpath cpath wpath unix proc exec"));
 
-    auto app = GUI::Application::construct(argc, argv);
-    Config::pledge_domains("WindowManager");
+    auto app = TRY(GUI::Application::create(arguments));
+    Config::pledge_domain("WindowManager");
 
-    auto app_icon = GUI::Icon::default_icon("app-display-settings");
+    StringView selected_tab;
+    Core::ArgsParser args_parser;
+    args_parser.add_option(selected_tab, "Tab, one of 'background', 'fonts', 'monitor', 'themes', or 'workspaces'", "open-tab", 't', "tab");
+    args_parser.parse(arguments);
 
-    auto window = GUI::SettingsWindow::construct("Display Settings");
-    window->add_tab<DisplaySettings::BackgroundSettingsWidget>("Background");
-    window->add_tab<DisplaySettings::FontSettingsWidget>("Fonts");
-    window->add_tab<DisplaySettings::MonitorSettingsWidget>("Monitor");
-    window->add_tab<DisplaySettings::DesktopSettingsWidget>("Workspaces");
+    auto app_icon = GUI::Icon::default_icon("app-display-settings"sv);
+
+    bool background_settings_changed = false;
+
+    auto window = TRY(GUI::SettingsWindow::create("Display Settings"));
+    (void)TRY(window->add_tab<DisplaySettings::BackgroundSettingsWidget>(TRY("Background"_string), "background"sv, background_settings_changed));
+    (void)TRY(window->add_tab<DisplaySettings::ThemesSettingsWidget>("Themes"_short_string, "themes"sv, background_settings_changed));
+    (void)TRY(window->add_tab<DisplaySettings::FontSettingsWidget>("Fonts"_short_string, "fonts"sv));
+    (void)TRY(window->add_tab<DisplaySettings::MonitorSettingsWidget>("Monitor"_short_string, "monitor"sv));
+    (void)TRY(window->add_tab<DisplaySettings::DesktopSettingsWidget>(TRY("Workspaces"_string), "workspaces"sv));
+    (void)TRY(window->add_tab<GUI::DisplaySettings::EffectsSettingsWidget>("Effects"_short_string, "effects"sv));
+    window->set_active_tab(selected_tab);
 
     window->set_icon(app_icon.bitmap_for_size(16));
 

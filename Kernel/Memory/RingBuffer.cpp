@@ -10,13 +10,20 @@
 
 namespace Kernel::Memory {
 
-RingBuffer::RingBuffer(String region_name, size_t capacity)
-    : m_region(MM.allocate_contiguous_kernel_region(page_round_up(capacity), move(region_name), Region::Access::Read | Region::Access::Write).release_value())
+ErrorOr<NonnullOwnPtr<RingBuffer>> RingBuffer::try_create(StringView region_name, size_t capacity)
+{
+    auto region_size = TRY(page_round_up(capacity));
+    auto region = TRY(MM.allocate_contiguous_kernel_region(region_size, region_name, Region::Access::Read | Region::Access::Write));
+    return adopt_nonnull_own_or_enomem(new (nothrow) RingBuffer(move(region), capacity));
+}
+
+RingBuffer::RingBuffer(NonnullOwnPtr<Memory::Region> region, size_t capacity)
+    : m_region(move(region))
     , m_capacity_in_bytes(capacity)
 {
 }
 
-bool RingBuffer::copy_data_in(const UserOrKernelBuffer& buffer, size_t offset, size_t length, PhysicalAddress& start_of_copied_data, size_t& bytes_copied)
+bool RingBuffer::copy_data_in(UserOrKernelBuffer const& buffer, size_t offset, size_t length, PhysicalAddress& start_of_copied_data, size_t& bytes_copied)
 {
     size_t start_of_free_area = (m_start_of_used + m_num_used_bytes) % m_capacity_in_bytes;
     bytes_copied = min(m_capacity_in_bytes - m_num_used_bytes, min(m_capacity_in_bytes - start_of_free_area, length));

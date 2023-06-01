@@ -11,10 +11,19 @@
 #include <AK/Noncopyable.h>
 #ifdef KERNEL
 #    include <Kernel/Arch/Processor.h>
-#    include <Kernel/Arch/ScopedCritical.h>
+#    include <Kernel/Locking/SpinlockProtected.h>
+#    include <Kernel/ScopedCritical.h>
+#elif defined(AK_OS_WINDOWS)
+// Forward declare to avoid pulling Windows.h into every file in existence.
+extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long);
+#    ifndef sched_yield
+#        define sched_yield() Sleep(0)
+#    endif
+#else
+#    include <sched.h>
 #endif
 
-#ifndef __serenity__
+#ifndef AK_OS_SERENITY
 #    include <new>
 #endif
 
@@ -27,6 +36,17 @@ struct SingletonInstanceCreator {
         return new T();
     }
 };
+
+#ifdef KERNEL
+
+template<typename T, Kernel::LockRank Rank>
+struct SingletonInstanceCreator<Kernel::SpinlockProtected<T, Rank>> {
+    static Kernel::SpinlockProtected<T, Rank>* create()
+    {
+        return new Kernel::SpinlockProtected<T, Rank> {};
+    }
+};
+#endif
 
 template<typename T, T* (*InitFunction)() = SingletonInstanceCreator<T>::create>
 class Singleton {
@@ -58,7 +78,7 @@ public:
 #ifdef KERNEL
                 Kernel::Processor::wait_check();
 #else
-                // TODO: yield
+                sched_yield();
 #endif
                 obj = obj_var.load(AK::memory_order_acquire);
             }
@@ -113,4 +133,6 @@ private:
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::Singleton;
+#endif

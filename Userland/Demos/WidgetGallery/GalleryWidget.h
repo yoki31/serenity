@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the SerenityOS developers.
+ * Copyright (c) 2021-2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -19,7 +19,7 @@
 class GalleryWidget final : public GUI::Widget {
     C_OBJECT(GalleryWidget)
 public:
-    virtual ~GalleryWidget() override;
+    virtual ~GalleryWidget() override = default;
 
 private:
     GalleryWidget();
@@ -53,7 +53,6 @@ private:
 
     RefPtr<GUI::Frame> m_label_frame;
     RefPtr<GUI::Label> m_enabled_label;
-    RefPtr<GUI::SpinBox> m_thickness_spinbox;
     RefPtr<GUI::ColorInput> m_font_colorinput;
     RefPtr<GUI::TableView> m_icons_tableview;
     RefPtr<GUI::TableView> m_cursors_tableview;
@@ -61,9 +60,9 @@ private:
     RefPtr<GUI::ValueSlider> m_opacity_value_slider;
     RefPtr<GUI::ImageWidget> m_opacity_imagewidget;
 
-    Vector<String> m_frame_shapes;
-    Vector<String> m_msgbox_icons;
-    Vector<String> m_msgbox_buttons;
+    Vector<DeprecatedString> m_frame_shapes;
+    Vector<DeprecatedString> m_msgbox_icons;
+    Vector<DeprecatedString> m_msgbox_buttons;
     Vector<RefPtr<Gfx::Bitmap>> m_button_icons;
 
     GUI::MessageBox::Type m_msgbox_type;

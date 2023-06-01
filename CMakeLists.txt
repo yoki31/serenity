@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.25)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/Meta/CMake")
 
@@ -16,6 +16,20 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "SerenityOS")
             "Please re-read the BuildInstructions documentation, and use the superbuild configuration\n")
 endif()
 
+# Check for toolchain mismatch, user might need to rebuild toolchain
+set(GCC_VERSION "13.1.0")
+set(LLVM_VERSION "15.0.3")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(EXPECTED_COMPILER_VERSION "${GCC_VERSION}")
+else()
+    set(EXPECTED_COMPILER_VERSION "${LLVM_VERSION}")
+endif()
+if (NOT CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL "${EXPECTED_COMPILER_VERSION}")
+    message(FATAL_ERROR "${CMAKE_CXX_COMPILER_ID} version (${CMAKE_CXX_COMPILER_VERSION}) does not match "
+            "expected compiler version (${EXPECTED_COMPILER_VERSION}).\n"
+            "Please rebuild the ${CMAKE_CXX_COMPILER_ID} Toolchain\n")
+endif()
+
 set(CMAKE_INSTALL_MESSAGE NEVER)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -25,21 +39,24 @@ if(NOT COMMAND serenity_option)
         set(${ARGV})
     endmacro()
 endif()
-include(serenity_options)
+include(serenity_options NO_POLICY_SCOPE)
 
-find_program(CCACHE_PROGRAM ccache)
-if(CCACHE_PROGRAM)
-    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE FILEPATH "Path to a compiler launcher program, e.g. ccache")
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE FILEPATH "Path to a compiler launcher program, e.g. ccache")
+include(setup_ccache)
+
+if (NOT HACKSTUDIO_BUILD)
+
+    include(check_for_dependencies)
+
+    # Host tools, required to generate files for the build
+    find_package(Lagom CONFIG REQUIRED)
+
+    if (ENABLE_JAKT)
+        find_package(Jakt CONFIG REQUIRED
+            HINTS "${Lagom_DIR}/.."
+        )
+    endif()
+
 endif()
-
-# FIXME: With cmake 3.18, we can change unzip/untar steps to use
-#        file(ARCHIVE_EXTRACT) instead
-find_program(UNZIP unzip REQUIRED)
-find_program(TAR tar REQUIRED)
-
-# Host tools, required to generate files for the build
-find_package(Lagom CONFIG REQUIRED)
 
 # Meta target to run all code-gen steps in the build.
 add_custom_target(all_generated)
@@ -56,13 +73,9 @@ add_custom_target(run
 # out forcing re-builds when they might not want them.
 add_custom_target(setup-and-run
     COMMAND ${CMAKE_MAKE_PROGRAM} install
-    COMMAND ${CMAKE_MAKE_PROGRAM} image
+    COMMAND ${CMAKE_MAKE_PROGRAM} qemu-image
     COMMAND ${CMAKE_MAKE_PROGRAM} run
     USES_TERMINAL
-)
-
-add_custom_target(image
-    DEPENDS qemu-image
 )
 
 add_custom_target(qemu-image
@@ -71,13 +84,22 @@ add_custom_target(qemu-image
     USES_TERMINAL
 )
 add_custom_target(grub-image
-    COMMAND ${CMAKE_COMMAND} -E env "SERENITY_SOURCE_DIR=${SerenityOS_SOURCE_DIR}" "SERENITY_ARCH=${SERENITY_ARCH}" "SERENITY_TOOLCHAIN=${CMAKE_CXX_COMPILER_ID}" "LLVM_VERSION=${CMAKE_CXX_COMPILER_VERSION}" "${SerenityOS_SOURCE_DIR}/Meta/build-image-grub.sh"
+    COMMAND "${CMAKE_COMMAND}" -E env "SERENITY_SOURCE_DIR=${SerenityOS_SOURCE_DIR}" "SERENITY_ARCH=${SERENITY_ARCH}" "SERENITY_TOOLCHAIN=${CMAKE_CXX_COMPILER_ID}" "LLVM_VERSION=${CMAKE_CXX_COMPILER_VERSION}" "${SerenityOS_SOURCE_DIR}/Meta/build-image-grub.sh"
     BYPRODUCTS ${CMAKE_BINARY_DIR}/grub_disk_image
+    USES_TERMINAL
+)
+add_custom_target(limine-image
+    COMMAND "${CMAKE_COMMAND}" -E env "SERENITY_SOURCE_DIR=${SerenityOS_SOURCE_DIR}" "SERENITY_ARCH=${SERENITY_ARCH}" "SERENITY_TOOLCHAIN=${CMAKE_CXX_COMPILER_ID}" "LLVM_VERSION=${CMAKE_CXX_COMPILER_VERSION}" "${SerenityOS_SOURCE_DIR}/Meta/build-image-limine.sh"
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/limine_disk_image
     USES_TERMINAL
 )
 add_custom_target(extlinux-image
     COMMAND "${CMAKE_COMMAND}" -E env "SERENITY_SOURCE_DIR=${SerenityOS_SOURCE_DIR}" "SERENITY_ARCH=${SERENITY_ARCH}" "SERENITY_TOOLCHAIN=${CMAKE_CXX_COMPILER_ID}" "LLVM_VERSION=${CMAKE_CXX_COMPILER_VERSION}" "${SerenityOS_SOURCE_DIR}/Meta/build-image-extlinux.sh"
     BYPRODUCTS "${CMAKE_BINARY_DIR}/extlinux_disk_image"
+    USES_TERMINAL
+)
+add_custom_target(install-native-partition
+    COMMAND "${CMAKE_COMMAND}" -E env "SERENITY_SOURCE_DIR=${SerenityOS_SOURCE_DIR}" "SERENITY_ARCH=${SERENITY_ARCH}" "SERENITY_TOOLCHAIN=${CMAKE_CXX_COMPILER_ID}" "LLVM_VERSION=${CMAKE_CXX_COMPILER_VERSION}" "${SerenityOS_SOURCE_DIR}/Meta/build-native-partition.sh"
     USES_TERMINAL
 )
 
@@ -95,15 +117,15 @@ add_custom_target(install-ports
     USES_TERMINAL
 )
 
-add_custom_target(configure-components
-    COMMAND "$<TARGET_FILE:Lagom::ConfigureComponents>"
-    USES_TERMINAL
-)
-add_dependencies(configure-components Lagom::ConfigureComponents)
+if (NOT HACKSTUDIO_BUILD)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+    add_custom_target(configure-components
+        COMMAND "$<TARGET_FILE:Lagom::ConfigureComponents>"
+        USES_TERMINAL
+    )
+    add_dependencies(configure-components Lagom::ConfigureComponents)
+
+endif()
 
 if (ENABLE_ALL_DEBUG_FACILITIES)
     set(ENABLE_ALL_THE_DEBUG_MACROS ON)
@@ -125,82 +147,24 @@ if (ENABLE_ALL_THE_DEBUG_MACROS)
     include(all_the_debug_macros)
 endif(ENABLE_ALL_THE_DEBUG_MACROS)
 
+set(CMAKE_STAGING_PREFIX "${CMAKE_BINARY_DIR}/Root")
+set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/Root")
+set(CMAKE_INSTALL_DATAROOTDIR res)
+set(CMAKE_INSTALL_INCLUDEDIR usr/include)
+set(CMAKE_INSTALL_LIBDIR usr/lib)
+
 configure_file(AK/Debug.h.in AK/Debug.h @ONLY)
 configure_file(Kernel/Debug.h.in Kernel/Debug.h @ONLY)
-
-set(CMAKE_STAGING_PREFIX ${CMAKE_BINARY_DIR}/Root)
-set(CMAKE_INSTALL_PREFIX ${CMAKE_BINARY_DIR}/Root)
-set(CMAKE_INSTALL_DATAROOTDIR ${CMAKE_BINARY_DIR}/Root/res)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/AK/Debug.h" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/AK")
 
 # We disable it completely because it makes cmake very spammy.
 # This will need to be revisited when the Loader supports RPATH/RUN_PATH.
 set(CMAKE_SKIP_RPATH TRUE)
 
-add_compile_options(-Wall)
-add_compile_options(-Wextra)
-
-if (NOT CMAKE_HOST_SYSTEM_NAME MATCHES SerenityOS)
-    # FIXME: Something makes this go crazy and flag unused variables that aren't flagged as such when building with the toolchain.
-    #        Disable -Werror for now.
-    add_compile_options(-Werror)
-endif()
-
-# The following warnings are sorted by the "base" name (the part excluding the initial Wno or W).
-add_compile_options(-Wno-address-of-packed-member)
-add_compile_options(-Wcast-qual)
-add_compile_options(-Wdeprecated-copy)
-add_compile_options(-Wduplicated-cond)
-add_compile_options(-Wno-expansion-to-defined)
-add_compile_options(-Wformat=2)
-add_compile_options(-Wimplicit-fallthrough)
-add_compile_options(-Wlogical-op)
-add_compile_options(-Wmisleading-indentation)
-add_compile_options(-Wmissing-declarations)
-add_compile_options(-Wnon-virtual-dtor)
-add_compile_options(-Wno-unknown-warning-option)
-add_compile_options(-Wundef)
-add_compile_options(-Wunused)
-add_compile_options(-Wno-unused-private-field)
-add_compile_options(-Wno-unused-const-variable)
-add_compile_options(-Wno-unused-command-line-argument)
-add_compile_options(-Wwrite-strings)
-add_compile_options(-Wno-maybe-uninitialized)
-
-add_compile_options(-fdiagnostics-color=always)
-add_compile_options(-fno-delete-null-pointer-checks)
-add_compile_options(-ffile-prefix-map=${SerenityOS_SOURCE_DIR}=.)
-add_compile_options(-fno-exceptions)
-add_compile_options(-fno-semantic-interposition)
-add_compile_options(-fsized-deallocation)
-add_compile_options(-fstack-clash-protection)
-add_compile_options(-fstack-protector-strong)
-add_compile_options(-g1)
-
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    add_compile_options(-Wno-literal-suffix)
-    add_compile_options(-Wcast-align)
-    add_compile_options(-Wdouble-promotion)
-elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang$")
-    add_compile_options(-Wno-overloaded-virtual)
-    add_compile_options(-Wno-user-defined-literals)
-    add_compile_options(-Wno-atomic-alignment)
-    add_compile_options(-Wno-c99-designator)
-    add_compile_options(-Wno-implicit-const-int-float-conversion)
-    add_compile_options(-Wno-inconsistent-missing-override)
-    add_compile_options(-Wno-null-pointer-subtraction)
-    add_compile_options(-Wno-tautological-constant-out-of-range-compare)
-    add_compile_options(-Wno-unneeded-internal-declaration)
-    add_compile_options(-Wno-unused-but-set-variable)
-    add_compile_options(-Wno-unused-function)
-    add_compile_options(-fno-aligned-allocation)
-    add_compile_options(-fconstexpr-steps=16777216)
-
-    # Clang doesn't add compiler_rt to the search path when compiling with -nostdlib.
-    link_directories(${TOOLCHAIN_ROOT}/lib/clang/${CMAKE_CXX_COMPILER_VERSION}/lib/${SERENITY_ARCH}-pc-serenity/)
-    add_link_options(LINKER:--allow-shlib-undefined)
-endif()
+include(serenity_compile_options)
 
 add_link_options(LINKER:-z,text)
+add_link_options(LINKER:--no-allow-shlib-undefined)
 
 add_compile_definitions(SANITIZE_PTRS)
 set(CMAKE_CXX_FLAGS_STATIC "${CMAKE_CXX_FLAGS} -static")
@@ -210,14 +174,17 @@ if (ENABLE_COMPILETIME_FORMAT_CHECK)
     add_compile_definitions(ENABLE_COMPILETIME_FORMAT_CHECK)
 endif()
 
+if("${SERENITY_ARCH}" STREQUAL "aarch64")
+    # FIXME: re-enable this warning
+    add_compile_options(-Wno-type-limits)
+endif()
+
 add_link_options(-Wno-unused-command-line-argument)
 
 include_directories(.)
 include_directories(Userland/Libraries)
 include_directories(Userland/Libraries/LibC)
 include_directories(Userland/Libraries/LibCrypt)
-include_directories(Userland/Libraries/LibM)
-include_directories(Userland/Libraries/LibPthread)
 include_directories(Userland/Libraries/LibSystem)
 include_directories(Userland/Services)
 include_directories(Userland)
@@ -237,55 +204,63 @@ add_custom_target(components ALL)
 option(BUILD_EVERYTHING "Build all optional components" ON)
 
 include(utils)
-include(wasm_spec_tests)
+include(flac_spec_tests)
 
 serenity_component(
     Tests
     RECOMMENDED
 )
 
+if (HACKSTUDIO_BUILD)
+    include_directories(/usr/include/Userland/Services)
+    include(${HACKSTUDIO_BUILD_CMAKE_FILE})
+    return()
+endif()
+
 add_subdirectory(AK)
 add_subdirectory(Kernel)
-if(NOT "${SERENITY_ARCH}" STREQUAL "aarch64")
-    add_subdirectory(Userland)
-    add_subdirectory(Tests)
+
+if (ENABLE_MOLD_LINKER)
+    add_link_options(-fuse-ld=mold)
 endif()
+
+if(NOT "${SERENITY_ARCH}" STREQUAL "aarch64")
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang$" OR ENABLE_MOLD_LINKER)
+        add_link_options(LINKER:--pack-dyn-relocs=relr)
+    else()
+        add_link_options(LINKER:-z,pack-relative-relocs)
+    endif()
+endif()
+
+add_subdirectory(Userland)
+add_subdirectory(Tests)
+
 if (ENABLE_COMPILETIME_HEADER_CHECK)
     add_subdirectory(Meta/HeaderCheck)
 endif()
 
 export_components("${CMAKE_BINARY_DIR}/components.ini")
 
-set(PCI_IDS_GZ_URL https://pci-ids.ucw.cz/v2.2/pci.ids.gz)
-set(PCI_IDS_GZ_PATH ${CMAKE_BINARY_DIR}/pci.ids.gz)
-set(PCI_IDS_PATH ${CMAKE_BINARY_DIR}/pci.ids)
-set(PCI_IDS_INSTALL_PATH ${CMAKE_INSTALL_DATAROOTDIR}/pci.ids)
+# it seems like cmake cannot uncompress *.gz files... only ZIP/tar.gz.
+# Lets download the uncompressed versions.
+# https://gitlab.kitware.com/cmake/cmake/-/issues/23054
 
-if(ENABLE_PCI_IDS_DOWNLOAD AND NOT EXISTS ${PCI_IDS_GZ_PATH})
-    message(STATUS "Downloading PCI ID database from ${PCI_IDS_GZ_URL}...")
-    file(DOWNLOAD ${PCI_IDS_GZ_URL} ${PCI_IDS_GZ_PATH} INACTIVITY_TIMEOUT 10)
+set(PCI_IDS_FILE pci.ids)
+set(PCI_IDS_URL "https://pci-ids.ucw.cz/v2.2/${PCI_IDS_FILE}")
+set(PCI_IDS_DOWNLOAD_PATH "${SERENITY_CACHE_DIR}/${PCI_IDS_FILE}")
+set(PCI_IDS_INSTALL_PATH "${CMAKE_STAGING_PREFIX}/${CMAKE_INSTALL_DATAROOTDIR}")
+
+if (ENABLE_PCI_IDS_DOWNLOAD AND NOT EXISTS "${PCI_IDS_INSTALL_PATH}/${PCI_IDS_FILE}")
+    download_file("${PCI_IDS_URL}" "${PCI_IDS_DOWNLOAD_PATH}")
+    install(FILES "${PCI_IDS_DOWNLOAD_PATH}" DESTINATION "${PCI_IDS_INSTALL_PATH}")
 endif()
 
-if(EXISTS ${PCI_IDS_GZ_PATH} AND NOT EXISTS ${PCI_IDS_INSTALL_PATH})
-    message(STATUS "Extracting PCI ID database from ${PCI_IDS_GZ_PATH}...")
-    execute_process(COMMAND gzip -k -d ${PCI_IDS_GZ_PATH})
-    file(MAKE_DIRECTORY ${CMAKE_INSTALL_DATAROOTDIR})
-    file(RENAME ${PCI_IDS_PATH} ${PCI_IDS_INSTALL_PATH})
-endif()
+set(USB_IDS_FILE usb.ids)
+set(USB_IDS_URL "http://www.linux-usb.org/${USB_IDS_FILE}")
+set(USB_IDS_DOWNLOAD_PATH "${SERENITY_CACHE_DIR}/${USB_IDS_FILE}")
+set(USB_IDS_INSTALL_PATH "${CMAKE_STAGING_PREFIX}/${CMAKE_INSTALL_DATAROOTDIR}")
 
-set(USB_IDS_GZ_URL http://www.linux-usb.org/usb.ids.gz)
-set(USB_IDS_GZ_PATH ${CMAKE_BINARY_DIR}/usb.ids.gz)
-set(USB_IDS_PATH ${CMAKE_BINARY_DIR}/usb.ids)
-set(USB_IDS_INSTALL_PATH ${CMAKE_INSTALL_DATAROOTDIR}/usb.ids)
-
-if(ENABLE_USB_IDS_DOWNLOAD AND NOT EXISTS ${USB_IDS_GZ_PATH})
-    message(STATUS "Downloading USB ID database from ${USB_IDS_GZ_URL}...")
-    file(DOWNLOAD ${USB_IDS_GZ_URL} ${USB_IDS_GZ_PATH} INACTIVITY_TIMEOUT 10)
-endif()
-
-if(EXISTS ${USB_IDS_GZ_PATH} AND NOT EXISTS ${USB_IDS_INSTALL_PATH})
-    message(STATUS "Extracting USB ID database from ${USB_IDS_GZ_PATH}...")
-    execute_process(COMMAND gzip -k -d ${USB_IDS_GZ_PATH})
-    file(MAKE_DIRECTORY ${CMAKE_INSTALL_DATAROOTDIR})
-    file(RENAME ${USB_IDS_PATH} ${USB_IDS_INSTALL_PATH})
+if (ENABLE_USB_IDS_DOWNLOAD AND NOT EXISTS "${USB_IDS_INSTALL_PATH}/${USB_IDS_FILE}")
+    download_file("${USB_IDS_URL}" "${USB_IDS_DOWNLOAD_PATH}")
+    install(FILES "${USB_IDS_DOWNLOAD_PATH}" DESTINATION "${USB_IDS_INSTALL_PATH}")
 endif()

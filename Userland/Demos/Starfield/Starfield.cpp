@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2021, Jagger De Leo <jcdl@fastmail.com>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,11 +8,11 @@
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/System.h>
+#include <LibDesktop/Screensaver.h>
 #include <LibGUI/Application.h>
 #include <LibGUI/Event.h>
 #include <LibGUI/Icon.h>
 #include <LibGUI/Painter.h>
-#include <LibGUI/Widget.h>
 #include <LibGUI/Window.h>
 #include <LibGfx/Bitmap.h>
 #include <LibMain/Main.h>
@@ -29,10 +30,10 @@ struct Coordinate {
     }
 };
 
-class Starfield final : public GUI::Widget {
+class Starfield final : public Desktop::Screensaver {
     C_OBJECT(Starfield)
 public:
-    virtual ~Starfield() override;
+    virtual ~Starfield() override = default;
     ErrorOr<void> create_stars(int, int, int);
 
     void set_speed(unsigned speed) { m_speed = speed; }
@@ -45,8 +46,7 @@ private:
     virtual void paint_event(GUI::PaintEvent&) override;
     virtual void timer_event(Core::TimerEvent&) override;
     virtual void keydown_event(GUI::KeyEvent&) override;
-    virtual void mousedown_event(GUI::MouseEvent& event) override;
-    virtual void mousemove_event(GUI::MouseEvent& event) override;
+    virtual void mousewheel_event(GUI::MouseEvent&) override;
 
     Vector<Coordinate> m_stars;
     int m_sweep_plane = 2000;
@@ -55,6 +55,7 @@ private:
 
 Starfield::Starfield(int interval)
 {
+    on_screensaver_exit = []() { GUI::Application::the()->quit(); };
     srand(time(nullptr));
     stop_timer();
     start_timer(interval);
@@ -62,7 +63,7 @@ Starfield::Starfield(int interval)
 
 ErrorOr<void> Starfield::create_stars(int width, int height, int stars)
 {
-    m_bitmap = TRY(Gfx::Bitmap::try_create(Gfx::BitmapFormat::BGRx8888, { width, height }));
+    m_bitmap = TRY(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRx8888, { width, height }));
 
     m_stars.grow_capacity(stars);
     for (int i = 0; i < stars; i++) {
@@ -72,19 +73,6 @@ ErrorOr<void> Starfield::create_stars(int width, int height, int stars)
     }
     draw();
     return {};
-}
-
-Starfield::~Starfield()
-{
-}
-
-void Starfield::mousemove_event(GUI::MouseEvent&)
-{
-}
-
-void Starfield::mousedown_event(GUI::MouseEvent&)
-{
-    GUI::Application::the()->quit();
 }
 
 void Starfield::keydown_event(GUI::KeyEvent& event)
@@ -98,8 +86,18 @@ void Starfield::keydown_event(GUI::KeyEvent& event)
             m_speed = 1;
         break;
     default:
-        GUI::Application::the()->quit();
+        Desktop::Screensaver::keydown_event(event);
     }
+}
+
+void Starfield::mousewheel_event(GUI::MouseEvent& event)
+{
+    if (event.wheel_delta_y() == 0)
+        return;
+
+    m_speed += event.wheel_delta_y() > 0 ? -1 : 1;
+    if (m_speed < 1)
+        m_speed = 1;
 }
 
 void Starfield::paint_event(GUI::PaintEvent& event)
@@ -150,7 +148,7 @@ void Starfield::draw()
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    TRY(Core::System::pledge("stdio recvfd sendfd rpath unix", nullptr));
+    TRY(Core::System::pledge("stdio recvfd sendfd rpath unix"));
 
     unsigned star_count = 1000;
     unsigned refresh_rate = 16;
@@ -163,30 +161,21 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     args_parser.add_option(speed, "Speed (default = 1)", "speed", 's', "number");
     args_parser.parse(arguments);
 
-    auto app = TRY(GUI::Application::try_create(arguments));
+    auto app = TRY(GUI::Application::create(arguments));
 
-    TRY(Core::System::pledge("stdio recvfd sendfd rpath", nullptr));
+    TRY(Core::System::pledge("stdio recvfd sendfd rpath"));
 
-    auto app_icon = GUI::Icon::default_icon("app-screensaver");
-    auto window = TRY(GUI::Window::try_create());
+    auto window = TRY(Desktop::Screensaver::create_window("Starfield"sv, "app-starfield"sv));
 
-    window->set_double_buffering_enabled(true);
-    window->set_title("Starfield");
-    window->set_resizable(false);
-    window->set_frameless(true);
-    window->set_fullscreen(true);
-    window->set_minimizable(false);
-    window->set_icon(app_icon.bitmap_for_size(16));
-
-    auto starfield_window = TRY(window->try_set_main_widget<Starfield>(refresh_rate));
-    starfield_window->set_fill_with_background_color(false);
-    starfield_window->set_override_cursor(Gfx::StandardCursor::Hidden);
-    starfield_window->update();
+    auto starfield_widget = TRY(window->set_main_widget<Starfield>(refresh_rate));
+    starfield_widget->set_fill_with_background_color(false);
+    starfield_widget->set_override_cursor(Gfx::StandardCursor::Hidden);
+    starfield_widget->update();
     window->show();
 
-    TRY(starfield_window->create_stars(window->width(), window->height(), star_count));
-    starfield_window->set_speed(speed);
-    starfield_window->update();
+    TRY(starfield_widget->create_stars(window->width(), window->height(), star_count));
+    starfield_widget->set_speed(speed);
+    starfield_widget->update();
 
     window->move_to_front();
     window->set_cursor(Gfx::StandardCursor::Hidden);

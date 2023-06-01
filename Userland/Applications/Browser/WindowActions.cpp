@@ -1,10 +1,12 @@
 /*
  * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "WindowActions.h"
+#include <Applications/Browser/Browser.h>
 #include <LibGUI/Icon.h>
 #include <LibGUI/Window.h>
 #include <LibGfx/Bitmap.h>
@@ -24,12 +26,21 @@ WindowActions::WindowActions(GUI::Window& window)
     VERIFY(!s_the);
     s_the = this;
     m_create_new_tab_action = GUI::Action::create(
-        "&New Tab", { Mod_Ctrl, Key_T }, Gfx::Bitmap::try_load_from_file("/res/icons/16x16/new-tab.png").release_value_but_fixme_should_propagate_errors(), [this](auto&) {
+        "&New Tab", { Mod_Ctrl, Key_T }, g_icon_bag.new_tab, [this](auto&) {
             if (on_create_new_tab)
                 on_create_new_tab();
         },
         &window);
     m_create_new_tab_action->set_status_tip("Open a new tab");
+
+    m_create_new_window_action = GUI::Action::create(
+        "&New Window", { Mod_Ctrl, Key_N }, g_icon_bag.new_window, [this](auto&) {
+            if (on_create_new_window) {
+                on_create_new_window();
+            }
+        },
+        &window);
+    m_create_new_window_action->set_status_tip("Open a new browser window");
 
     m_next_tab_action = GUI::Action::create(
         "&Next Tab", { Mod_Ctrl, Key_PageDown }, [this](auto&) {
@@ -47,13 +58,24 @@ WindowActions::WindowActions(GUI::Window& window)
         &window);
     m_previous_tab_action->set_status_tip("Switch to the previous tab");
 
-    m_about_action = GUI::Action::create(
-        "&About Browser", GUI::Icon::default_icon("app-browser").bitmap_for_size(16), [this](const GUI::Action&) {
-            if (on_about)
-                on_about();
+    for (auto i = 0; i <= 7; ++i) {
+        m_tab_actions.append(GUI::Action::create(
+            DeprecatedString::formatted("Tab {}", i + 1), { Mod_Ctrl, static_cast<KeyCode>(Key_1 + i) }, [this, i](auto&) {
+                if (on_tabs[i])
+                    on_tabs[i]();
+            },
+            &window));
+        m_tab_actions.last()->set_status_tip(DeprecatedString::formatted("Switch to tab {}", i + 1));
+    }
+    m_tab_actions.append(GUI::Action::create(
+        "Last tab", { Mod_Ctrl, Key_9 }, [this](auto&) {
+            if (on_tabs[8])
+                on_tabs[8]();
         },
-        &window);
-    m_about_action->set_status_tip("Show application about box");
+        &window));
+    m_tab_actions.last()->set_status_tip("Switch to last tab");
+
+    m_about_action = GUI::CommonActions::make_about_action("Ladybird", GUI::Icon::default_icon("app-browser"sv), &window);
 
     m_show_bookmarks_bar_action = GUI::Action::create_checkable(
         "&Bookmarks Bar", { Mod_Ctrl, Key_B },
@@ -63,6 +85,15 @@ WindowActions::WindowActions(GUI::Window& window)
         },
         &window);
     m_show_bookmarks_bar_action->set_status_tip("Show/hide the bookmarks bar");
+
+    m_vertical_tabs_action = GUI::Action::create_checkable(
+        "&Vertical Tabs", { Mod_Ctrl, Key_Comma },
+        [this](auto& action) {
+            if (on_vertical_tabs)
+                on_vertical_tabs(action);
+        },
+        &window);
+    m_vertical_tabs_action->set_status_tip("Enable/Disable vertical tabs");
 }
 
 }

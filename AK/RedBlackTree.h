@@ -131,6 +131,23 @@ protected:
         return candidate;
     }
 
+    static Node* find_smallest_not_below(Node* node, K key)
+    {
+        Node* candidate = nullptr;
+        while (node) {
+            if (node->key == key)
+                return node;
+
+            if (node->key <= key) {
+                node = node->right_child;
+            } else {
+                candidate = node;
+                node = node->left_child;
+            }
+        }
+        return candidate;
+    }
+
     void insert(Node* node)
     {
         VERIFY(node);
@@ -213,6 +230,7 @@ protected:
         // special case: deleting the only node
         if (m_size == 1) {
             m_root = nullptr;
+            m_minimum = nullptr;
             m_size = 0;
             return;
         }
@@ -225,9 +243,9 @@ protected:
         //  in place, this is quite a bit more expensive, as well as much less readable, is there a better way?
         if (node->left_child && node->right_child) {
             auto* successor_node = successor(node); // this is always non-null as all nodes besides the maximum node have a successor, and the maximum node has no right child
-            auto neighbour_swap = successor_node->parent == node;
+            auto neighbor_swap = successor_node->parent == node;
             node->left_child->parent = successor_node;
-            if (!neighbour_swap)
+            if (!neighbor_swap)
                 node->right_child->parent = successor_node;
             if (node->parent) {
                 if (node->parent->left_child == node) {
@@ -240,7 +258,7 @@ protected:
             }
             if (successor_node->right_child)
                 successor_node->right_child->parent = node;
-            if (neighbour_swap) {
+            if (neighbor_swap) {
                 successor_node->parent = node->parent;
                 node->parent = successor_node;
             } else {
@@ -256,7 +274,7 @@ protected:
                 swap(node->parent, successor_node->parent);
             }
             swap(node->left_child, successor_node->left_child);
-            if (neighbour_swap) {
+            if (neighbor_swap) {
                 node->right_child = successor_node->right_child;
                 successor_node->right_child = node;
             } else {
@@ -386,7 +404,7 @@ template<typename TreeType, typename ElementType>
 class RedBlackTreeIterator {
 public:
     RedBlackTreeIterator() = default;
-    bool operator!=(const RedBlackTreeIterator& other) const { return m_node != other.m_node; }
+    bool operator!=(RedBlackTreeIterator const& other) const { return m_node != other.m_node; }
     RedBlackTreeIterator& operator++()
     {
         if (!m_node)
@@ -449,9 +467,22 @@ public:
         return &node->value;
     }
 
-    void insert(K key, const V& value)
+    [[nodiscard]] V* find_smallest_not_below(K key)
     {
-        insert(key, V(value));
+        auto* node = static_cast<Node*>(BaseTree::find_smallest_not_below(this->m_root, key));
+        if (!node)
+            return nullptr;
+        return &node->value;
+    }
+
+    ErrorOr<void> try_insert(K key, V const& value)
+    {
+        return try_insert(key, V(value));
+    }
+
+    void insert(K key, V const& value)
+    {
+        MUST(try_insert(key, value));
     }
 
     ErrorOr<void> try_insert(K key, V&& value)
@@ -474,7 +505,7 @@ public:
     Iterator end() { return {}; }
     Iterator begin_from(K key) { return Iterator(static_cast<Node*>(BaseTree::find(this->m_root, key))); }
 
-    using ConstIterator = RedBlackTreeIterator<const RedBlackTree, const V>;
+    using ConstIterator = RedBlackTreeIterator<const RedBlackTree, V const>;
     friend ConstIterator;
     ConstIterator begin() const { return ConstIterator(static_cast<Node*>(this->m_minimum)); }
     ConstIterator end() const { return {}; }
@@ -483,6 +514,14 @@ public:
     ConstIterator find_largest_not_above_iterator(K key) const
     {
         auto node = static_cast<Node*>(BaseTree::find_largest_not_above(this->m_root, key));
+        if (!node)
+            return end();
+        return ConstIterator(node, static_cast<Node*>(BaseTree::predecessor(node)));
+    }
+
+    ConstIterator find_smallest_not_below_iterator(K key) const
+    {
+        auto node = static_cast<Node*>(BaseTree::find_smallest_not_below(this->m_root, key));
         if (!node)
             return end();
         return ConstIterator(node, static_cast<Node*>(BaseTree::predecessor(node)));
@@ -521,10 +560,8 @@ public:
 
     void clear()
     {
-        if (this->m_root) {
-            delete this->m_root;
-            this->m_root = nullptr;
-        }
+        delete this->m_root;
+        this->m_root = nullptr;
         this->m_minimum = nullptr;
         this->m_size = 0;
     }
@@ -542,14 +579,14 @@ private:
 
         ~Node()
         {
-            if (this->left_child)
-                delete this->left_child;
-            if (this->right_child)
-                delete this->right_child;
+            delete this->left_child;
+            delete this->right_child;
         }
     };
 };
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::RedBlackTree;
+#endif

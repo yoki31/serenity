@@ -26,16 +26,34 @@ public:
     GUI::Model* model() { return m_model.ptr(); }
     const GUI::Model* model() const { return m_model.ptr(); }
 
-    Function<void(const String& url, unsigned modifiers)> on_bookmark_click;
-    Function<void(const String&, const String&)> on_bookmark_hover;
+    enum class Open {
+        InNewTab,
+        InSameTab,
+        InNewWindow
+    };
 
-    bool contains_bookmark(const String& url);
-    bool remove_bookmark(const String& url);
-    bool add_bookmark(const String& url, const String& title);
-    bool edit_bookmark(const String& url);
+    enum class PerformEditOn {
+        NewBookmark,
+        ExistingBookmark
+    };
+
+    Function<void(DeprecatedString const& url, Open)> on_bookmark_click;
+    Function<void(DeprecatedString const&, DeprecatedString const&)> on_bookmark_hover;
+    Function<void()> on_bookmark_change;
+
+    bool contains_bookmark(StringView url);
+    ErrorOr<void> remove_bookmark(StringView url);
+    ErrorOr<void> add_bookmark(StringView url, StringView title);
+    ErrorOr<void> edit_bookmark(StringView url);
+
+    virtual Optional<GUI::UISize> calculated_min_size() const override
+    {
+        // Large enough to fit the `m_additional` button.
+        return GUI::UISize(20, 20);
+    }
 
 private:
-    BookmarksBarWidget(const String&, bool enabled);
+    BookmarksBarWidget(DeprecatedString const&, bool enabled);
 
     // ^GUI::ModelClient
     virtual void model_did_update(unsigned) override;
@@ -45,6 +63,8 @@ private:
 
     void update_content_size();
 
+    ErrorOr<void> update_model(Vector<JsonValue>& values, Function<ErrorOr<void>(GUI::JsonArrayModel& model, Vector<JsonValue>&& values)> perform_model_change);
+
     RefPtr<GUI::Model> m_model;
     RefPtr<GUI::Button> m_additional;
     RefPtr<GUI::Widget> m_separator;
@@ -52,9 +72,9 @@ private:
 
     RefPtr<GUI::Menu> m_context_menu;
     RefPtr<GUI::Action> m_context_menu_default_action;
-    String m_context_menu_url;
+    DeprecatedString m_context_menu_url;
 
-    NonnullRefPtrVector<GUI::Button> m_bookmarks;
+    Vector<NonnullRefPtr<GUI::Button>> m_bookmarks;
 
     int m_last_visible_index { -1 };
 };

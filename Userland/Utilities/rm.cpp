@@ -7,40 +7,51 @@
 #include <AK/StringBuilder.h>
 #include <AK/Vector.h>
 #include <LibCore/ArgsParser.h>
-#include <LibCore/File.h>
+#include <LibCore/System.h>
+#include <LibFileSystem/FileSystem.h>
+#include <LibMain/Main.h>
 #include <stdio.h>
 #include <unistd.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath cpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath cpath"));
 
     bool recursive = false;
     bool force = false;
     bool verbose = false;
-    Vector<const char*> paths;
+    bool no_preserve_root = false;
+    Vector<StringView> paths;
 
     Core::ArgsParser args_parser;
     args_parser.add_option(recursive, "Delete directories recursively", "recursive", 'r');
-    args_parser.add_option(force, "Force", "force", 'f');
+    args_parser.add_option(force, "Ignore nonexistent files", "force", 'f');
     args_parser.add_option(verbose, "Verbose", "verbose", 'v');
+    args_parser.add_option(no_preserve_root, "Do not consider '/' specially", "no-preserve-root", 0);
     args_parser.add_positional_argument(paths, "Path(s) to remove", "path", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if (!force && paths.is_empty()) {
-        args_parser.print_usage(stderr, argv[0]);
+        args_parser.print_usage(stderr, arguments.strings[0]);
         return 1;
     }
 
     bool had_errors = false;
     for (auto& path : paths) {
-        auto result = Core::File::remove(path, recursive ? Core::File::RecursionMode::Allowed : Core::File::RecursionMode::Disallowed, force);
+        if (!no_preserve_root && path == "/") {
+            warnln("rm: '/' is protected, try with --no-preserve-root to override this behavior");
+            continue;
+        }
+
+        auto result = FileSystem::remove(path, recursive ? FileSystem::RecursionMode::Allowed : FileSystem::RecursionMode::Disallowed);
 
         if (result.is_error()) {
-            warnln("rm: cannot remove '{}': {}", path, static_cast<Error const&>(result.error()));
+            auto error = result.release_error();
+
+            if (force && error.is_errno() && error.code() == ENOENT)
+                continue;
+
+            warnln("rm: cannot remove '{}': {}", path, error);
             had_errors = true;
         }
 

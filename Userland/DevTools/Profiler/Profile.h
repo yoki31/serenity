@@ -7,17 +7,18 @@
 #pragma once
 
 #include "DisassemblyModel.h"
+#include "FilesystemEventModel.h"
 #include "Process.h"
 #include "Profile.h"
 #include "ProfileModel.h"
 #include "SamplesModel.h"
 #include "SignpostsModel.h"
+#include "SourceModel.h"
 #include <AK/Bitmap.h>
-#include <AK/FlyString.h>
+#include <AK/DeprecatedFlyString.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <AK/JsonValue.h>
-#include <AK/NonnullRefPtrVector.h>
 #include <AK/OwnPtr.h>
 #include <AK/Variant.h>
 #include <LibCore/MappedFile.h>
@@ -32,9 +33,9 @@ extern OwnPtr<Debug::DebugInfo> g_kernel_debug_info;
 
 class ProfileNode : public RefCounted<ProfileNode> {
 public:
-    static NonnullRefPtr<ProfileNode> create(Process const& process, FlyString object_name, String symbol, FlatPtr address, u32 offset, u64 timestamp, pid_t pid)
+    static NonnullRefPtr<ProfileNode> create(Process const& process, DeprecatedFlyString const& object_name, DeprecatedString symbol, FlatPtr address, u32 offset, u64 timestamp, pid_t pid)
     {
-        return adopt_ref(*new ProfileNode(process, move(object_name), move(symbol), address, offset, timestamp, pid));
+        return adopt_ref(*new ProfileNode(process, object_name, move(symbol), address, offset, timestamp, pid));
     }
 
     static NonnullRefPtr<ProfileNode> create_process_node(Process const& process)
@@ -46,13 +47,13 @@ public:
     void will_track_seen_events(size_t profile_event_count)
     {
         if (m_seen_events.size() != profile_event_count)
-            m_seen_events = Bitmap { profile_event_count, false };
+            m_seen_events = Bitmap::create(profile_event_count, false).release_value_but_fixme_should_propagate_errors();
     }
     bool has_seen_event(size_t event_index) const { return m_seen_events.get(event_index); }
     void did_see_event(size_t event_index) { m_seen_events.set(event_index, true); }
 
-    const FlyString& object_name() const { return m_object_name; }
-    const String& symbol() const { return m_symbol; }
+    DeprecatedFlyString const& object_name() const { return m_object_name; }
+    DeprecatedString const& symbol() const { return m_symbol; }
     FlatPtr address() const { return m_address; }
     u32 offset() const { return m_offset; }
     u64 timestamp() const { return m_timestamp; }
@@ -61,7 +62,7 @@ public:
     u32 self_count() const { return m_self_count; }
 
     int child_count() const { return m_children.size(); }
-    const Vector<NonnullRefPtr<ProfileNode>>& children() const { return m_children; }
+    Vector<NonnullRefPtr<ProfileNode>> const& children() const { return m_children; }
 
     void add_child(ProfileNode& child)
     {
@@ -72,7 +73,7 @@ public:
         m_children.append(child);
     }
 
-    ProfileNode& find_or_create_child(FlyString object_name, String symbol, FlatPtr address, u32 offset, u64 timestamp, pid_t pid)
+    ProfileNode& find_or_create_child(DeprecatedFlyString const& object_name, DeprecatedString symbol, FlatPtr address, u32 offset, u64 timestamp, pid_t pid)
     {
         for (size_t i = 0; i < m_children.size(); ++i) {
             auto& child = m_children[i];
@@ -80,20 +81,20 @@ public:
                 return child;
             }
         }
-        auto new_child = ProfileNode::create(m_process, move(object_name), move(symbol), address, offset, timestamp, pid);
+        auto new_child = ProfileNode::create(m_process, object_name, move(symbol), address, offset, timestamp, pid);
         add_child(new_child);
         return new_child;
     };
 
     ProfileNode* parent() { return m_parent; }
-    const ProfileNode* parent() const { return m_parent; }
+    ProfileNode const* parent() const { return m_parent; }
 
     void increment_event_count() { ++m_event_count; }
     void increment_self_count() { ++m_self_count; }
 
     void sort_children();
 
-    const HashMap<FlatPtr, size_t>& events_per_address() const { return m_events_per_address; }
+    HashMap<FlatPtr, size_t> const& events_per_address() const { return m_events_per_address; }
     void add_event_address(FlatPtr address)
     {
         auto it = m_events_per_address.find(address);
@@ -110,13 +111,13 @@ public:
 
 private:
     explicit ProfileNode(Process const&);
-    explicit ProfileNode(Process const&, const String& object_name, String symbol, FlatPtr address, u32 offset, u64 timestamp, pid_t);
+    explicit ProfileNode(Process const&, DeprecatedFlyString const& object_name, DeprecatedString symbol, FlatPtr address, u32 offset, u64 timestamp, pid_t);
 
     bool m_root { false };
     Process const& m_process;
     ProfileNode* m_parent { nullptr };
-    FlyString m_object_name;
-    String m_symbol;
+    DeprecatedFlyString m_object_name;
+    DeprecatedString m_symbol;
     pid_t m_pid { 0 };
     FlatPtr m_address { 0 };
     u32 m_offset { 0 };
@@ -147,8 +148,10 @@ public:
     GUI::Model& samples_model();
     GUI::Model& signposts_model();
     GUI::Model* disassembly_model();
+    GUI::Model* source_model();
+    GUI::Model* file_event_model();
 
-    const Process* find_process(pid_t pid, EventSerialNumber serial) const
+    Process const* find_process(pid_t pid, EventSerialNumber serial) const
     {
         auto it = m_processes.find_if([&pid, &serial](auto& entry) {
             return entry.pid == pid && entry.valid_at(serial);
@@ -156,13 +159,14 @@ public:
         return it.is_end() ? nullptr : &(*it);
     }
 
-    void set_disassembly_index(const GUI::ModelIndex&);
+    void set_disassembly_index(GUI::ModelIndex const&);
+    void set_source_index(GUI::ModelIndex const&);
 
-    const Vector<NonnullRefPtr<ProfileNode>>& roots() const { return m_roots; }
+    Vector<NonnullRefPtr<ProfileNode>> const& roots() const { return m_roots; }
 
     struct Frame {
-        FlyString object_name;
-        String symbol;
+        DeprecatedFlyString object_name;
+        DeprecatedString symbol;
         FlatPtr address { 0 };
         u32 offset { 0 };
     };
@@ -190,14 +194,14 @@ public:
         };
 
         struct SignpostData {
-            String string;
+            DeprecatedString string;
             FlatPtr arg {};
         };
 
         struct MmapData {
             FlatPtr ptr {};
             size_t size {};
-            String name;
+            DeprecatedString name;
         };
 
         struct MunmapData {
@@ -207,23 +211,32 @@ public:
 
         struct ProcessCreateData {
             pid_t parent_pid { 0 };
-            String executable;
+            DeprecatedString executable;
         };
 
         struct ProcessExecData {
-            String executable;
+            DeprecatedString executable;
         };
 
         struct ThreadCreateData {
             pid_t parent_tid {};
         };
 
-        Variant<std::nullptr_t, SampleData, MallocData, FreeData, SignpostData, MmapData, MunmapData, ProcessCreateData, ProcessExecData, ThreadCreateData> data { nullptr };
+        struct ReadData {
+            int fd;
+            size_t size;
+            DeprecatedString path;
+            size_t start_timestamp;
+            bool success;
+        };
+
+        Variant<nullptr_t, SampleData, MallocData, FreeData, SignpostData, MmapData, MunmapData, ProcessCreateData, ProcessExecData, ThreadCreateData, ReadData> data { nullptr };
     };
 
     Vector<Event> const& events() const { return m_events; }
-    const Vector<size_t>& filtered_event_indices() const { return m_filtered_event_indices; }
-    const Vector<size_t>& filtered_signpost_indices() const { return m_filtered_signpost_indices; }
+    Vector<size_t> const& filtered_event_indices() const { return m_filtered_event_indices; }
+    Vector<size_t> const& filtered_signpost_indices() const { return m_filtered_signpost_indices; }
+    NonnullRefPtr<FileEventNode> const& file_event_nodes() { return m_file_event_nodes; }
 
     u64 length_in_ms() const { return m_last_timestamp - m_first_timestamp; }
     u64 first_timestamp() const { return m_first_timestamp; }
@@ -247,7 +260,7 @@ public:
     bool show_percentages() const { return m_show_percentages; }
     void set_show_percentages(bool);
 
-    const Vector<Process>& processes() const { return m_processes; }
+    Vector<Process> const& processes() const { return m_processes; }
 
     template<typename Callback>
     void for_each_event_in_filter_range(Callback callback)
@@ -266,7 +279,7 @@ public:
     void for_each_signpost(Callback callback) const
     {
         for (auto index : m_signpost_indices) {
-            auto& event = m_events[index];
+            auto const& event = m_events[index];
             if (callback(event) == IterationDecision::Break)
                 break;
         }
@@ -281,8 +294,11 @@ private:
     RefPtr<SamplesModel> m_samples_model;
     RefPtr<SignpostsModel> m_signposts_model;
     RefPtr<DisassemblyModel> m_disassembly_model;
+    RefPtr<SourceModel> m_source_model;
+    RefPtr<FileEventModel> m_file_event_model;
 
     GUI::ModelIndex m_disassembly_index;
+    GUI::ModelIndex m_source_index;
 
     Vector<NonnullRefPtr<ProfileNode>> m_roots;
     Vector<size_t> m_filtered_event_indices;
@@ -299,6 +315,8 @@ private:
     u64 m_timestamp_filter_range_end { 0 };
 
     Vector<ProcessFilter> m_process_filters;
+
+    NonnullRefPtr<FileEventNode> m_file_event_nodes;
 
     bool m_inverted { false };
     bool m_show_top_functions { false };

@@ -10,15 +10,17 @@ namespace Kernel {
 
 ErrorOr<FlatPtr> Process::sys$disown(ProcessID pid)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this);
-    REQUIRE_PROMISE(proc);
-    auto process = Process::from_pid(pid);
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::proc));
+    auto process = Process::from_pid_in_same_jail(pid);
     if (!process)
         return ESRCH;
-    if (process->ppid() != this->pid())
-        return ECHILD;
-    ProtectedDataMutationScope scope(*process);
-    process->m_protected_values.ppid = 0;
+    TRY(process->with_mutable_protected_data([this](auto& protected_data) -> ErrorOr<void> {
+        if (protected_data.ppid != this->pid())
+            return ECHILD;
+        protected_data.ppid = 0;
+        return {};
+    }));
     process->disowned_by_waiter(*this);
     return 0;
 }

@@ -1,27 +1,26 @@
 /*
- * Copyright (c) 2021, Thomas Voss <thomasvoss@live.com>
+ * Copyright (c) 2021, Thomas Voss <mail@thomasvoss.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <LibCore/ArgsParser.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath"sv));
 
-    Vector<String> paths;
+    Vector<StringView> paths;
     Core::ArgsParser args_parser;
 
     args_parser.set_general_help("Concatente files to stdout with each line in reverse.");
     args_parser.add_positional_argument(paths, "File path", "path", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     Vector<FILE*> streams;
     auto num_paths = paths.size();
@@ -29,12 +28,16 @@ int main(int argc, char** argv)
 
     if (!paths.is_empty()) {
         for (auto const& path : paths) {
-            FILE* stream = fopen(path.characters(), "r");
-            if (!stream) {
-                warnln("Failed to open {}: {}", path, strerror(errno));
-                continue;
+            if (path == "-") {
+                streams.append(stdin);
+            } else {
+                FILE* stream = fopen(DeprecatedString(path).characters(), "r");
+                if (!stream) {
+                    warnln("Failed to open {}: {}", path, strerror(errno));
+                    continue;
+                }
+                streams.append(stream);
             }
-            streams.append(stream);
         }
     } else {
         streams.append(stdin);
@@ -44,15 +47,16 @@ int main(int argc, char** argv)
     ScopeGuard guard = [&] {
         free(buffer);
         for (auto* stream : streams) {
-            if (fclose(stream))
+            // If the user passes '-' as an argument multiple times, then we will end up trying to
+            // close stdin multiple times.  This will cause `fclose()` to fail but with no error, so
+            // we need to manually check errno.
+            if (fclose(stream) && errno != 0) {
                 perror("fclose");
+            }
         }
     };
 
-    if (pledge("stdio", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio"sv));
 
     for (auto* stream : streams) {
         for (;;) {
@@ -66,7 +70,7 @@ int main(int argc, char** argv)
                 }
                 break;
             }
-            outln("{}", String { buffer, Chomp }.reverse());
+            outln("{}", DeprecatedString { buffer, Chomp }.reverse());
         }
     }
 

@@ -26,28 +26,27 @@
 namespace Kernel {
 
 static void handle_arp(EthernetFrameHeader const&, size_t frame_size);
-static void handle_ipv4(EthernetFrameHeader const&, size_t frame_size, Time const& packet_timestamp);
-static void handle_icmp(EthernetFrameHeader const&, IPv4Packet const&, Time const& packet_timestamp);
-static void handle_udp(IPv4Packet const&, Time const& packet_timestamp);
-static void handle_tcp(IPv4Packet const&, Time const& packet_timestamp);
-static void send_delayed_tcp_ack(RefPtr<TCPSocket> socket);
+static void handle_ipv4(EthernetFrameHeader const&, size_t frame_size, UnixDateTime const& packet_timestamp);
+static void handle_icmp(EthernetFrameHeader const&, IPv4Packet const&, UnixDateTime const& packet_timestamp);
+static void handle_udp(IPv4Packet const&, UnixDateTime const& packet_timestamp);
+static void handle_tcp(IPv4Packet const&, UnixDateTime const& packet_timestamp);
+static void send_delayed_tcp_ack(TCPSocket& socket);
 static void send_tcp_rst(IPv4Packet const& ipv4_packet, TCPPacket const& tcp_packet, RefPtr<NetworkAdapter> adapter);
 static void flush_delayed_tcp_acks();
 static void retransmit_tcp_packets();
 
 static Thread* network_task = nullptr;
-static HashTable<RefPtr<TCPSocket>>* delayed_ack_sockets;
+static HashTable<NonnullRefPtr<TCPSocket>>* delayed_ack_sockets;
 
 [[noreturn]] static void NetworkTask_main(void*);
 
 void NetworkTask::spawn()
 {
-    RefPtr<Thread> thread;
-    auto name = KString::try_create("NetworkTask");
+    auto name = KString::try_create("Network Task"sv);
     if (name.is_error())
         TODO();
-    Process::create_kernel_process(thread, name.release_value(), NetworkTask_main, nullptr);
-    network_task = thread;
+    auto [_, first_thread] = MUST(Process::create_kernel_process(name.release_value(), NetworkTask_main, nullptr));
+    network_task = first_thread;
 }
 
 bool NetworkTask::is_current()
@@ -57,7 +56,7 @@ bool NetworkTask::is_current()
 
 void NetworkTask_main(void*)
 {
-    delayed_ack_sockets = new HashTable<RefPtr<TCPSocket>>;
+    delayed_ack_sockets = new HashTable<NonnullRefPtr<TCPSocket>>;
 
     WaitQueue packet_wait_queue;
     int pending_packets = 0;
@@ -67,7 +66,6 @@ void NetworkTask_main(void*)
         if (adapter.class_name() == "LoopbackAdapter"sv) {
             adapter.set_ipv4_address({ 127, 0, 0, 1 });
             adapter.set_ipv4_netmask({ 255, 0, 0, 0 });
-            adapter.set_ipv4_gateway({ 0, 0, 0, 0 });
         }
 
         adapter.on_receive = [&]() {
@@ -76,7 +74,7 @@ void NetworkTask_main(void*)
         };
     });
 
-    auto dequeue_packet = [&pending_packets](u8* buffer, size_t buffer_size, Time& packet_timestamp) -> size_t {
+    auto dequeue_packet = [&pending_packets](u8* buffer, size_t buffer_size, UnixDateTime& packet_timestamp) -> size_t {
         if (pending_packets == 0)
             return 0;
         size_t packet_size = 0;
@@ -91,21 +89,21 @@ void NetworkTask_main(void*)
     };
 
     size_t buffer_size = 64 * KiB;
-    auto region_or_error = MM.allocate_kernel_region(buffer_size, "Kernel Packet Buffer", Memory::Region::Access::ReadWrite);
+    auto region_or_error = MM.allocate_kernel_region(buffer_size, "Kernel Packet Buffer"sv, Memory::Region::Access::ReadWrite);
     if (region_or_error.is_error())
         TODO();
     auto buffer_region = region_or_error.release_value();
     auto buffer = (u8*)buffer_region->vaddr().get();
-    Time packet_timestamp;
+    UnixDateTime packet_timestamp;
 
     for (;;) {
         flush_delayed_tcp_acks();
         retransmit_tcp_packets();
         size_t packet_size = dequeue_packet(buffer, buffer_size, packet_timestamp);
         if (!packet_size) {
-            auto timeout_time = Time::from_milliseconds(500);
+            auto timeout_time = Duration::from_milliseconds(500);
             auto timeout = Thread::BlockTimeout { false, &timeout_time };
-            [[maybe_unused]] auto result = packet_wait_queue.wait_on(timeout, "NetworkTask");
+            [[maybe_unused]] auto result = packet_wait_queue.wait_on(timeout, "NetworkTask"sv);
             continue;
         }
         if (packet_size < sizeof(EthernetFrameHeader)) {
@@ -158,7 +156,7 @@ void handle_arp(EthernetFrameHeader const& eth, size_t frame_size)
     if (!packet.sender_hardware_address().is_zero() && !packet.sender_protocol_address().is_zero()) {
         // Someone has this IPv4 address. I guess we can try to remember that.
         // FIXME: Protect against ARP spamming.
-        update_arp_table(packet.sender_protocol_address(), packet.sender_hardware_address(), UpdateArp::Set);
+        update_arp_table(packet.sender_protocol_address(), packet.sender_hardware_address(), UpdateTable::Set);
     }
 
     if (packet.operation() == ARPOperation::Request) {
@@ -179,7 +177,7 @@ void handle_arp(EthernetFrameHeader const& eth, size_t frame_size)
     }
 }
 
-void handle_ipv4(EthernetFrameHeader const& eth, size_t frame_size, Time const& packet_timestamp)
+void handle_ipv4(EthernetFrameHeader const& eth, size_t frame_size, UnixDateTime const& packet_timestamp)
 {
     constexpr size_t minimum_ipv4_frame_size = sizeof(EthernetFrameHeader) + sizeof(IPv4Packet);
     if (frame_size < minimum_ipv4_frame_size) {
@@ -202,12 +200,13 @@ void handle_ipv4(EthernetFrameHeader const& eth, size_t frame_size, Time const& 
     dbgln_if(IPV4_DEBUG, "handle_ipv4: source={}, destination={}", packet.source(), packet.destination());
 
     NetworkingManagement::the().for_each([&](auto& adapter) {
-        if (adapter.link_up()) {
-            auto my_net = adapter.ipv4_address().to_u32() & adapter.ipv4_netmask().to_u32();
-            auto their_net = packet.source().to_u32() & adapter.ipv4_netmask().to_u32();
-            if (my_net == their_net)
-                update_arp_table(packet.source(), eth.source(), UpdateArp::Set);
-        }
+        if (adapter.ipv4_address().is_zero() || !adapter.link_up())
+            return;
+
+        auto my_net = adapter.ipv4_address().to_u32() & adapter.ipv4_netmask().to_u32();
+        auto their_net = packet.source().to_u32() & adapter.ipv4_netmask().to_u32();
+        if (my_net == their_net)
+            update_arp_table(packet.source(), eth.source(), UpdateTable::Set);
     });
 
     switch ((IPv4Protocol)packet.protocol()) {
@@ -223,13 +222,13 @@ void handle_ipv4(EthernetFrameHeader const& eth, size_t frame_size, Time const& 
     }
 }
 
-void handle_icmp(EthernetFrameHeader const& eth, IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
+void handle_icmp(EthernetFrameHeader const& eth, IPv4Packet const& ipv4_packet, UnixDateTime const& packet_timestamp)
 {
     auto& icmp_header = *static_cast<ICMPHeader const*>(ipv4_packet.payload());
     dbgln_if(ICMP_DEBUG, "handle_icmp: source={}, destination={}, type={:#02x}, code={:#02x}", ipv4_packet.source().to_string(), ipv4_packet.destination().to_string(), icmp_header.type(), icmp_header.code());
 
     {
-        NonnullRefPtrVector<IPv4Socket> icmp_sockets;
+        Vector<NonnullRefPtr<IPv4Socket>> icmp_sockets;
         IPv4Socket::all_sockets().with_exclusive([&](auto& sockets) {
             for (auto& socket : sockets) {
                 if (socket.protocol() == (unsigned)IPv4Protocol::ICMP)
@@ -237,7 +236,7 @@ void handle_icmp(EthernetFrameHeader const& eth, IPv4Packet const& ipv4_packet, 
             }
         });
         for (auto& socket : icmp_sockets)
-            socket.did_receive(ipv4_packet.source(), 0, { &ipv4_packet, sizeof(IPv4Packet) + ipv4_packet.payload_size() }, packet_timestamp);
+            socket->did_receive(ipv4_packet.source(), 0, { &ipv4_packet, sizeof(IPv4Packet) + ipv4_packet.payload_size() }, packet_timestamp);
     }
 
     auto adapter = NetworkingManagement::the().from_ipv4_address(ipv4_packet.destination());
@@ -274,7 +273,7 @@ void handle_icmp(EthernetFrameHeader const& eth, IPv4Packet const& ipv4_packet, 
     }
 }
 
-void handle_udp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
+void handle_udp(IPv4Packet const& ipv4_packet, UnixDateTime const& packet_timestamp)
 {
     if (ipv4_packet.payload_size() < sizeof(UDPPacket)) {
         dbgln("handle_udp: Packet too small ({}, need {})", ipv4_packet.payload_size(), sizeof(UDPPacket));
@@ -302,11 +301,11 @@ void handle_udp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
         socket->did_receive(ipv4_packet.source(), udp_packet.source_port(), { &ipv4_packet, sizeof(IPv4Packet) + ipv4_packet.payload_size() }, packet_timestamp);
 }
 
-void send_delayed_tcp_ack(RefPtr<TCPSocket> socket)
+void send_delayed_tcp_ack(TCPSocket& socket)
 {
-    VERIFY(socket->mutex().is_locked());
-    if (!socket->should_delay_next_ack()) {
-        [[maybe_unused]] auto result = socket->send_ack();
+    VERIFY(socket.mutex().is_locked());
+    if (!socket.should_delay_next_ack()) {
+        [[maybe_unused]] auto result = socket.send_ack();
         return;
     }
 
@@ -315,11 +314,11 @@ void send_delayed_tcp_ack(RefPtr<TCPSocket> socket)
 
 void flush_delayed_tcp_acks()
 {
-    Vector<RefPtr<TCPSocket>, 32> remaining_sockets;
+    Vector<NonnullRefPtr<TCPSocket>, 32> remaining_sockets;
     for (auto& socket : *delayed_ack_sockets) {
         MutexLocker locker(socket->mutex());
         if (socket->should_delay_next_ack()) {
-            remaining_sockets.append(socket);
+            MUST(remaining_sockets.try_append(*socket));
             continue;
         }
         [[maybe_unused]] auto result = socket->send_ack();
@@ -368,7 +367,7 @@ void send_tcp_rst(IPv4Packet const& ipv4_packet, TCPPacket const& tcp_packet, Re
     routing_decision.adapter->release_packet_buffer(*packet);
 }
 
-void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
+void handle_tcp(IPv4Packet const& ipv4_packet, UnixDateTime const& packet_timestamp)
 {
     if (ipv4_packet.payload_size() < sizeof(TCPPacket)) {
         dbgln("handle_tcp: IPv4 payload is too small to be a TCP packet ({}, need {})", ipv4_packet.payload_size(), sizeof(TCPPacket));
@@ -435,11 +434,11 @@ void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
 
     switch (socket->state()) {
     case TCPSocket::State::Closed:
-        dbgln("handle_tcp: unexpected flags in Closed state");
+        dbgln("handle_tcp: unexpected flags in Closed state ({:x})", tcp_packet.flags());
         // TODO: we may want to send an RST here, maybe as a configurable option
         return;
     case TCPSocket::State::TimeWait:
-        dbgln("handle_tcp: unexpected flags in TimeWait state");
+        dbgln("handle_tcp: unexpected flags in TimeWait state ({:x})", tcp_packet.flags());
         (void)socket->send_tcp_packet(TCPFlags::RST);
         socket->set_state(TCPSocket::State::Closed);
         return;
@@ -472,7 +471,7 @@ void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
         switch (tcp_packet.flags()) {
         case TCPFlags::SYN:
             socket->set_ack_number(tcp_packet.sequence_number() + payload_size + 1);
-            (void)socket->send_ack(true);
+            (void)socket->send_tcp_packet(TCPFlags::SYN | TCPFlags::ACK);
             socket->set_state(TCPSocket::State::SynReceived);
             return;
         case TCPFlags::ACK | TCPFlags::SYN:
@@ -484,7 +483,7 @@ void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
             return;
         case TCPFlags::ACK | TCPFlags::FIN:
             socket->set_ack_number(tcp_packet.sequence_number() + payload_size + 1);
-            send_delayed_tcp_ack(socket);
+            send_delayed_tcp_ack(*socket);
             socket->set_state(TCPSocket::State::Closed);
             socket->set_error(TCPSocket::Error::FINDuringConnect);
             socket->set_setup_state(Socket::SetupState::Completed);
@@ -571,6 +570,12 @@ void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
         case TCPFlags::FIN:
             socket->set_ack_number(tcp_packet.sequence_number() + payload_size + 1);
             socket->set_state(TCPSocket::State::Closing);
+            (void)socket->send_ack(true);
+            return;
+        case TCPFlags::FIN | TCPFlags::ACK:
+            socket->set_ack_number(tcp_packet.sequence_number() + payload_size + 1);
+            socket->set_state(TCPSocket::State::TimeWait);
+            (void)socket->send_ack(true);
             return;
         default:
             dbgln("handle_tcp: unexpected flags in FinWait1 state ({:x})", tcp_packet.flags());
@@ -583,8 +588,10 @@ void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
         case TCPFlags::FIN:
             socket->set_ack_number(tcp_packet.sequence_number() + payload_size + 1);
             socket->set_state(TCPSocket::State::TimeWait);
+            (void)socket->send_ack(true);
             return;
         case TCPFlags::ACK | TCPFlags::RST:
+            // FIXME: Verify that this transition is legitimate.
             socket->set_state(TCPSocket::State::Closed);
             return;
         default:
@@ -628,7 +635,7 @@ void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
                 socket->did_receive(ipv4_packet.source(), tcp_packet.source_port(), { &ipv4_packet, sizeof(IPv4Packet) + ipv4_packet.payload_size() }, packet_timestamp);
 
             socket->set_ack_number(tcp_packet.sequence_number() + payload_size + 1);
-            send_delayed_tcp_ack(socket);
+            send_delayed_tcp_ack(*socket);
             socket->set_state(TCPSocket::State::CloseWait);
             socket->set_connected(false);
             return;
@@ -639,7 +646,7 @@ void handle_tcp(IPv4Packet const& ipv4_packet, Time const& packet_timestamp)
                 socket->set_ack_number(tcp_packet.sequence_number() + payload_size);
                 dbgln_if(TCP_DEBUG, "Got packet with ack_no={}, seq_no={}, payload_size={}, acking it with new ack_no={}, seq_no={}",
                     tcp_packet.ack_number(), tcp_packet.sequence_number(), payload_size, socket->ack_number(), socket->sequence_number());
-                send_delayed_tcp_ack(socket);
+                send_delayed_tcp_ack(*socket);
             }
         }
     }
@@ -649,14 +656,16 @@ void retransmit_tcp_packets()
 {
     // We must keep the sockets alive until after we've unlocked the hash table
     // in case retransmit_packets() realizes that it wants to close the socket.
-    NonnullRefPtrVector<TCPSocket, 16> sockets;
-    TCPSocket::sockets_for_retransmit().for_each_shared([&](const auto& socket) {
-        sockets.append(socket);
+    Vector<NonnullRefPtr<TCPSocket>, 16> sockets;
+    TCPSocket::sockets_for_retransmit().for_each_shared([&](auto const& socket) {
+        // We ignore allocation failures above the first 16 guaranteed socket slots, as
+        // we will just retransmit their packets the next time around
+        (void)sockets.try_append(socket);
     });
 
     for (auto& socket : sockets) {
-        MutexLocker socket_locker(socket.mutex());
-        socket.retransmit_packets();
+        MutexLocker socket_locker(socket->mutex());
+        socket->retransmit_packets();
     }
 }
 

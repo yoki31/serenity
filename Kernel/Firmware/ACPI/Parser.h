@@ -6,15 +6,16 @@
 
 #pragma once
 
-#include <AK/RefPtr.h>
 #include <AK/Types.h>
 #include <Kernel/CommandLine.h>
-#include <Kernel/FileSystem/SysFSComponent.h>
+#include <Kernel/FileSystem/SysFS/Component.h>
+#include <Kernel/FileSystem/SysFS/Subsystems/Firmware/Directory.h>
 #include <Kernel/Firmware/ACPI/Definitions.h>
 #include <Kernel/Firmware/ACPI/Initialize.h>
-#include <Kernel/Firmware/SysFSFirmware.h>
 #include <Kernel/Interrupts/IRQHandler.h>
+#include <Kernel/Library/LockRefPtr.h>
 #include <Kernel/Memory/Region.h>
+#include <Kernel/Memory/TypedMapping.h>
 #include <Kernel/PhysicalAddress.h>
 #include <Kernel/VirtualAddress.h>
 
@@ -22,24 +23,29 @@ namespace Kernel::ACPI {
 
 class ACPISysFSDirectory : public SysFSDirectory {
 public:
-    static ErrorOr<NonnullRefPtr<ACPISysFSDirectory>> try_create(FirmwareSysFSDirectory& firmware_directory);
+    virtual StringView name() const override { return "acpi"sv; }
+    static NonnullLockRefPtr<ACPISysFSDirectory> must_create(FirmwareSysFSDirectory& firmware_directory);
 
 private:
+    void find_tables_and_register_them_as_components();
     explicit ACPISysFSDirectory(FirmwareSysFSDirectory& firmware_directory);
 };
 
 class ACPISysFSComponent : public SysFSComponent {
 public:
-    static NonnullRefPtr<ACPISysFSComponent> create(String name, PhysicalAddress, size_t table_size);
-
+    static NonnullLockRefPtr<ACPISysFSComponent> create(StringView name, PhysicalAddress, size_t table_size);
+    virtual StringView name() const override { return m_table_name->view(); }
     virtual ErrorOr<size_t> read_bytes(off_t, size_t, UserOrKernelBuffer&, OpenFileDescription*) const override;
+
+    virtual size_t size() const override final { return m_length; }
 
 protected:
     ErrorOr<NonnullOwnPtr<KBuffer>> try_to_generate_buffer() const;
-    ACPISysFSComponent(String name, PhysicalAddress, size_t table_size);
+    ACPISysFSComponent(NonnullOwnPtr<KString> table_name, PhysicalAddress, size_t table_size);
 
     PhysicalAddress m_paddr;
-    size_t m_length;
+    size_t m_length { 0 };
+    NonnullOwnPtr<KString> m_table_name;
 };
 
 class Parser final : public IRQHandler {
@@ -49,7 +55,7 @@ public:
     static void must_initialize(PhysicalAddress rsdp, PhysicalAddress fadt, u8 irq_number);
 
     virtual StringView purpose() const override { return "ACPI Parser"sv; }
-    virtual bool handle_irq(const RegisterState&) override;
+    virtual bool handle_irq(RegisterState const&) override;
 
     Optional<PhysicalAddress> find_table(StringView signature);
 
@@ -71,10 +77,10 @@ public:
         return m_x86_specific_flags.keyboard_8042;
     }
 
-    const FADTFlags::HardwareFeatures& hardware_features() const { return m_hardware_flags; }
-    const FADTFlags::x86_Specific_Flags& x86_specific_flags() const { return m_x86_specific_flags; }
+    FADTFlags::HardwareFeatures const& hardware_features() const { return m_hardware_flags; }
+    FADTFlags::x86_Specific_Flags const& x86_specific_flags() const { return m_x86_specific_flags; }
 
-    ~Parser() {};
+    ~Parser() = default;
 
 private:
     Parser(PhysicalAddress rsdp, PhysicalAddress fadt, u8 irq_number);
@@ -85,9 +91,10 @@ private:
     size_t get_table_size(PhysicalAddress);
     u8 get_table_revision(PhysicalAddress);
     void process_fadt_data();
+    void process_dsdt();
 
-    bool validate_reset_register();
-    void access_generic_address(const Structures::GenericAddressStructure&, u32 value);
+    bool validate_reset_register(Memory::TypedMapping<Structures::FADT> const&);
+    void access_generic_address(Structures::GenericAddressStructure const&, u32 value);
 
     PhysicalAddress m_rsdp;
     PhysicalAddress m_main_system_description_table;

@@ -1,12 +1,14 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "TerminalWrapper.h"
-#include <AK/String.h>
-#include <LibCore/ConfigFile.h>
+#include <AK/DeprecatedString.h>
+#include <LibCore/System.h>
+#include <LibGUI/Application.h>
 #include <LibGUI/BoxLayout.h>
 #include <LibGUI/MessageBox.h>
 #include <LibVT/TerminalWidget.h>
@@ -22,44 +24,83 @@
 
 namespace HackStudio {
 
-void TerminalWrapper::run_command(const String& command)
+ErrorOr<void> TerminalWrapper::run_command(DeprecatedString const& command, Optional<DeprecatedString> working_directory, WaitForExit wait_for_exit, Optional<StringView> failure_message)
 {
     if (m_pid != -1) {
         GUI::MessageBox::show(window(),
-            "A command is already running in this TerminalWrapper",
-            "Can't run command",
+            "A command is already running in this TerminalWrapper"sv,
+            "Can't run command"sv,
             GUI::MessageBox::Type::Error);
-        return;
+        return {};
     }
 
-    int ptm_fd = posix_openpt(O_RDWR | O_CLOEXEC);
-    if (ptm_fd < 0) {
-        perror("posix_openpt");
-        VERIFY_NOT_REACHED();
+    auto ptm_fd = TRY(setup_master_pseudoterminal());
+
+    m_child_exited = false;
+    m_child_exit_status.clear();
+
+    m_pid = TRY(Core::System::fork());
+
+    if (m_pid > 0) {
+        if (wait_for_exit == WaitForExit::Yes) {
+            GUI::Application::the()->event_loop().spin_until([this]() {
+                return m_child_exited;
+            });
+
+            VERIFY(m_child_exit_status.has_value());
+            if (m_child_exit_status.value() != 0)
+                return Error::from_string_view(failure_message.value_or("Command execution failed"sv));
+        }
+
+        return {};
     }
-    if (grantpt(ptm_fd) < 0) {
-        perror("grantpt");
-        VERIFY_NOT_REACHED();
-    }
-    if (unlockpt(ptm_fd) < 0) {
-        perror("unlockpt");
-        VERIFY_NOT_REACHED();
-    }
+
+    if (working_directory.has_value())
+        TRY(Core::System::chdir(working_directory->view()));
+
+    TRY(setup_slave_pseudoterminal(ptm_fd));
+
+    auto args = command.split_view(' ');
+    VERIFY(!args.is_empty());
+    TRY(Core::System::exec(args[0], args, Core::System::SearchInPath::Yes));
+    VERIFY_NOT_REACHED();
+}
+
+ErrorOr<int> TerminalWrapper::setup_master_pseudoterminal(WaitForChildOnExit wait_for_child)
+{
+    int ptm_fd = TRY(Core::System::posix_openpt(O_RDWR | O_CLOEXEC));
+    bool error_happened = true;
+
+    ScopeGuard close_ptm { [&]() {
+        if (error_happened) {
+            if (auto result = Core::System::close(ptm_fd); result.is_error())
+                warnln("{}", result.release_error());
+        }
+    } };
+
+    TRY(Core::System::grantpt(ptm_fd));
+    TRY(Core::System::unlockpt(ptm_fd));
 
     m_terminal_widget->set_pty_master_fd(ptm_fd);
-    m_terminal_widget->on_command_exit = [this] {
-        int wstatus;
-        int rc = waitpid(m_pid, &wstatus, 0);
-        if (rc < 0) {
-            perror("waitpid");
-            VERIFY_NOT_REACHED();
-        }
-        if (WIFEXITED(wstatus)) {
-            m_terminal_widget->inject_string(String::formatted("\033[{};1m(Command exited with code {})\033[0m\n", wstatus == 0 ? 32 : 31, WEXITSTATUS(wstatus)));
-        } else if (WIFSTOPPED(wstatus)) {
-            m_terminal_widget->inject_string("\033[34;1m(Command stopped!)\033[0m\n");
-        } else if (WIFSIGNALED(wstatus)) {
-            m_terminal_widget->inject_string(String::formatted("\033[34;1m(Command signaled with {}!)\033[0m\n", strsignal(WTERMSIG(wstatus))));
+    m_terminal_widget->on_command_exit = [this, wait_for_child] {
+        if (wait_for_child == WaitForChildOnExit::Yes) {
+            auto result = Core::System::waitpid(m_pid, 0);
+            if (result.is_error()) {
+                warnln("{}", result.error());
+                VERIFY_NOT_REACHED();
+            }
+            int wstatus = result.release_value().status;
+
+            if (WIFEXITED(wstatus)) {
+                m_terminal_widget->inject_string(DeprecatedString::formatted("\033[{};1m(Command exited with code {})\033[0m\r\n", wstatus == 0 ? 32 : 31, WEXITSTATUS(wstatus)));
+            } else if (WIFSTOPPED(wstatus)) {
+                m_terminal_widget->inject_string("\033[34;1m(Command stopped!)\033[0m\r\n"sv);
+            } else if (WIFSIGNALED(wstatus)) {
+                m_terminal_widget->inject_string(DeprecatedString::formatted("\033[34;1m(Command signaled with {}!)\033[0m\r\n", strsignal(WTERMSIG(wstatus))));
+            }
+
+            m_child_exit_status = WEXITSTATUS(wstatus);
+            m_child_exited = true;
         }
         m_pid = -1;
 
@@ -67,89 +108,52 @@ void TerminalWrapper::run_command(const String& command)
             on_command_exit();
     };
 
-    m_pid = fork();
-    if (m_pid < 0) {
-        perror("fork");
-        return;
-    }
-
-    if (m_pid == 0) {
-        // Create a new process group.
-        setsid();
-
-        const char* tty_name = ptsname(ptm_fd);
-        if (!tty_name) {
-            perror("ptsname");
-            exit(1);
-        }
-        close(ptm_fd);
-        int pts_fd = open(tty_name, O_RDWR);
-        if (pts_fd < 0) {
-            perror("open");
-            exit(1);
-        }
-
-        tcsetpgrp(pts_fd, getpid());
-
-        // NOTE: It's okay if this fails.
-        int rc = ioctl(0, TIOCNOTTY);
-
-        close(0);
-        close(1);
-        close(2);
-
-        rc = dup2(pts_fd, 0);
-        if (rc < 0) {
-            perror("dup2");
-            exit(1);
-        }
-        rc = dup2(pts_fd, 1);
-        if (rc < 0) {
-            perror("dup2");
-            exit(1);
-        }
-        rc = dup2(pts_fd, 2);
-        if (rc < 0) {
-            perror("dup2");
-            exit(1);
-        }
-        rc = close(pts_fd);
-        if (rc < 0) {
-            perror("close");
-            exit(1);
-        }
-        rc = ioctl(0, TIOCSCTTY);
-        if (rc < 0) {
-            perror("ioctl(TIOCSCTTY)");
-            exit(1);
-        }
-
-        setenv("TERM", "xterm", true);
-
-        auto parts = command.split(' ');
-        VERIFY(!parts.is_empty());
-        const char** args = (const char**)calloc(parts.size() + 1, sizeof(const char*));
-        for (size_t i = 0; i < parts.size(); i++) {
-            args[i] = parts[i].characters();
-        }
-        rc = execvp(args[0], const_cast<char**>(args));
-        if (rc < 0) {
-            perror("execve");
-            exit(1);
-        }
-        VERIFY_NOT_REACHED();
-    }
-
-    // (In parent process)
     terminal().scroll_to_bottom();
+
+    error_happened = false;
+
+    return ptm_fd;
 }
 
-void TerminalWrapper::kill_running_command()
+ErrorOr<void> TerminalWrapper::setup_slave_pseudoterminal(int master_fd)
+{
+    setsid();
+
+    auto tty_name = TRY(Core::System::ptsname(master_fd));
+
+    close(master_fd);
+
+    int pts_fd = TRY(Core::System::open(tty_name, O_RDWR));
+
+    tcsetpgrp(pts_fd, getpid());
+
+    // NOTE: It's okay if this fails.
+    ioctl(0, TIOCNOTTY);
+
+    close(0);
+    close(1);
+    close(2);
+
+    TRY(Core::System::dup2(pts_fd, 0));
+    TRY(Core::System::dup2(pts_fd, 1));
+    TRY(Core::System::dup2(pts_fd, 2));
+
+    TRY(Core::System::close(pts_fd));
+
+    TRY(Core::System::ioctl(0, TIOCSCTTY));
+
+    setenv("TERM", "xterm", true);
+
+    return {};
+}
+
+ErrorOr<void> TerminalWrapper::kill_running_command()
 {
     VERIFY(m_pid != -1);
 
     // Kill our child process and its whole process group.
-    [[maybe_unused]] auto rc = killpg(m_pid, SIGTERM);
+    TRY(Core::System::killpg(m_pid, SIGTERM));
+    return {};
 }
 
 void TerminalWrapper::clear_including_history()
@@ -163,13 +167,17 @@ TerminalWrapper::TerminalWrapper(bool user_spawned)
     set_layout<GUI::VerticalBoxLayout>();
 
     m_terminal_widget = add<VT::TerminalWidget>(-1, false);
-
-    if (user_spawned)
-        run_command("Shell");
+    if (user_spawned) {
+        auto maybe_error = run_command("Shell");
+        if (maybe_error.is_error())
+            warnln("{}", maybe_error.release_error());
+    }
 }
 
-TerminalWrapper::~TerminalWrapper()
+int TerminalWrapper::child_exit_status() const
 {
+    VERIFY(m_child_exit_status.has_value());
+    return m_child_exit_status.value();
 }
 
 }

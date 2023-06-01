@@ -6,7 +6,7 @@
 
 #include <AK/BumpAllocator.h>
 #include <AK/Debug.h>
-#include <AK/String.h>
+#include <AK/DeprecatedString.h>
 #include <AK/StringBuilder.h>
 #include <LibRegex/RegexMatcher.h>
 #include <LibRegex/RegexParser.h>
@@ -31,7 +31,7 @@ regex::Parser::Result Regex<Parser>::parse_pattern(StringView pattern, typename 
 }
 
 template<class Parser>
-Regex<Parser>::Regex(String pattern, typename ParserTraits<Parser>::OptionsType regex_options)
+Regex<Parser>::Regex(DeprecatedString pattern, typename ParserTraits<Parser>::OptionsType regex_options)
     : pattern_value(move(pattern))
 {
     regex::Lexer lexer(pattern_value);
@@ -41,17 +41,17 @@ Regex<Parser>::Regex(String pattern, typename ParserTraits<Parser>::OptionsType 
 
     run_optimization_passes();
     if (parser_result.error == regex::Error::NoError)
-        matcher = make<Matcher<Parser>>(this, regex_options);
+        matcher = make<Matcher<Parser>>(this, static_cast<decltype(regex_options.value())>(parser_result.options.value()));
 }
 
 template<class Parser>
-Regex<Parser>::Regex(regex::Parser::Result parse_result, String pattern, typename ParserTraits<Parser>::OptionsType regex_options)
+Regex<Parser>::Regex(regex::Parser::Result parse_result, DeprecatedString pattern, typename ParserTraits<Parser>::OptionsType regex_options)
     : pattern_value(move(pattern))
     , parser_result(move(parse_result))
 {
     run_optimization_passes();
     if (parser_result.error == regex::Error::NoError)
-        matcher = make<Matcher<Parser>>(this, regex_options);
+        matcher = make<Matcher<Parser>>(this, regex_options | static_cast<decltype(regex_options.value())>(parse_result.options.value()));
 }
 
 template<class Parser>
@@ -87,16 +87,16 @@ typename ParserTraits<Parser>::OptionsType Regex<Parser>::options() const
 }
 
 template<class Parser>
-String Regex<Parser>::error_string(Optional<String> message) const
+DeprecatedString Regex<Parser>::error_string(Optional<DeprecatedString> message) const
 {
     StringBuilder eb;
-    eb.append("Error during parsing of regular expression:\n");
+    eb.append("Error during parsing of regular expression:\n"sv);
     eb.appendff("    {}\n    ", pattern_value);
     for (size_t i = 0; i < parser_result.error_token.position(); ++i)
         eb.append(' ');
 
     eb.appendff("^---- {}", message.value_or(get_error_string(parser_result.error)));
-    return eb.build();
+    return eb.to_deprecated_string();
 }
 
 template<typename Parser>
@@ -104,8 +104,10 @@ RegexResult Matcher<Parser>::match(RegexStringView view, Optional<typename Parse
 {
     AllOptions options = m_regex_options | regex_options.value_or({}).value();
 
-    if (options.has_flag_set(AllFlags::Multiline))
-        return match(view.lines(), regex_options); // FIXME: how do we know, which line ending a line has (1char or 2char)? This is needed to get the correct match offsets from start of string...
+    if constexpr (!IsSame<Parser, ECMA262>) {
+        if (options.has_flag_set(AllFlags::Multiline))
+            return match(view.lines(), regex_options); // FIXME: how do we know, which line ending a line has (1char or 2char)? This is needed to get the correct match offsets from start of string...
+    }
 
     Vector<RegexStringView> views;
     views.append(view);
@@ -130,13 +132,13 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
     size_t lines_to_skip = 0;
 
     bool unicode = input.regex_options.has_flag_set(AllFlags::Unicode);
-    for (auto& view : views)
+    for (auto const& view : views)
         const_cast<RegexStringView&>(view).set_unicode(unicode);
 
     if (input.regex_options.has_flag_set(AllFlags::Internal_Stateful)) {
         if (views.size() > 1 && input.start_offset > views.first().length()) {
             dbgln_if(REGEX_DEBUG, "Started with start={}, goff={}, skip={}", input.start_offset, input.global_offset, lines_to_skip);
-            for (auto& view : views) {
+            for (auto const& view : views) {
                 if (input.start_offset < view.length() + 1)
                     break;
                 ++lines_to_skip;
@@ -154,7 +156,7 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
 
         for (size_t j = 0; j < c_match_preallocation_count; ++j) {
             state.matches.empend();
-            state.capture_group_matches.unchecked_append({});
+            state.capture_group_matches.empend();
             state.capture_group_matches.at(j).ensure_capacity(capture_groups_count);
             for (size_t k = 0; k < capture_groups_count; ++k)
                 state.capture_group_matches.at(j).unchecked_append({});
@@ -167,7 +169,7 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
 
         VERIFY(start_position + state.string_position - start_position <= input.view.length());
         if (input.regex_options.has_flag_set(AllFlags::StringCopyMatches)) {
-            state.matches.at(input.match_index) = { input.view.substring_view(start_position, state.string_position - start_position).to_string(), input.line, start_position, input.global_offset + start_position };
+            state.matches.at(input.match_index) = { input.view.substring_view(start_position, state.string_position - start_position).to_deprecated_string(), input.line, start_position, input.global_offset + start_position };
         } else { // let the view point to the original string ...
             state.matches.at(input.match_index) = { input.view.substring_view(start_position, state.string_position - start_position), input.line, start_position, input.global_offset + start_position };
         }
@@ -178,10 +180,12 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
 #endif
 
     bool continue_search = input.regex_options.has_flag_set(AllFlags::Global) || input.regex_options.has_flag_set(AllFlags::Multiline);
-    if (input.regex_options.has_flag_set(AllFlags::Internal_Stateful))
+    if (input.regex_options.has_flag_set(AllFlags::Sticky))
         continue_search = false;
 
-    for (auto& view : views) {
+    auto single_match_only = input.regex_options.has_flag_set(AllFlags::SingleMatch);
+
+    for (auto const& view : views) {
         if (lines_to_skip != 0) {
             ++input.line;
             --lines_to_skip;
@@ -212,19 +216,25 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
 
             auto success = execute(input, state, temp_operations);
             // This success is acceptable only if it doesn't read anything from the input (input length is 0).
-            if (state.string_position <= view_index) {
-                if (success.has_value() && success.value()) {
-                    operations = temp_operations;
-                    if (!match_count) {
-                        // Nothing was *actually* matched, so append an empty match.
-                        append_match(input, state, view_index);
-                        ++match_count;
-                    }
+            if (success && (state.string_position <= view_index)) {
+                operations = temp_operations;
+                if (!match_count) {
+                    // Nothing was *actually* matched, so append an empty match.
+                    append_match(input, state, view_index);
+                    ++match_count;
+
+                    // This prevents a regex pattern like ".*" from matching the empty string
+                    // multiple times, once in this block and once in the following for loop.
+                    if (view_index == 0 && view_length == 0)
+                        ++view_index;
                 }
             }
         }
 
-        for (; view_index < view_length; ++view_index) {
+        for (; view_index <= view_length; ++view_index) {
+            if (view_index == view_length && input.regex_options.has_flag_set(AllFlags::Multiline))
+                break;
+
             auto& match_length_minimum = m_pattern->parser_result.match_length_minimum;
             // FIXME: More performant would be to know the remaining minimum string
             //        length needed to match from the current position onwards within
@@ -244,10 +254,7 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
             state.repetition_marks.clear();
 
             auto success = execute(input, state, operations);
-            if (!success.has_value())
-                return { false, 0, {}, {}, {}, operations };
-
-            if (success.value()) {
+            if (success) {
                 succeeded = true;
 
                 if (input.regex_options.has_flag_set(AllFlags::MatchNotEndOfLine) && state.string_position == input.view.length()) {
@@ -271,13 +278,15 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
 
                     bool has_zero_length = state.string_position == view_index;
                     view_index = state.string_position - (has_zero_length ? 0 : 1);
+                    if (single_match_only)
+                        break;
                     continue;
-
-                } else if (input.regex_options.has_flag_set(AllFlags::Internal_Stateful)) {
+                }
+                if (input.regex_options.has_flag_set(AllFlags::Internal_Stateful)) {
                     append_match(input, state, view_index);
                     break;
-
-                } else if (state.string_position < view_length) {
+                }
+                if (state.string_position < view_length) {
                     return { false, 0, {}, {}, {}, operations };
                 }
 
@@ -302,8 +311,8 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
     RegexResult result {
         match_count != 0,
         match_count,
-        move(state.matches),
-        move(state.capture_group_matches),
+        move(state.matches).release(),
+        move(state.capture_group_matches).release(),
         operations,
         m_pattern->parser_result.capture_groups_count,
         m_pattern->parser_result.named_capture_groups_count,
@@ -408,10 +417,12 @@ private:
 };
 
 template<class Parser>
-Optional<bool> Matcher<Parser>::execute(MatchInput const& input, MatchState& state, size_t& operations) const
+bool Matcher<Parser>::execute(MatchInput const& input, MatchState& state, size_t& operations) const
 {
     BumpAllocatedLinkedList<MatchState> states_to_try_next;
+#if REGEX_DEBUG
     size_t recursion_level = 0;
+#endif
 
     auto& bytecode = m_pattern->parser_result.bytecode;
 
@@ -477,7 +488,9 @@ Optional<bool> Matcher<Parser>::execute(MatchInput const& input, MatchState& sta
                 states_to_try_next.last().initiating_fork = state.instruction_position - opcode.size();
             }
             state.instruction_position = state.fork_at_position;
+#if REGEX_DEBUG
             ++recursion_level;
+#endif
             continue;
         }
         case ExecutionResult::Continue:
@@ -492,12 +505,12 @@ Optional<bool> Matcher<Parser>::execute(MatchInput const& input, MatchState& sta
             return false;
         case ExecutionResult::Failed_ExecuteLowPrioForks: {
             if (states_to_try_next.is_empty()) {
-                if (input.regex_options.has_flag_set(AllFlags::Internal_Stateful))
-                    return {};
                 return false;
             }
             state = states_to_try_next.take_last();
+#if REGEX_DEBUG
             ++recursion_level;
+#endif
             continue;
         }
         }

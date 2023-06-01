@@ -27,7 +27,7 @@ int getopt_long(int argc, char** argv, const char* short_options, const struct o
 ## Description
 
 `getopt()` and `getopt_long()` parse options according to the syntax specified
-in [`getopt`(5)](../man5/getopt.md). `getopt()` only supports short options;
+in [`getopt`(5)](help://man/5/getopt). `getopt()` only supports short options;
 `getopt_long()` supports both short and long options.
 
 One invocation of either function extracts at most one option from command line
@@ -110,7 +110,7 @@ while (true) {
         { "pad", optional_argument, nullptr, 'p' },
         { "verbose", no_argument, &verbose, 1 },
     };
-    int opt = getopt(argc, argv, short_options, long_options, nullptr);
+    int opt = getopt_long(argc, argv, short_options, long_options, nullptr);
     switch (opt) {
     case -1:
         // No more options.
@@ -150,4 +150,4 @@ const char* file_name = argv[optind];
 
 ## See also
 
-* [`getopt`(5)](../man5/getopt.md)
+* [`getopt`(5)](help://man/5/getopt)

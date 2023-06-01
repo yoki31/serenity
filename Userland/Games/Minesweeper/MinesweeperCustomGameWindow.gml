@@ -1,16 +1,15 @@
 @GUI::Widget {
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
         margins: [4]
+        spacing: 6
     }
 
     @GUI::GroupBox {
         title: "Field"
         autosize: true
-
         layout: @GUI::HorizontalBoxLayout {
-            margins: [16, 6, 6]
+            margins: [6]
         }
 
         @GUI::Label {
@@ -25,9 +24,8 @@
             fixed_width: 40
         }
 
-        @GUI::VerticalSeparator {
-        }
-        
+        @GUI::Layout::Spacer {}
+
         @GUI::Label {
             text: "Rows: "
             autosize: true
@@ -40,8 +38,7 @@
             fixed_width: 40
         }
 
-        @GUI::VerticalSeparator {
-        }
+        @GUI::Layout::Spacer {}
 
         @GUI::Label {
             text: "Mines: "
@@ -57,24 +54,20 @@
     }
 
     @GUI::Widget {
-        max_height: 24
-
         layout: @GUI::HorizontalBoxLayout {
+            spacing: 10
         }
 
-        @GUI::Widget {
-        }
+        @GUI::Layout::Spacer {}
 
-        @GUI::Button {
+        @GUI::DialogButton {
             name: "ok_button"
             text: "OK"
-            max_width: 75
         }
 
-        @GUI::Button {
+        @GUI::DialogButton {
             name: "cancel_button"
             text: "Cancel"
-            max_width: 75
         }
     }
 }

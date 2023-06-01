@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2020-2022, Andreas Kling <kling@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,6 +8,8 @@
 
 #include <AK/OwnPtr.h>
 #include <LibWeb/Forward.h>
+#include <LibWeb/Layout/AvailableSpace.h>
+#include <LibWeb/Layout/LayoutState.h>
 
 namespace Web::Layout {
 
@@ -19,62 +21,124 @@ public:
         Block,
         Inline,
         Flex,
+        Grid,
         Table,
         SVG,
+        InternalReplaced, // Internal hack formatting context for replaced elements. FIXME: Get rid of this.
+        InternalDummy,    // Internal hack formatting context for unimplemented things. FIXME: Get rid of this.
     };
 
-    virtual void run(Box&, LayoutMode) = 0;
+    virtual void run(Box const&, LayoutMode, AvailableSpace const&) = 0;
 
-    Box& context_box() { return m_context_box; }
-    const Box& context_box() const { return m_context_box; }
+    // This function returns the automatic content height of the context's root box.
+    virtual CSSPixels automatic_content_width() const = 0;
+
+    // This function returns the automatic content height of the context's root box.
+    virtual CSSPixels automatic_content_height() const = 0;
+
+    Box const& context_box() const { return m_context_box; }
 
     FormattingContext* parent() { return m_parent; }
-    const FormattingContext* parent() const { return m_parent; }
+    FormattingContext const* parent() const { return m_parent; }
 
     Type type() const { return m_type; }
     bool is_block_formatting_context() const { return type() == Type::Block; }
 
     virtual bool inhibits_floating() const { return false; }
 
-    static bool creates_block_formatting_context(const Box&);
+    [[nodiscard]] static Optional<Type> formatting_context_type_created_by_box(Box const&);
 
-    static float compute_width_for_replaced_element(const ReplacedBox&);
-    static float compute_height_for_replaced_element(const ReplacedBox&);
+    static bool creates_block_formatting_context(Box const&);
 
-    OwnPtr<FormattingContext> create_independent_formatting_context_if_needed(Box& child_box);
+    CSSPixels compute_width_for_replaced_element(ReplacedBox const&, AvailableSpace const&) const;
+    CSSPixels compute_height_for_replaced_element(ReplacedBox const&, AvailableSpace const&) const;
+
+    OwnPtr<FormattingContext> create_independent_formatting_context_if_needed(LayoutState&, Box const& child_box);
+
+    virtual void parent_context_did_dimension_child_root_box() { }
+
+    CSSPixels calculate_min_content_width(Layout::Box const&) const;
+    CSSPixels calculate_max_content_width(Layout::Box const&) const;
+    CSSPixels calculate_min_content_height(Layout::Box const&, AvailableSize const& available_width) const;
+    CSSPixels calculate_max_content_height(Layout::Box const&, AvailableSize const& available_width) const;
+
+    CSSPixels calculate_fit_content_height(Layout::Box const&, AvailableSpace const&) const;
+    CSSPixels calculate_fit_content_width(Layout::Box const&, AvailableSpace const&) const;
+
+    CSS::Length calculate_inner_width(Layout::Box const&, AvailableSize const&, CSS::Size const& width) const;
+    CSS::Length calculate_inner_height(Layout::Box const&, AvailableSize const&, CSS::Size const& height) const;
+
+    virtual CSSPixels greatest_child_width(Box const&) const;
+
+    [[nodiscard]] CSSPixelRect absolute_content_rect(Box const&) const;
+    [[nodiscard]] CSSPixelRect margin_box_rect(Box const&) const;
+    [[nodiscard]] CSSPixelRect margin_box_rect_in_ancestor_coordinate_space(Box const&, Box const& ancestor_box) const;
+    [[nodiscard]] CSSPixelRect border_box_rect(Box const&) const;
+    [[nodiscard]] CSSPixelRect border_box_rect_in_ancestor_coordinate_space(Box const&, Box const& ancestor_box) const;
+    [[nodiscard]] CSSPixelRect content_box_rect(Box const&) const;
+    [[nodiscard]] CSSPixelRect content_box_rect_in_ancestor_coordinate_space(Box const&, Box const& ancestor_box) const;
+    [[nodiscard]] CSSPixels box_baseline(Box const&) const;
+    [[nodiscard]] CSSPixelRect content_box_rect_in_static_position_ancestor_coordinate_space(Box const&, Box const& ancestor_box) const;
+
+    [[nodiscard]] CSSPixels containing_block_width_for(Box const&) const;
+    [[nodiscard]] CSSPixels containing_block_height_for(Box const&) const;
+
+    [[nodiscard]] CSSPixels calculate_stretch_fit_width(Box const&, AvailableSize const&) const;
+    [[nodiscard]] CSSPixels calculate_stretch_fit_height(Box const&, AvailableSize const&) const;
+
+    virtual bool can_determine_size_of_child() const { return false; }
+    virtual void determine_width_of_child(Box const&, AvailableSpace const&) { }
+    virtual void determine_height_of_child(Box const&, AvailableSpace const&) { }
+
+    virtual CSSPixelPoint calculate_static_position(Box const&) const;
+    bool can_skip_is_anonymous_text_run(Box&);
 
 protected:
-    FormattingContext(Type, Box&, FormattingContext* parent = nullptr);
+    FormattingContext(Type, LayoutState&, Box const&, FormattingContext* parent = nullptr);
 
-    OwnPtr<FormattingContext> layout_inside(Box&, LayoutMode);
+    static bool should_treat_width_as_auto(Box const&, AvailableSpace const&);
+    static bool should_treat_height_as_auto(Box const&, AvailableSpace const&);
+
+    OwnPtr<FormattingContext> layout_inside(Box const&, LayoutMode, AvailableSpace const&);
+    void compute_inset(Box const& box);
+
+    struct SpaceUsedByFloats {
+        CSSPixels left { 0 };
+        CSSPixels right { 0 };
+    };
 
     struct ShrinkToFitResult {
-        float preferred_width { 0 };
-        float preferred_minimum_width { 0 };
+        CSSPixels preferred_width { 0 };
+        CSSPixels preferred_minimum_width { 0 };
     };
 
-    static float tentative_width_for_replaced_element(const ReplacedBox&, const CSS::Length& width);
-    static float tentative_height_for_replaced_element(const ReplacedBox&, const CSS::Length& height);
-    enum ConsiderFloats {
-        Yes,
-        No,
+    CSSPixels tentative_width_for_replaced_element(ReplacedBox const&, CSS::Size const& computed_width, AvailableSpace const&) const;
+    CSSPixels tentative_height_for_replaced_element(ReplacedBox const&, CSS::Size const& computed_height, AvailableSpace const&) const;
+    CSSPixels compute_auto_height_for_block_formatting_context_root(Box const&) const;
+
+    [[nodiscard]] CSSPixelSize solve_replaced_size_constraint(CSSPixels input_width, CSSPixels input_height, ReplacedBox const&) const;
+
+    ShrinkToFitResult calculate_shrink_to_fit_widths(Box const&);
+
+    void layout_absolutely_positioned_element(Box const&, AvailableSpace const&);
+    void compute_width_for_absolutely_positioned_element(Box const&, AvailableSpace const&);
+    void compute_width_for_absolutely_positioned_non_replaced_element(Box const&, AvailableSpace const&);
+    void compute_width_for_absolutely_positioned_replaced_element(ReplacedBox const&, AvailableSpace const&);
+
+    enum class BeforeOrAfterInsideLayout {
+        Before,
+        After,
     };
-    static float compute_auto_height_for_block_level_element(Box const&, ConsiderFloats consider_floats = ConsiderFloats::Yes);
-
-    ShrinkToFitResult calculate_shrink_to_fit_widths(Box&);
-
-    void layout_absolutely_positioned_element(Box&);
-    void compute_width_for_absolutely_positioned_element(Box&);
-    void compute_width_for_absolutely_positioned_non_replaced_element(Box&);
-    void compute_width_for_absolutely_positioned_replaced_element(ReplacedBox&);
-    void compute_height_for_absolutely_positioned_element(Box&);
-    void compute_height_for_absolutely_positioned_non_replaced_element(Box&);
-    void compute_height_for_absolutely_positioned_replaced_element(ReplacedBox&);
+    void compute_height_for_absolutely_positioned_element(Box const&, AvailableSpace const&, BeforeOrAfterInsideLayout);
+    void compute_height_for_absolutely_positioned_non_replaced_element(Box const&, AvailableSpace const&, BeforeOrAfterInsideLayout);
+    void compute_height_for_absolutely_positioned_replaced_element(ReplacedBox const&, AvailableSpace const&, BeforeOrAfterInsideLayout);
 
     Type m_type {};
 
     FormattingContext* m_parent { nullptr };
-    Box& m_context_box;
+    JS::NonnullGCPtr<Box const> m_context_box;
+
+    LayoutState& m_state;
 };
 
 }

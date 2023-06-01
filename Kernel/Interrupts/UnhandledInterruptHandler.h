@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <AK/String.h>
 #include <AK/Types.h>
 #include <Kernel/Interrupts/GenericInterruptHandler.h>
 
@@ -16,7 +15,7 @@ public:
     explicit UnhandledInterruptHandler(u8 interrupt_vector);
     virtual ~UnhandledInterruptHandler();
 
-    virtual bool handle_interrupt(const RegisterState&) override;
+    virtual bool handle_interrupt(RegisterState const&) override;
 
     [[noreturn]] virtual bool eoi() override;
 
@@ -26,7 +25,6 @@ public:
 
     virtual size_t sharing_devices_count() const override { return 0; }
     virtual bool is_shared_handler() const override { return false; }
-    virtual bool is_sharing_with_others() const override { return false; }
 
 private:
 };

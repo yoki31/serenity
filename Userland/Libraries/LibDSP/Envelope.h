@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, kleines Filmröllchen <malu.bertsch@gmail.com>.
+ * Copyright (c) 2021, kleines Filmröllchen <filmroellchen@serenityos.org>.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,7 +8,7 @@
 
 #include <AK/StdLibExtras.h>
 
-namespace LibDSP {
+namespace DSP {
 
 // For now, this cannot be optimal as clang doesn't know underlying type specifications.
 enum EnvelopeState {
@@ -50,7 +50,7 @@ struct Envelope {
 
     constexpr void reset() { envelope = -1; }
 
-    constexpr operator EnvelopeState()
+    constexpr operator EnvelopeState() const
     {
         if (!is_active())
             return EnvelopeState::Off;

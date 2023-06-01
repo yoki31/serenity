@@ -5,6 +5,7 @@
  */
 
 #include <assert.h>
+#include <bits/pthread_cancel.h>
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <termios.h>
@@ -30,6 +31,13 @@ int tcsetattr(int fd, int optional_actions, const struct termios* t)
     return -1;
 }
 
+// https://pubs.opengroup.org/onlinepubs/009695399/functions/tcsendbreak.html
+int tcsendbreak([[maybe_unused]] int fd, [[maybe_unused]] int duration)
+{
+    // FIXME: Implement this for real.
+    return 0;
+}
+
 int tcflow([[maybe_unused]] int fd, [[maybe_unused]] int action)
 {
     errno = EINVAL;
@@ -39,6 +47,15 @@ int tcflow([[maybe_unused]] int fd, [[maybe_unused]] int action)
 int tcflush(int fd, int queue_selector)
 {
     return ioctl(fd, TCFLSH, queue_selector);
+}
+
+// https://pubs.opengroup.org/onlinepubs/009695399/functions/tcdrain.html
+int tcdrain([[maybe_unused]] int fd)
+{
+    __pthread_maybe_cancel();
+
+    // FIXME: Implement this for real.
+    return 0;
 }
 
 speed_t cfgetispeed(const struct termios* tp)

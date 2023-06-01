@@ -20,6 +20,11 @@ WebSocket::ReadyState WebSocket::ready_state()
     return (WebSocket::ReadyState)m_client->ready_state({}, *this);
 }
 
+DeprecatedString WebSocket::subprotocol_in_use()
+{
+    return m_client->subprotocol_in_use({}, *this);
+}
+
 void WebSocket::send(ByteBuffer binary_or_text_message, bool is_text)
 {
     m_client->send({}, *this, move(binary_or_text_message), is_text);
@@ -27,12 +32,10 @@ void WebSocket::send(ByteBuffer binary_or_text_message, bool is_text)
 
 void WebSocket::send(StringView text_message)
 {
-    auto data_result = ByteBuffer::copy(text_message.bytes());
-    VERIFY(data_result.has_value());
-    send(data_result.release_value(), true);
+    send(ByteBuffer::copy(text_message.bytes()).release_value_but_fixme_should_propagate_errors(), true);
 }
 
-void WebSocket::close(u16 code, String reason)
+void WebSocket::close(u16 code, DeprecatedString reason)
 {
     m_client->close({}, *this, code, move(reason));
 }
@@ -55,7 +58,7 @@ void WebSocket::did_error(Badge<WebSocketClient>, i32 error_code)
         on_error((WebSocket::Error)error_code);
 }
 
-void WebSocket::did_close(Badge<WebSocketClient>, u16 code, String reason, bool was_clean)
+void WebSocket::did_close(Badge<WebSocketClient>, u16 code, DeprecatedString reason, bool was_clean)
 {
     if (on_close)
         on_close(code, move(reason), was_clean);

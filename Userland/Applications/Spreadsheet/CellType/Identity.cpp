@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020, the SerenityOS developers.
+ * Copyright (c) 2020-2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,22 +11,33 @@
 namespace Spreadsheet {
 
 IdentityCell::IdentityCell()
-    : CellType("Identity")
+    : CellType("Identity"sv)
 {
 }
 
-IdentityCell::~IdentityCell()
+JS::ThrowCompletionOr<DeprecatedString> IdentityCell::display(Cell& cell, CellTypeMetadata const& metadata) const
 {
+    auto& vm = cell.sheet().global_object().vm();
+    auto data = cell.js_data();
+    if (!metadata.format.is_empty())
+        data = TRY(cell.sheet().evaluate(metadata.format, &cell));
+
+    return data.to_deprecated_string(vm);
 }
 
-String IdentityCell::display(Cell& cell, const CellTypeMetadata&) const
-{
-    return cell.js_data().to_string_without_side_effects();
-}
-
-JS::Value IdentityCell::js_value(Cell& cell, const CellTypeMetadata&) const
+JS::ThrowCompletionOr<JS::Value> IdentityCell::js_value(Cell& cell, CellTypeMetadata const&) const
 {
     return cell.js_data();
+}
+
+DeprecatedString IdentityCell::metadata_hint(MetadataName metadata) const
+{
+    if (metadata == MetadataName::Length)
+        return "Ignored";
+    if (metadata == MetadataName::Format)
+        return "JavaScript expression, `value' refers to the cell's value";
+
+    return {};
 }
 
 }

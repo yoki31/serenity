@@ -4,41 +4,46 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/String.h>
+#include <AK/DeprecatedString.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/MappedFile.h>
+#include <LibCore/System.h>
+#include <LibDeviceTree/FlattenedDeviceTree.h>
 #include <LibDeviceTree/Validation.h>
-#include <serenity.h>
+#include <LibMain/Main.h>
 
-int main(int argc, char* argv[])
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath"));
 
-    String filename;
+    DeprecatedString filename;
 
     Core::ArgsParser args;
     args.add_positional_argument(filename, "File to process", "file", Core::ArgsParser::Required::Yes);
-    args.parse(argc, argv);
+    args.parse(arguments);
 
     // FIXME: Figure out how to do this sanely from stdin
-    auto maybe_file = Core::MappedFile::map(filename);
-    if (maybe_file.is_error()) {
-        warnln("Unable to dump device tree from file {}: {}", filename, maybe_file.error());
-        return 1;
-    }
-    auto file = maybe_file.release_value();
+    auto file = TRY(Core::MappedFile::map(filename));
 
     if (file->size() < sizeof(DeviceTree::FlattenedDeviceTreeHeader)) {
         warnln("Not enough data in {} to contain a device tree header!", filename);
         return 1;
     }
 
-    auto* fdt_header = reinterpret_cast<DeviceTree::FlattenedDeviceTreeHeader const*>(file->data());
+    auto const* fdt_header = reinterpret_cast<DeviceTree::FlattenedDeviceTreeHeader const*>(file->data());
+    auto bytes = ReadonlyBytes { file->data(), file->size() };
 
-    bool valid = DeviceTree::dump(*fdt_header, static_cast<u8 const*>(file->data()), file->size());
+    TRY(DeviceTree::dump(*fdt_header, bytes));
 
-    return valid ? 0 : 1;
+    auto compatible = TRY(DeviceTree::slow_get_property<StringView>("/compatible"sv, *fdt_header, bytes));
+    auto compatible_strings = compatible.split_view('\0');
+    dbgln("compatible with: {}", compatible_strings);
+
+    auto bootargs = TRY(DeviceTree::slow_get_property<StringView>("/chosen/bootargs"sv, *fdt_header, bytes));
+    dbgln("bootargs: {}", bootargs);
+
+    auto cpu_compatible = TRY(DeviceTree::slow_get_property<StringView>("/cpus/cpu@0/compatible"sv, *fdt_header, bytes));
+    dbgln("cpu0 compatible: {}", cpu_compatible);
+
+    return 0;
 }

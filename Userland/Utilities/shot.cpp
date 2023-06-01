@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2021, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, Aziz Berkay Yesilyurt <abyesilyurt@gmail.com>
+ * Copyright (c) 2022, Alex Major
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -10,15 +11,17 @@
 #include <AK/URL.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/DateTime.h>
-#include <LibCore/File.h>
+#include <LibCore/Process.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibGUI/Application.h>
 #include <LibGUI/Clipboard.h>
+#include <LibGUI/ConnectionToWindowServer.h>
 #include <LibGUI/Painter.h>
 #include <LibGUI/Widget.h>
 #include <LibGUI/Window.h>
-#include <LibGUI/WindowServerConnection.h>
-#include <LibGfx/PNGWriter.h>
+#include <LibGfx/ImageFormats/PNGWriter.h>
 #include <LibGfx/Palette.h>
+#include <LibMain/Main.h>
 #include <unistd.h>
 
 class SelectableLayover final : public GUI::Widget {
@@ -85,14 +88,15 @@ private:
     Gfx::Color const m_background_color;
 };
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
     Core::ArgsParser args_parser;
 
-    String output_path;
+    DeprecatedString output_path;
     bool output_to_clipboard = false;
     unsigned delay = 0;
     bool select_region = false;
+    bool edit_image = false;
     int screen = -1;
 
     args_parser.add_positional_argument(output_path, "Output filename", "output", Core::ArgsParser::Required::No);
@@ -100,18 +104,19 @@ int main(int argc, char** argv)
     args_parser.add_option(delay, "Seconds to wait before taking a screenshot", "delay", 'd', "seconds");
     args_parser.add_option(screen, "The index of the screen (default: -1 for all screens)", "screen", 's', "index");
     args_parser.add_option(select_region, "Select a region to capture", "region", 'r');
+    args_parser.add_option(edit_image, "Open in PixelPaint", "edit", 'e');
 
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if (output_path.is_empty()) {
-        output_path = Core::DateTime::now().to_string("screenshot-%Y-%m-%d-%H-%M-%S.png");
+        output_path = Core::DateTime::now().to_deprecated_string("screenshot-%Y-%m-%d-%H-%M-%S.png"sv);
     }
 
-    auto app = GUI::Application::construct(argc, argv);
+    auto app = TRY(GUI::Application::create(arguments));
     Optional<Gfx::IntRect> crop_region;
     if (select_region) {
         auto window = GUI::Window::construct();
-        auto& container = window->set_main_widget<SelectableLayover>(window);
+        auto container = TRY(window->set_main_widget<SelectableLayover>(window));
 
         window->set_title("shot");
         window->set_has_alpha_channel(true);
@@ -119,7 +124,7 @@ int main(int argc, char** argv)
         window->show();
         app->exec();
 
-        crop_region = container.region();
+        crop_region = container->region();
         if (crop_region.value().is_empty()) {
             dbgln("cancelled...");
             return 0;
@@ -131,7 +136,7 @@ int main(int argc, char** argv)
     if (screen >= 0)
         screen_index = (u32)screen;
     dbgln("getting screenshot...");
-    auto shared_bitmap = GUI::WindowServerConnection::the().get_screen_bitmap(crop_region, screen_index);
+    auto shared_bitmap = GUI::ConnectionToWindowServer::the().get_screen_bitmap(crop_region, screen_index);
     dbgln("got screenshot");
 
     RefPtr<Gfx::Bitmap> bitmap = shared_bitmap.bitmap();
@@ -145,32 +150,36 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    auto encoded_bitmap = Gfx::PNGWriter::encode(*bitmap);
-    if (encoded_bitmap.is_empty()) {
+    auto encoded_bitmap_or_error = Gfx::PNGWriter::encode(*bitmap);
+    if (encoded_bitmap_or_error.is_error()) {
         warnln("Failed to encode PNG");
         return 1;
     }
+    auto encoded_bitmap = encoded_bitmap_or_error.release_value();
 
-    auto file_or_error = Core::File::open(output_path, Core::OpenMode::ReadWrite);
+    if (edit_image)
+        output_path = Core::DateTime::now().to_deprecated_string("/tmp/screenshot-%Y-%m-%d-%H-%M-%S.png"sv);
+
+    auto file_or_error = Core::File::open(output_path, Core::File::OpenMode::ReadWrite);
     if (file_or_error.is_error()) {
         warnln("Could not open '{}' for writing: {}", output_path, file_or_error.error());
         return 1;
     }
 
     auto& file = *file_or_error.value();
-    if (!file.write(encoded_bitmap.data(), encoded_bitmap.size())) {
-        warnln("Failed to write PNG");
-        return 1;
-    }
+    TRY(file.write_until_depleted(encoded_bitmap.bytes()));
+
+    if (edit_image)
+        TRY(Core::Process::spawn("/bin/PixelPaint"sv, Array { output_path }));
 
     bool printed_hyperlink = false;
     if (isatty(STDOUT_FILENO)) {
-        auto full_path = Core::File::real_path_for(output_path);
-        if (!full_path.is_null()) {
+        auto full_path_or_error = FileSystem::real_path(output_path);
+        if (!full_path_or_error.is_error()) {
             char hostname[HOST_NAME_MAX];
             VERIFY(gethostname(hostname, sizeof(hostname)) == 0);
 
-            auto url = URL::create_with_file_scheme(full_path, {}, hostname);
+            auto url = URL::create_with_file_scheme(full_path_or_error.value().to_deprecated_string(), {}, hostname);
             out("\033]8;;{}\033\\", url.serialize());
             printed_hyperlink = true;
         }

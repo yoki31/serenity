@@ -95,7 +95,6 @@ describe("correct behavior", () => {
         expect(createdZoneDateTime.nanosecond).toBe(300);
     });
 
-    // FIXME: Enable when parse_iso_date_time is implemented.
     test("from string", () => {
         const zonedDateTime = Temporal.ZonedDateTime.from(
             "2021-11-07T00:20:05.100200300+00:00[UTC][u-ca=iso8601]"
@@ -130,12 +129,16 @@ describe("errors", () => {
     test("requires year property", () => {
         expect(() => {
             Temporal.ZonedDateTime.from({ timeZone: new Temporal.TimeZone("UTC") });
-        }).toThrowWithMessage(TypeError, "Required property year is missing or undefined");
+        }).toThrowWithMessage(TypeError, "Required property day is missing or undefined");
     });
 
     test("requires month property", () => {
         expect(() => {
-            Temporal.ZonedDateTime.from({ timeZone: new Temporal.TimeZone("UTC"), year: 2021 });
+            Temporal.ZonedDateTime.from({
+                timeZone: new Temporal.TimeZone("UTC"),
+                day: 1,
+                year: 2021,
+            });
         }).toThrowWithMessage(TypeError, "Required property month is missing or undefined");
     });
 

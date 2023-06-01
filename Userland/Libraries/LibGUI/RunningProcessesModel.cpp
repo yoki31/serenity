@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -15,20 +16,12 @@ NonnullRefPtr<RunningProcessesModel> RunningProcessesModel::create()
     return adopt_ref(*new RunningProcessesModel);
 }
 
-RunningProcessesModel::RunningProcessesModel()
-{
-}
-
-RunningProcessesModel::~RunningProcessesModel()
-{
-}
-
 void RunningProcessesModel::update()
 {
     m_processes.clear();
 
     auto all_processes = Core::ProcessStatisticsReader::get_all();
-    if (all_processes.has_value()) {
+    if (!all_processes.is_error()) {
         for (auto& it : all_processes.value().processes) {
             Process process;
             process.pid = it.pid;
@@ -58,11 +51,11 @@ String RunningProcessesModel::column_name(int column_index) const
     case Column::Icon:
         return {};
     case Column::PID:
-        return "PID";
+        return "PID"_short_string;
     case Column::UID:
-        return "UID";
+        return "UID"_short_string;
     case Column::Name:
-        return "Name";
+        return "Name"_short_string;
     }
     VERIFY_NOT_REACHED();
 }

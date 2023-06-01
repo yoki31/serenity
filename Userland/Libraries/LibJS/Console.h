@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Emanuele Torre <torreemanuele6@gmail.com>
+ * Copyright (c) 2021, Sam Atkins <atkinssj@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,48 +10,91 @@
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/Noncopyable.h>
+#include <AK/String.h>
+#include <AK/Vector.h>
+#include <LibCore/ElapsedTimer.h>
 #include <LibJS/Forward.h>
+#include <LibJS/Runtime/Value.h>
 
 namespace JS {
 
 class ConsoleClient;
 
+// https://console.spec.whatwg.org
 class Console {
     AK_MAKE_NONCOPYABLE(Console);
     AK_MAKE_NONMOVABLE(Console);
 
 public:
-    explicit Console(GlobalObject&);
+    // These are not really levels, but that's the term used in the spec.
+    enum class LogLevel {
+        Assert,
+        Count,
+        CountReset,
+        Debug,
+        Dir,
+        DirXML,
+        Error,
+        Group,
+        GroupCollapsed,
+        Info,
+        Log,
+        TimeEnd,
+        TimeLog,
+        Trace,
+        Warn,
+    };
+
+    struct Group {
+        String label;
+    };
+
+    struct Trace {
+        String label;
+        Vector<String> stack;
+    };
+
+    explicit Console(Realm&);
 
     void set_client(ConsoleClient& client) { m_client = &client; }
 
-    GlobalObject& global_object() { return m_global_object; }
-    const GlobalObject& global_object() const { return m_global_object; }
+    Realm& realm() const { return m_realm; }
 
-    VM& vm();
+    MarkedVector<Value> vm_arguments();
 
     HashMap<String, unsigned>& counters() { return m_counters; }
-    const HashMap<String, unsigned>& counters() const { return m_counters; }
+    HashMap<String, unsigned> const& counters() const { return m_counters; }
 
-    Value debug();
-    Value error();
-    Value info();
-    Value log();
-    Value warn();
+    ThrowCompletionOr<Value> debug();
+    ThrowCompletionOr<Value> error();
+    ThrowCompletionOr<Value> info();
+    ThrowCompletionOr<Value> log();
+    ThrowCompletionOr<Value> warn();
     Value clear();
-    Value trace();
-    Value count();
-    Value count_reset();
-    Value assert_();
+    ThrowCompletionOr<Value> trace();
+    ThrowCompletionOr<Value> count();
+    ThrowCompletionOr<Value> count_reset();
+    ThrowCompletionOr<Value> assert_();
+    ThrowCompletionOr<Value> group();
+    ThrowCompletionOr<Value> group_collapsed();
+    ThrowCompletionOr<Value> group_end();
+    ThrowCompletionOr<Value> time();
+    ThrowCompletionOr<Value> time_log();
+    ThrowCompletionOr<Value> time_end();
 
-    unsigned counter_increment(String label);
-    bool counter_reset(String label);
+    void output_debug_message(LogLevel log_level, String const& output) const;
+    void report_exception(JS::Error const&, bool) const;
 
 private:
-    GlobalObject& m_global_object;
+    ThrowCompletionOr<String> value_vector_to_string(MarkedVector<Value> const&);
+    ThrowCompletionOr<String> format_time_since(Core::ElapsedTimer timer);
+
+    NonnullGCPtr<Realm> m_realm;
     ConsoleClient* m_client { nullptr };
 
     HashMap<String, unsigned> m_counters;
+    HashMap<String, Core::ElapsedTimer> m_timer_table;
+    Vector<Group> m_group_stack;
 };
 
 class ConsoleClient {
@@ -60,26 +104,22 @@ public:
     {
     }
 
-    virtual Value debug() = 0;
-    virtual Value error() = 0;
-    virtual Value info() = 0;
-    virtual Value log() = 0;
-    virtual Value warn() = 0;
-    virtual Value clear() = 0;
-    virtual Value trace() = 0;
-    virtual Value count() = 0;
-    virtual Value count_reset() = 0;
-    virtual Value assert_() = 0;
+    using PrinterArguments = Variant<Console::Group, Console::Trace, MarkedVector<Value>>;
+
+    ThrowCompletionOr<Value> logger(Console::LogLevel log_level, MarkedVector<Value> const& args);
+    ThrowCompletionOr<MarkedVector<Value>> formatter(MarkedVector<Value> const& args);
+    virtual ThrowCompletionOr<Value> printer(Console::LogLevel log_level, PrinterArguments) = 0;
+
+    virtual void add_css_style_to_current_message(StringView) { }
+    virtual void report_exception(JS::Error const&, bool) { }
+
+    virtual void clear() = 0;
+    virtual void end_group() = 0;
+
+    ThrowCompletionOr<String> generically_format_values(MarkedVector<Value> const&);
 
 protected:
     virtual ~ConsoleClient() = default;
-
-    VM& vm();
-
-    GlobalObject& global_object() { return m_console.global_object(); }
-    const GlobalObject& global_object() const { return m_console.global_object(); }
-
-    Vector<String> get_trace() const;
 
     Console& m_console;
 };

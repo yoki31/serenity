@@ -2,6 +2,9 @@
  * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
  * Copyright (c) 2021, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2021, Mohsan Ali <mohsan0073@gmail.com>
+ * Copyright (c) 2022, Mustafa Quraish <mustafa@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
+ * Copyright (c) 2023, Caoimhe Byrne <caoimhebyrne06@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,12 +12,13 @@
 #include "ViewWidget.h"
 #include <AK/LexicalPath.h>
 #include <AK/StringBuilder.h>
-#include <LibCore/DirIterator.h>
-#include <LibCore/File.h>
+#include <LibCore/Directory.h>
 #include <LibCore/MappedFile.h>
+#include <LibCore/MimeData.h>
 #include <LibCore/Timer.h>
+#include <LibFileSystemAccessClient/Client.h>
+#include <LibGUI/Application.h>
 #include <LibGUI/MessageBox.h>
-#include <LibGUI/Painter.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/Orientation.h>
 #include <LibGfx/Palette.h>
@@ -23,13 +27,9 @@
 namespace ImageViewer {
 
 ViewWidget::ViewWidget()
-    : m_timer(Core::Timer::construct())
+    : m_timer(Core::Timer::try_create().release_value_but_fixme_should_propagate_errors())
 {
     set_fill_with_background_color(false);
-}
-
-ViewWidget::~ViewWidget()
-{
 }
 
 void ViewWidget::clear()
@@ -39,6 +39,7 @@ void ViewWidget::clear()
     m_bitmap = nullptr;
     if (on_image_change)
         on_image_change(m_bitmap);
+    set_original_rect({});
     m_path = {};
 
     reset_view();
@@ -48,17 +49,13 @@ void ViewWidget::clear()
 void ViewWidget::flip(Gfx::Orientation orientation)
 {
     m_bitmap = m_bitmap->flipped(orientation).release_value_but_fixme_should_propagate_errors();
-    set_scale(m_scale);
-
-    resize_window();
+    scale_image_for_window();
 }
 
 void ViewWidget::rotate(Gfx::RotationDirection rotation_direction)
 {
     m_bitmap = m_bitmap->rotated(rotation_direction).release_value_but_fixme_should_propagate_errors();
-    set_scale(m_scale);
-
-    resize_window();
+    scale_image_for_window();
 }
 
 bool ViewWidget::is_next_available() const
@@ -75,26 +72,33 @@ bool ViewWidget::is_previous_available() const
     return false;
 }
 
-Vector<String> ViewWidget::load_files_from_directory(const String& path) const
+// FIXME: Convert to `String` & use LibFileSystemAccessClient + `Core::System::unveil(nullptr, nullptr)`
+//        - Converting to String is not super-trivial due to the LexicalPath usage, while we can do a bunch of
+//          String::from_deprecated_string() and String.to_deprecated_string(), it is quite ugly to read and
+//          probably not the best approach.
+//
+//        - If we go full-unveil (`Core::System::unveil(nullptr, nullptr)`) this functionality does not work,
+//          we can not access the list of contents of a directory through LibFileSystemAccessClient at the moment.
+Vector<DeprecatedString> ViewWidget::load_files_from_directory(DeprecatedString const& path) const
 {
-    Vector<String> files_in_directory;
+    Vector<DeprecatedString> files_in_directory;
 
     auto current_dir = LexicalPath(path).parent().string();
-    Core::DirIterator iterator(current_dir, Core::DirIterator::Flags::SkipDots);
-    while (iterator.has_next()) {
-        String file = iterator.next_full_path();
-        if (!Gfx::Bitmap::is_path_a_supported_image_format(file))
-            continue;
-        files_in_directory.append(file);
-    }
+    // FIXME: Propagate errors
+    (void)Core::Directory::for_each_entry(current_dir, Core::DirIterator::Flags::SkipDots, [&](auto const& entry, auto const& directory) -> ErrorOr<IterationDecision> {
+        auto full_path = LexicalPath::join(directory.path().string(), entry.name).string();
+        if (Gfx::Bitmap::is_path_a_supported_image_format(full_path))
+            files_in_directory.append(full_path);
+        return IterationDecision::Continue;
+    });
     return files_in_directory;
 }
 
-void ViewWidget::set_path(const String& path)
+void ViewWidget::set_path(String const& path)
 {
     m_path = path;
-    m_files_in_same_dir = load_files_from_directory(path);
-    m_current_index = m_files_in_same_dir.find_first_index(path);
+    m_files_in_same_dir = load_files_from_directory(path.to_deprecated_string());
+    m_current_index = m_files_in_same_dir.find_first_index(path.to_deprecated_string());
 }
 
 void ViewWidget::navigate(Directions direction)
@@ -114,53 +118,14 @@ void ViewWidget::navigate(Directions direction)
         index = m_files_in_same_dir.size() - 1;
     }
 
+    auto result = FileSystemAccessClient::Client::the().request_file_read_only_approved(window(), m_files_in_same_dir.at(index));
+    if (result.is_error())
+        return;
+
     m_current_index = index;
-    this->load_from_file(m_files_in_same_dir.at(index));
-}
 
-void ViewWidget::set_scale(int scale)
-{
-    if (m_bitmap.is_null())
-        return;
-
-    if (scale < 10)
-        scale = 10;
-    if (scale > 1000)
-        scale = 1000;
-
-    m_scale = scale;
-    float scale_factor = (float)m_scale / 100.0f;
-
-    Gfx::IntSize new_size;
-    new_size.set_width(m_bitmap->width() * scale_factor);
-    new_size.set_height(m_bitmap->height() * scale_factor);
-    m_bitmap_rect.set_size(new_size);
-
-    if (on_scale_change)
-        on_scale_change(m_scale);
-
-    relayout();
-}
-
-void ViewWidget::relayout()
-{
-    if (m_bitmap.is_null())
-        return;
-
-    Gfx::IntSize new_size = m_bitmap_rect.size();
-
-    Gfx::IntPoint new_location;
-    new_location.set_x((width() / 2) - (new_size.width() / 2) - m_pan_origin.x());
-    new_location.set_y((height() / 2) - (new_size.height() / 2) - m_pan_origin.y());
-    m_bitmap_rect.set_location(new_location);
-
-    update();
-}
-
-void ViewWidget::resize_event(GUI::ResizeEvent& event)
-{
-    relayout();
-    GUI::Widget::resize_event(event);
+    auto value = result.release_value();
+    open_file(value.filename(), value.stream());
 }
 
 void ViewWidget::doubleclick_event(GUI::MouseEvent&)
@@ -179,94 +144,54 @@ void ViewWidget::paint_event(GUI::PaintEvent& event)
     Gfx::StylePainter::paint_transparency_grid(painter, frame_inner_rect(), palette());
 
     if (!m_bitmap.is_null())
-        painter.draw_scaled_bitmap(m_bitmap_rect, *m_bitmap, m_bitmap->rect());
+        painter.draw_scaled_bitmap(content_rect(), *m_bitmap, m_bitmap->rect(), 1.0f, m_scaling_mode);
 }
 
 void ViewWidget::mousedown_event(GUI::MouseEvent& event)
 {
-    if (event.button() != GUI::MouseButton::Primary)
-        return;
-    m_click_position = event.position();
-    m_saved_pan_origin = m_pan_origin;
+    if (event.button() == GUI::MouseButton::Primary)
+        start_panning(event.position());
+    GUI::AbstractZoomPanWidget::mousedown_event(event);
 }
 
-void ViewWidget::mouseup_event([[maybe_unused]] GUI::MouseEvent& event) { }
-
-void ViewWidget::mousemove_event(GUI::MouseEvent& event)
+void ViewWidget::mouseup_event(GUI::MouseEvent& event)
 {
-    if (!(event.buttons() & GUI::MouseButton::Primary))
-        return;
-
-    auto delta = event.position() - m_click_position;
-    m_pan_origin = m_saved_pan_origin.translated(
-        -delta.x(),
-        -delta.y());
-
-    relayout();
+    if (event.button() == GUI::MouseButton::Primary)
+        stop_panning();
+    GUI::AbstractZoomPanWidget::mouseup_event(event);
 }
 
-void ViewWidget::mousewheel_event(GUI::MouseEvent& event)
+void ViewWidget::open_file(String const& path, Core::File& file)
 {
-    int new_scale = m_scale - event.wheel_delta() * 10;
-    if (new_scale < 10)
-        new_scale = 10;
-    if (new_scale > 1000)
-        new_scale = 1000;
+    auto open_result = try_open_file(path, file);
+    if (open_result.is_error()) {
+        auto error = open_result.release_error();
+        auto user_error_message = String::formatted("Failed to open the image: {}.", error).release_value_but_fixme_should_propagate_errors();
 
-    if (new_scale == m_scale) {
-        return;
+        GUI::MessageBox::show_error(nullptr, user_error_message);
     }
-
-    auto old_scale_factor = (float)m_scale / 100.0f;
-    auto new_scale_factor = (float)new_scale / 100.0f;
-
-    // focus_point is the window position the cursor is pointing to.
-    // The pixel (in image space) the cursor points to is located at
-    // (m_pan_origin + focus_point) / scale_factor.
-    // We want the image after scaling to be panned in such a way that the cursor
-    // will still point to the same image pixel. Basically, we need to solve
-    // (m_pan_origin + focus_point) / old_scale_factor = (new_m_pan_origin + focus_point) / new_scale_factor.
-    Gfx::FloatPoint focus_point {
-        event.x() - width() / 2.0f,
-        event.y() - height() / 2.0f
-    };
-
-    // A little algebra shows that new m_pan_origin equals to:
-    m_pan_origin = (m_pan_origin + focus_point) * (new_scale_factor / old_scale_factor) - focus_point;
-
-    set_scale(new_scale);
 }
 
-void ViewWidget::load_from_file(const String& path)
+ErrorOr<void> ViewWidget::try_open_file(String const& path, Core::File& file)
 {
-    auto show_error = [&] {
-        GUI::MessageBox::show(window(), String::formatted("Failed to open {}", path), "Cannot open image", GUI::MessageBox::Type::Error);
-    };
-
-    auto file_or_error = Core::MappedFile::map(path);
-    if (file_or_error.is_error()) {
-        show_error();
-        return;
-    }
-
-    auto& mapped_file = *file_or_error.value();
-
     // Spawn a new ImageDecoder service process and connect to it.
-    auto client = ImageDecoderClient::Client::construct();
-
-    auto decoded_image_or_error = client->decode_image(mapped_file.bytes());
-    if (!decoded_image_or_error.has_value()) {
-        show_error();
-        return;
+    auto client = TRY(ImageDecoderClient::Client::try_create());
+    auto mime_type = Core::guess_mime_type_based_on_filename(path);
+    auto decoded_image_or_none = client->decode_image(TRY(file.read_until_eof()), mime_type);
+    if (!decoded_image_or_none.has_value()) {
+        return Error::from_string_literal("Failed to decode image");
     }
 
-    m_decoded_image = decoded_image_or_error.release_value();
+    m_decoded_image = decoded_image_or_none.release_value();
     m_bitmap = m_decoded_image->frames[0].bitmap;
-    if (on_image_change)
-        on_image_change(m_bitmap);
+    if (m_bitmap.is_null()) {
+        return Error::from_string_literal("Image didn't contain a bitmap");
+    }
+
+    set_original_rect(m_bitmap->rect());
 
     if (m_decoded_image->is_animated && m_decoded_image->frames.size() > 1) {
-        const auto& first_frame = m_decoded_image->frames[0];
+        auto const& first_frame = m_decoded_image->frames[0];
         m_timer->set_interval(first_frame.duration);
         m_timer->on_timeout = [this] { animate(); };
         m_timer->start();
@@ -274,9 +199,25 @@ void ViewWidget::load_from_file(const String& path)
         m_timer->stop();
     }
 
-    m_path = Core::File::real_path_for(path);
-    m_scale = -1;
-    reset_view();
+    set_path(path);
+    GUI::Application::the()->set_most_recently_open_file(path);
+
+    if (on_image_change)
+        on_image_change(m_bitmap);
+
+    if (scaled_for_first_image())
+        scale_image_for_window();
+    else
+        reset_view();
+
+    return {};
+}
+
+void ViewWidget::drag_enter_event(GUI::DragEvent& event)
+{
+    auto const& mime_types = event.mime_types();
+    if (mime_types.contains_slow("text/uri-list"))
+        event.accept();
 }
 
 void ViewWidget::drop_event(GUI::DropEvent& event)
@@ -286,41 +227,55 @@ void ViewWidget::drop_event(GUI::DropEvent& event)
         on_drop(event);
 }
 
+void ViewWidget::resize_event(GUI::ResizeEvent& event)
+{
+    event.accept();
+    scale_image_for_window();
+}
+
+void ViewWidget::scale_image_for_window()
+{
+    if (!m_bitmap)
+        return;
+
+    set_original_rect(m_bitmap->rect());
+    fit_content_to_view(GUI::AbstractZoomPanWidget::FitType::Both);
+}
+
 void ViewWidget::resize_window()
 {
     if (window()->is_fullscreen() || window()->is_maximized())
         return;
 
-    auto absolute_bitmap_rect = m_bitmap_rect;
+    auto absolute_bitmap_rect = content_rect();
     absolute_bitmap_rect.translate_by(window()->rect().top_left());
-    if (window()->rect().contains(absolute_bitmap_rect))
-        return;
 
     if (!m_bitmap)
         return;
 
-    auto new_size = m_bitmap_rect.size();
+    auto new_size = content_rect().size();
 
     if (new_size.width() < 300)
         new_size.set_width(300);
     if (new_size.height() < 200)
         new_size.set_height(200);
 
+    if (new_size.width() > 500)
+        new_size = { 500, 500 * absolute_bitmap_rect.height() / absolute_bitmap_rect.width() };
+    if (new_size.height() > 500)
+        new_size = { 500 * absolute_bitmap_rect.width() / absolute_bitmap_rect.height(), 500 };
+
     new_size.set_height(new_size.height() + m_toolbar_height);
     window()->resize(new_size);
+    scale_image_for_window();
 }
 
-void ViewWidget::reset_view()
-{
-    m_pan_origin = { 0, 0 };
-    set_scale(100);
-}
-
-void ViewWidget::set_bitmap(const Gfx::Bitmap* bitmap)
+void ViewWidget::set_bitmap(Gfx::Bitmap const* bitmap)
 {
     if (m_bitmap == bitmap)
         return;
     m_bitmap = bitmap;
+    set_original_rect(m_bitmap->rect());
     update();
 }
 
@@ -332,7 +287,7 @@ void ViewWidget::animate()
 
     m_current_frame_index = (m_current_frame_index + 1) % m_decoded_image->frames.size();
 
-    const auto& current_frame = m_decoded_image->frames[m_current_frame_index];
+    auto const& current_frame = m_decoded_image->frames[m_current_frame_index];
     set_bitmap(current_frame.bitmap);
 
     if ((int)current_frame.duration != m_timer->interval()) {
@@ -345,6 +300,12 @@ void ViewWidget::animate()
             m_timer->stop();
         }
     }
+}
+
+void ViewWidget::set_scaling_mode(Gfx::Painter::ScalingMode scaling_mode)
+{
+    m_scaling_mode = scaling_mode;
+    update();
 }
 
 }

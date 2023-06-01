@@ -27,6 +27,9 @@ extern "C" {
 #define MS_BIND (1 << 3)
 #define MS_RDONLY (1 << 4)
 #define MS_REMOUNT (1 << 5)
+#define MS_WXALLOWED (1 << 6)
+#define MS_AXALLOWED (1 << 7)
+#define MS_NOREGULAR (1 << 8)
 
 enum {
     _SC_MONOTONIC_CLOCK,
@@ -38,6 +41,11 @@ enum {
     _SC_PAGESIZE,
     _SC_GETPW_R_SIZE_MAX,
     _SC_CLK_TCK,
+    _SC_SYMLOOP_MAX,
+    _SC_MAPPED_FILES,
+    _SC_ARG_MAX,
+    _SC_IOV_MAX,
+    _SC_PHYS_PAGES,
 };
 
 #define _SC_MONOTONIC_CLOCK _SC_MONOTONIC_CLOCK
@@ -45,10 +53,16 @@ enum {
 #define _SC_NPROCESSORS_ONLN _SC_NPROCESSORS_ONLN
 #define _SC_OPEN_MAX _SC_OPEN_MAX
 #define _SC_PAGESIZE _SC_PAGESIZE
+#define _SC_PAGE_SIZE _SC_PAGESIZE
 #define _SC_HOST_NAME_MAX _SC_HOST_NAME_MAX
 #define _SC_TTY_NAME_MAX _SC_TTY_NAME_MAX
 #define _SC_GETPW_R_SIZE_MAX _SC_GETPW_R_SIZE_MAX
 #define _SC_CLK_TCK _SC_CLK_TCK
+#define _SC_SYMLOOP_MAX _SC_SYMLOOP_MAX
+#define _SC_MAPPED_FILES _SC_MAPPED_FILES
+#define _SC_ARG_MAX _SC_ARG_MAX
+#define _SC_IOV_MAX _SC_IOV_MAX
+#define _SC_PHYS_PAGES _SC_PHYS_PAGES
 
 #ifdef __cplusplus
 }

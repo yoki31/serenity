@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, the SerenityOS developers.
+ * Copyright (c) 2021-2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -14,7 +14,7 @@
 class MouseCursorModel final : public GUI::Model {
 public:
     static NonnullRefPtr<MouseCursorModel> create() { return adopt_ref(*new MouseCursorModel); }
-    virtual ~MouseCursorModel() override { }
+    virtual ~MouseCursorModel() override = default;
 
     enum Column {
         Bitmap,
@@ -29,24 +29,24 @@ public:
     virtual GUI::Variant data(const GUI::ModelIndex& index, GUI::ModelRole role) const override;
     virtual void invalidate() override;
 
-    void change_theme(String const& name)
+    void change_theme(DeprecatedString const& name)
     {
         m_theme_name = name;
         invalidate();
     }
 
 private:
-    MouseCursorModel() { }
+    MouseCursorModel() = default;
 
     struct Cursor {
         RefPtr<Gfx::Bitmap> bitmap;
-        String path;
-        String name;
+        DeprecatedString path;
+        DeprecatedString name;
         Gfx::CursorParams params;
     };
 
     Vector<Cursor> m_cursors;
-    String m_theme_name;
+    DeprecatedString m_theme_name;
 };
 
 class ThemeModel final : public GUI::Model {
@@ -59,13 +59,13 @@ public:
     virtual void invalidate() override;
 
 private:
-    Vector<String> m_themes;
+    Vector<DeprecatedString> m_themes;
 };
 
 class ThemeWidget final : public GUI::SettingsWindow::Tab {
     C_OBJECT(ThemeWidget)
 public:
-    virtual ~ThemeWidget() override;
+    virtual ~ThemeWidget() override = default;
 
     virtual void apply_settings() override;
     virtual void reset_default_values() override;
@@ -75,5 +75,5 @@ private:
 
     RefPtr<GUI::TableView> m_cursors_tableview;
     RefPtr<GUI::ComboBox> m_theme_name_box;
-    String m_theme_name;
+    RefPtr<MouseCursorModel> m_mouse_cursor_model;
 };

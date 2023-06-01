@@ -1,13 +1,12 @@
 @GUI::Widget {
     fill_with_background_color: true
-
     layout: @GUI::HorizontalBoxLayout {
         margins: [4]
         spacing: 3
     }
 
     @GUI::Widget {
-        shrink_to_fit: true
+        preferred_width: 103
         layout: @GUI::VerticalBoxLayout {
             margins: [0, 4]
         }
@@ -20,33 +19,39 @@
 
         @GUI::Tray {
             name: "common_locations_tray"
-            fixed_width: 95
+            min_width: 60
         }
 
         @GUI::Label {
             text: "Filename:"
             text_alignment: "CenterRight"
-            fixed_height: 24
+            fixed_height: 22
         }
 
-        @GUI::Widget {
-            fixed_height: 20
+        @GUI::Label {
+            name: "allowed_file_types_label"
+            text: "Files of Type:"
+            text_alignment: "CenterRight"
+            fixed_height: 22
         }
     }
 
     @GUI::Widget {
-        layout: @GUI::VerticalBoxLayout
+        layout: @GUI::VerticalBoxLayout {}
 
         @GUI::Widget {
-            shrink_to_fit: true
-            layout: @GUI::HorizontalBoxLayout
+            preferred_height: "fit"
+            layout: @GUI::HorizontalBoxLayout {}
 
             @GUI::TextBox {
                 name: "location_textbox"
+                preferred_width: "opportunistic_grow"
+                min_width: 80
             }
 
             @GUI::Toolbar {
                 name: "toolbar"
+                preferred_width: "shrink"
             }
         }
 
@@ -55,38 +60,35 @@
         }
 
         @GUI::Widget {
-            shrink_to_fit: true
-            layout: @GUI::VerticalBoxLayout
+            preferred_height: "fit"
+            layout: @GUI::VerticalBoxLayout {}
 
             @GUI::Widget {
                 fixed_height: 22
-                layout: @GUI::HorizontalBoxLayout
+                layout: @GUI::HorizontalBoxLayout {}
 
                 @GUI::TextBox {
                     name: "filename_textbox"
                 }
 
-                @GUI::Widget {
-                    fixed_width: 20
-                }
-
-                @GUI::Button {
+                @GUI::DialogButton {
                     name: "ok_button"
                     text: "OK"
-                    fixed_width: 75
                 }
             }
 
             @GUI::Widget {
                 fixed_height: 22
-                layout: @GUI::HorizontalBoxLayout
+                layout: @GUI::HorizontalBoxLayout {}
 
-                @GUI::Widget
+                @GUI::ComboBox {
+                    name: "allowed_file_type_filters_combo"
+                    model_only: true
+                }
 
-                @GUI::Button {
+                @GUI::DialogButton {
                     name: "cancel_button"
                     text: "Cancel"
-                    fixed_width: 75
                 }
             }
         }

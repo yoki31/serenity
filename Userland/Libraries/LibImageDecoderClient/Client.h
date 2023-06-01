@@ -9,7 +9,7 @@
 #include <AK/HashMap.h>
 #include <ImageDecoder/ImageDecoderClientEndpoint.h>
 #include <ImageDecoder/ImageDecoderServerEndpoint.h>
-#include <LibIPC/ServerConnection.h>
+#include <LibIPC/ConnectionToServer.h>
 
 namespace ImageDecoderClient {
 
@@ -25,17 +25,17 @@ struct DecodedImage {
 };
 
 class Client final
-    : public IPC::ServerConnection<ImageDecoderClientEndpoint, ImageDecoderServerEndpoint>
+    : public IPC::ConnectionToServer<ImageDecoderClientEndpoint, ImageDecoderServerEndpoint>
     , public ImageDecoderClientEndpoint {
-    C_OBJECT(Client);
+    IPC_CLIENT_CONNECTION(Client, "/tmp/session/%sid/portal/image"sv);
 
 public:
-    Optional<DecodedImage> decode_image(ReadonlyBytes);
+    Optional<DecodedImage> decode_image(ReadonlyBytes, Optional<DeprecatedString> mime_type = {});
 
     Function<void()> on_death;
 
 private:
-    Client();
+    Client(NonnullOwnPtr<Core::LocalSocket>);
 
     virtual void die() override;
 };

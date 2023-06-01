@@ -1,13 +1,12 @@
 @GUI::Widget {
     fill_with_background_color: true
-
     layout: @GUI::VerticalBoxLayout {
-        margins: [5]
+        margins: [4]
+        spacing: 6
     }
 
     @GUI::Widget {
-        fixed_height: 44
-
+        preferred_height: "fit"
         layout: @GUI::HorizontalBoxLayout {
             spacing: 10
         }
@@ -23,9 +22,8 @@
     }
 
     @GUI::Widget {
-        fixed_height: 18
-
-        layout: @GUI::HorizontalBoxLayout
+        preferred_height: "fit"
+        layout: @GUI::HorizontalBoxLayout {}
 
         @GUI::Label {
             text: "Executable path:"
@@ -40,9 +38,8 @@
     }
 
     @GUI::Widget {
-        fixed_height: 18
-
-        layout: @GUI::HorizontalBoxLayout
+        preferred_height: "fit"
+        layout: @GUI::HorizontalBoxLayout {}
 
         @GUI::Label {
             text: "Coredump path:"
@@ -57,9 +54,8 @@
     }
 
     @GUI::Widget {
-        fixed_height: 18
-
-        layout: @GUI::HorizontalBoxLayout
+        preferred_height: "fit"
+        layout: @GUI::HorizontalBoxLayout {}
 
         @GUI::Label {
             text: "Arguments:"
@@ -73,30 +69,39 @@
         }
     }
 
+    @GUI::Progressbar {
+        name: "progressbar"
+        text: "Generating crash report: "
+    }
+
     @GUI::TabWidget {
         name: "tab_widget"
+        visible: false
     }
 
     @GUI::Widget {
-        fixed_height: 32
-
-        layout: @GUI::HorizontalBoxLayout
-
-        @GUI::Button {
-            name: "inspect_button"
-            text: "Inspect in Hack Studio"
-            fixed_width: 150
-            fixed_height: 22
+        preferred_height: "fit"
+        layout: @GUI::HorizontalBoxLayout {
+            spacing: 6
         }
 
-        // HACK: We need something like Layout::add_spacer() in GML! :^)
-        @GUI::Widget
+        @GUI::DialogButton {
+            name: "debug_button"
+            text: "Debug in Hack Studio"
+            fixed_width: 160
+        }
 
-        @GUI::Button {
+        @GUI::DialogButton {
+            name: "save_backtrace_button"
+            text: "Save Backtrace..."
+            fixed_width: 160
+        }
+
+        @GUI::Layout::Spacer {}
+
+        @GUI::DialogButton {
             name: "close_button"
             text: "Close"
-            fixed_width: 70
-            fixed_height: 22
         }
     }
 }

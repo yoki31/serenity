@@ -22,11 +22,13 @@ UNMAP_AFTER_INIT void initialize()
     if (!rsdp.has_value())
         return;
 
-    auto facp = StaticParsing::find_table(rsdp.value(), "FACP");
+    auto facp = StaticParsing::find_table(rsdp.value(), "FACP"sv);
     if (!facp.has_value())
         return;
-    auto facp_table = Memory::map_typed<Structures::FADT>(facp.value());
-    u8 irq_line = facp_table->sci_int;
+    auto facp_table_or_error = Memory::map_typed<Structures::FADT>(facp.value());
+    if (facp_table_or_error.is_error())
+        return;
+    u8 irq_line = facp_table_or_error.value()->sci_int;
 
     Parser::must_initialize(rsdp.value(), facp.value(), irq_line);
     if (kernel_command_line().acpi_feature_level() == AcpiFeatureLevel::Enabled)

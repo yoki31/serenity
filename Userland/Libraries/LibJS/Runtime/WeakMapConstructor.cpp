@@ -13,60 +13,67 @@
 
 namespace JS {
 
-WeakMapConstructor::WeakMapConstructor(GlobalObject& global_object)
-    : NativeFunction(vm().names.WeakMap.as_string(), *global_object.function_prototype())
+WeakMapConstructor::WeakMapConstructor(Realm& realm)
+    : NativeFunction(realm.vm().names.WeakMap.as_string(), realm.intrinsics().function_prototype())
 {
 }
 
-void WeakMapConstructor::initialize(GlobalObject& global_object)
+ThrowCompletionOr<void> WeakMapConstructor::initialize(Realm& realm)
 {
     auto& vm = this->vm();
-    NativeFunction::initialize(global_object);
+    MUST_OR_THROW_OOM(NativeFunction::initialize(realm));
 
     // 24.3.2.1 WeakMap.prototype, https://tc39.es/ecma262/#sec-weakmap.prototype
-    define_direct_property(vm.names.prototype, global_object.weak_map_prototype(), 0);
+    define_direct_property(vm.names.prototype, realm.intrinsics().weak_map_prototype(), 0);
 
     define_direct_property(vm.names.length, Value(0), Attribute::Configurable);
-}
 
-WeakMapConstructor::~WeakMapConstructor()
-{
+    return {};
 }
 
 // 24.3.1.1 WeakMap ( [ iterable ] ), https://tc39.es/ecma262/#sec-weakmap-iterable
 ThrowCompletionOr<Value> WeakMapConstructor::call()
 {
     auto& vm = this->vm();
-    return vm.throw_completion<TypeError>(global_object(), ErrorType::ConstructorWithoutNew, vm.names.WeakMap);
+
+    // 1. If NewTarget is undefined, throw a TypeError exception.
+    return vm.throw_completion<TypeError>(ErrorType::ConstructorWithoutNew, vm.names.WeakMap);
 }
 
 // 24.3.1.1 WeakMap ( [ iterable ] ), https://tc39.es/ecma262/#sec-weakmap-iterable
-ThrowCompletionOr<Object*> WeakMapConstructor::construct(FunctionObject& new_target)
+ThrowCompletionOr<NonnullGCPtr<Object>> WeakMapConstructor::construct(FunctionObject& new_target)
 {
     auto& vm = this->vm();
-    auto& global_object = this->global_object();
+    auto iterable = vm.argument(0);
 
-    auto* weak_map = TRY(ordinary_create_from_constructor<WeakMap>(global_object, new_target, &GlobalObject::weak_map_prototype));
+    // 2. Let map be ? OrdinaryCreateFromConstructor(NewTarget, "%WeakMap.prototype%", « [[WeakMapData]] »).
+    // 3. Set map.[[WeakMapData]] to a new empty List.
+    auto map = TRY(ordinary_create_from_constructor<WeakMap>(vm, new_target, &Intrinsics::weak_map_prototype));
 
-    if (vm.argument(0).is_nullish())
-        return weak_map;
+    // 4. If iterable is either undefined or null, return map.
+    if (iterable.is_nullish())
+        return map;
 
-    auto adder = TRY(weak_map->get(vm.names.set));
+    // 5. Let adder be ? Get(map, "set").
+    auto adder = TRY(map->get(vm.names.set));
+
+    // 6. If IsCallable(adder) is false, throw a TypeError exception.
     if (!adder.is_function())
-        return vm.throw_completion<TypeError>(global_object, ErrorType::NotAFunction, "'set' property of WeakMap");
+        return vm.throw_completion<TypeError>(ErrorType::NotAFunction, "'set' property of WeakMap");
 
-    TRY(get_iterator_values(global_object, vm.argument(0), [&](Value iterator_value) -> Optional<Completion> {
+    // 7. Return ? AddEntriesFromIterable(map, iterable, adder).
+    (void)TRY(get_iterator_values(vm, iterable, [&](Value iterator_value) -> Optional<Completion> {
         if (!iterator_value.is_object())
-            return vm.throw_completion<TypeError>(global_object, ErrorType::NotAnObject, String::formatted("Iterator value {}", iterator_value.to_string_without_side_effects()));
+            return vm.throw_completion<TypeError>(ErrorType::NotAnObject, DeprecatedString::formatted("Iterator value {}", TRY_OR_THROW_OOM(vm, iterator_value.to_string_without_side_effects())));
 
         auto key = TRY(iterator_value.as_object().get(0));
         auto value = TRY(iterator_value.as_object().get(1));
-        TRY(vm.call(adder.as_function(), Value(weak_map), key, value));
+        TRY(JS::call(vm, adder.as_function(), map, key, value));
 
         return {};
     }));
 
-    return weak_map;
+    return map;
 }
 
 }

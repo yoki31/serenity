@@ -1,14 +1,37 @@
 #!/usr/bin/env -S bash ../.port_include.sh
-port=curl
-version=7.78.0
-useconfigure=true
-files="https://curl.se/download/curl-${version}.tar.bz2 curl-${version}.tar.bz2 98530b317dc95ccb324bbe4f834f07bb642fbc393b794ddf3434f246a71ea44a"
-auth_type=sha256
-depends=("openssl" "zlib" "zstd")
-configopts=("--disable-ntlm-wb" "--with-openssl=${SERENITY_INSTALL_ROOT}/usr/local" "--disable-symbol-hiding")
+port='curl'
+version='8.0.1'
+useconfigure='true'
+files="https://curl.se/download/curl-${version}.tar.bz2 curl-${version}.tar.bz2 9b6b1e96b748d04b968786b6bdf407aa5c75ab53a3d37c1c8c81cdb736555ccf"
+auth_type='sha256'
+depends=(
+  'ca-certificates'
+  'openssl'
+  'zlib'
+  'zstd'
+)
+configopts=("-DCMAKE_TOOLCHAIN_FILE=${SERENITY_BUILD_DIR}/CMakeToolchain.txt")
+
+configure() {
+    mkdir -p curl-build
+    cmake -G Ninja \
+    -S curl-${version} \
+    -B curl-build \
+    "${configopts[@]}" \
+    -DCURL_USE_OPENSSL=ON \
+    -DCURL_ZSTD=ON \
+    -DCURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    -DCURL_CA_PATH=none \
+    -DCURL_DISABLE_NTLM=ON \
+    -DCURL_DISABLE_SOCKETPAIR=ON \
+    -DCURL_DISABLE_TESTS=ON \
+    -DCURL_HIDDEN_SYMBOLS=OFF
+}
+
+build() {
+    ninja -C curl-build
+}
 
 install() {
-    run make DESTDIR=${SERENITY_INSTALL_ROOT} "${installopts[@]}" install
-    ${CC} -shared -o ${SERENITY_INSTALL_ROOT}/usr/local/lib/libcurl.so -Wl,-soname,libcurl.so -Wl,--whole-archive ${SERENITY_INSTALL_ROOT}/usr/local/lib/libcurl.a -Wl,--no-whole-archive -lzstd
-    rm -f ${SERENITY_INSTALL_ROOT}/usr/local/lib/libcurl.la
+    ninja -C curl-build install
 }

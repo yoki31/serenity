@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -13,14 +14,14 @@
 
 class Field;
 class SquareButton;
-class SquareLabel;
+class SquareImage;
 
 class Square {
     AK_MAKE_NONCOPYABLE(Square);
 
 public:
-    Square();
-    ~Square();
+    Square() = default;
+    ~Square() = default;
 
     Field* field { nullptr };
     bool is_swept { false };
@@ -31,7 +32,7 @@ public:
     size_t column { 0 };
     size_t number { 0 };
     RefPtr<SquareButton> button;
-    RefPtr<SquareLabel> label;
+    RefPtr<SquareImage> image;
 
     template<typename Callback>
     void for_each_neighbor(Callback);
@@ -40,10 +41,11 @@ public:
 class Field final : public GUI::Frame {
     C_OBJECT(Field)
     friend class Square;
-    friend class SquareLabel;
+    friend class SquareImage;
 
 public:
-    virtual ~Field() override;
+    static ErrorOr<NonnullRefPtr<Field>> create(GUI::Label& flag_label, GUI::Label& time_label, GUI::Button& face_button);
+    virtual ~Field() override = default;
 
     enum class Difficulty {
         Beginner,
@@ -73,19 +75,19 @@ public:
 
     Optional<Difficulty> difficulty_from_string(StringView difficulty_string) const
     {
-        if (difficulty_string.matches("beginner"))
+        if (difficulty_string.matches("beginner"sv))
             return Difficulty::Beginner;
 
-        if (difficulty_string.equals_ignoring_case("intermediate"))
+        if (difficulty_string.equals_ignoring_ascii_case("intermediate"sv))
             return Difficulty::Intermediate;
 
-        if (difficulty_string.equals_ignoring_case("expert"))
+        if (difficulty_string.equals_ignoring_ascii_case("expert"sv))
             return Difficulty::Expert;
 
-        if (difficulty_string.equals_ignoring_case("madwoman"))
+        if (difficulty_string.equals_ignoring_ascii_case("madwoman"sv))
             return Difficulty::Madwoman;
 
-        if (difficulty_string.equals_ignoring_case("custom"))
+        if (difficulty_string.equals_ignoring_ascii_case("custom"sv))
             return Difficulty::Custom;
 
         return {};
@@ -104,9 +106,12 @@ public:
     void set_single_chording(bool new_val);
 
     void reset();
+    void generate_field(size_t start_row, size_t start_column);
 
 private:
-    Field(GUI::Label& flag_label, GUI::Label& time_label, GUI::Button& face_button, Function<void(Gfx::IntSize)> on_size_changed);
+    Field(GUI::Label& flag_label, GUI::Label& time_label, GUI::Button& face_button);
+
+    void initialize();
 
     virtual void paint_event(GUI::PaintEvent&) override;
 
@@ -121,7 +126,7 @@ private:
     void set_flag(Square&, bool);
 
     Square& square(size_t row, size_t column) { return *m_squares[row * columns() + column]; }
-    const Square& square(size_t row, size_t column) const { return *m_squares[row * columns() + column]; }
+    Square const& square(size_t row, size_t column) const { return *m_squares[row * columns() + column]; }
 
     void flood_fill(Square&);
     void on_square_clicked_impl(Square&, bool);
@@ -161,5 +166,4 @@ private:
     bool m_chord_preview { false };
     bool m_first_click { true };
     bool m_single_chording { true };
-    Function<void(Gfx::IntSize)> m_on_size_changed;
 };

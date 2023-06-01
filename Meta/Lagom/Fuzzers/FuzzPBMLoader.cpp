@@ -4,13 +4,18 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibGfx/PBMLoader.h>
+#include <LibGfx/ImageFormats/PBMLoader.h>
 #include <stddef.h>
 #include <stdint.h>
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
 {
-    Gfx::PBMImageDecoderPlugin decoder(data, size);
-    (void)decoder.frame(0);
+    auto decoder_or_error = Gfx::PBMImageDecoderPlugin::create({ data, size });
+    if (decoder_or_error.is_error())
+        return 0;
+    auto decoder = decoder_or_error.release_value();
+    if (!decoder->initialize().is_error()) {
+        (void)decoder->frame(0);
+    }
     return 0;
 }

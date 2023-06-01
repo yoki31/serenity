@@ -22,6 +22,7 @@ public:
     constexpr size_t tell_remaining() const { return m_input.length() - m_index; }
 
     StringView remaining() const { return m_input.substring_view(m_index); }
+    StringView input() const { return m_input; }
 
     constexpr bool is_eof() const { return m_index >= m_input.length(); }
 
@@ -43,7 +44,7 @@ public:
         return true;
     }
 
-    constexpr bool next_is(const char* expected) const
+    constexpr bool next_is(char const* expected) const
     {
         for (size_t i = 0; expected[i] != '\0'; ++i)
             if (peek(i) != expected[i])
@@ -70,7 +71,7 @@ public:
     }
 
     template<typename T>
-    constexpr bool consume_specific(const T& next)
+    constexpr bool consume_specific(T const& next)
     {
         if (!next_is(next))
             return false;
@@ -83,17 +84,19 @@ public:
         return true;
     }
 
-    bool consume_specific(const String& next)
+#ifndef KERNEL
+    bool consume_specific(DeprecatedString const& next)
     {
         return consume_specific(StringView { next });
     }
+#endif
 
-    constexpr bool consume_specific(const char* next)
+    constexpr bool consume_specific(char const* next)
     {
-        return consume_specific(StringView { next });
+        return consume_specific(StringView { next, __builtin_strlen(next) });
     }
 
-    constexpr char consume_escaped_character(char escape_char = '\\', StringView escape_map = "n\nr\rt\tb\bf\f")
+    constexpr char consume_escaped_character(char escape_char = '\\', StringView escape_map = "n\nr\rt\tb\bf\f"sv)
     {
         if (!consume_specific(escape_char))
             return consume();
@@ -112,16 +115,21 @@ public:
     StringView consume_all();
     StringView consume_line();
     StringView consume_until(char);
-    StringView consume_until(const char*);
+    StringView consume_until(char const*);
+    StringView consume_until(StringView);
     StringView consume_quoted_string(char escape_char = 0);
-    String consume_and_unescape_string(char escape_char = '\\');
+#ifndef KERNEL
+    DeprecatedString consume_and_unescape_string(char escape_char = '\\');
+#endif
 
     enum class UnicodeEscapeError {
         MalformedUnicodeEscape,
         UnicodeEscapeOverflow,
     };
 
+#ifndef KERNEL
     Result<u32, UnicodeEscapeError> consume_escaped_code_point(bool combine_surrogate_pairs = true);
+#endif
 
     constexpr void ignore(size_t count = 1)
     {
@@ -134,15 +142,13 @@ public:
         while (!is_eof() && peek() != stop) {
             ++m_index;
         }
-        ignore();
     }
 
-    constexpr void ignore_until(const char* stop)
+    constexpr void ignore_until(char const* stop)
     {
         while (!is_eof() && !next_is(stop)) {
             ++m_index;
         }
-        ignore(__builtin_strlen(stop));
     }
 
     /*
@@ -197,8 +203,7 @@ public:
             ++m_index;
     }
 
-    // Ignore characters until `pred` return true
-    // We don't skip the stop character as it may not be a unique value
+    // Ignore characters until `pred` returns true
     template<typename TPredicate>
     constexpr void ignore_until(TPredicate pred)
     {
@@ -211,8 +216,10 @@ protected:
     size_t m_index { 0 };
 
 private:
+#ifndef KERNEL
     Result<u32, UnicodeEscapeError> decode_code_point();
     Result<u32, UnicodeEscapeError> decode_single_or_paired_surrogate(bool combine_surrogate_pairs);
+#endif
 };
 
 constexpr auto is_any_of(StringView values)
@@ -220,12 +227,19 @@ constexpr auto is_any_of(StringView values)
     return [values](auto c) { return values.contains(c); };
 }
 
-constexpr auto is_path_separator = is_any_of("/\\");
-constexpr auto is_quote = is_any_of("'\"");
+constexpr auto is_not_any_of(StringView values)
+{
+    return [values](auto c) { return !values.contains(c); };
+}
+
+constexpr auto is_path_separator = is_any_of("/\\"sv);
+constexpr auto is_quote = is_any_of("'\""sv);
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::GenericLexer;
 using AK::is_any_of;
 using AK::is_path_separator;
 using AK::is_quote;
+#endif

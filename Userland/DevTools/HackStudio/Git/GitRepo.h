@@ -1,16 +1,17 @@
 /*
  * Copyright (c) 2020, Itamar S. <itamar8910@gmail.com>
+ * Copyright (c) 2021, Conor Byrne <conor@cbyrne.dev>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/DeprecatedString.h>
 #include <AK/LexicalPath.h>
 #include <AK/Optional.h>
 #include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
-#include <AK/String.h>
 #include <AK/Vector.h>
 
 namespace HackStudio {
@@ -27,35 +28,37 @@ public:
         RefPtr<GitRepo> repo;
     };
 
-    static CreateResult try_to_create(const LexicalPath& repository_root);
-    static RefPtr<GitRepo> initialize_repository(const LexicalPath& repository_root);
+    static CreateResult try_to_create(DeprecatedString const& repository_root);
+    static RefPtr<GitRepo> initialize_repository(DeprecatedString const& repository_root);
 
-    Vector<LexicalPath> unstaged_files() const;
-    Vector<LexicalPath> staged_files() const;
-    bool stage(const LexicalPath& file);
-    bool unstage(const LexicalPath& file);
-    bool commit(const String& message);
-    Optional<String> original_file_content(const LexicalPath& file) const;
-    Optional<String> unstaged_diff(const LexicalPath& file) const;
-    bool is_tracked(const LexicalPath& file) const;
+    bool stage(DeprecatedString const& file);
+    bool unstage(DeprecatedString const& file);
+    bool commit(DeprecatedString const& message);
+    bool is_tracked(DeprecatedString const& file) const;
+
+    Vector<DeprecatedString> unstaged_files() const;
+    Vector<DeprecatedString> staged_files() const;
+    Optional<DeprecatedString> original_file_content(DeprecatedString const& file) const;
+    Optional<DeprecatedString> unstaged_diff(DeprecatedString const& file) const;
 
 private:
-    static String command_wrapper(const Vector<String>& command_parts, const LexicalPath& chdir);
     static bool git_is_installed();
-    static bool git_repo_exists(const LexicalPath& repo_root);
-    static Vector<LexicalPath> parse_files_list(const String&);
+    static bool git_repo_exists(DeprecatedString const& repo_root);
 
-    explicit GitRepo(const LexicalPath& repository_root)
+    static DeprecatedString command_wrapper(Vector<DeprecatedString> const& command_parts, DeprecatedString const& chdir);
+    static Vector<DeprecatedString> parse_files_list(DeprecatedString const&);
+
+    explicit GitRepo(DeprecatedString const& repository_root)
         : m_repository_root(repository_root)
     {
     }
 
-    Vector<LexicalPath> modified_files() const;
-    Vector<LexicalPath> untracked_files() const;
+    Vector<DeprecatedString> modified_files() const;
+    Vector<DeprecatedString> untracked_files() const;
 
-    String command(const Vector<String>& command_parts) const;
+    DeprecatedString command(Vector<DeprecatedString> const& command_parts) const;
 
-    LexicalPath m_repository_root;
+    DeprecatedString m_repository_root;
 };
 
 }

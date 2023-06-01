@@ -112,8 +112,44 @@ test("allow binding patterns", () => {
     expect(counter).toBe(3);
 });
 
-test("allow member expression as variable", () => {
-    const f = {};
-    for (f.a of "abc");
-    expect(f.a).toBe("c");
+describe("special left hand sides", () => {
+    test("allow member expression as variable", () => {
+        const f = {};
+        for (f.a of "abc");
+        expect(f.a).toBe("c");
+    });
+
+    test("allow member expression of function call", () => {
+        const b = {};
+        function f() {
+            return b;
+        }
+
+        for (f().a of "abc");
+
+        expect(f().a).toBe("c");
+    });
+
+    test("call function is allowed in parsing but fails in runtime", () => {
+        function f() {
+            expect().fail();
+        }
+
+        // Does not fail since it does not iterate but prettier does not like it so we use eval.
+        expect("for (f() of []);").toEvalTo(undefined);
+
+        expect(() => {
+            eval("for (f() of [0]) { expect().fail() }");
+        }).toThrowWithMessage(ReferenceError, "Invalid left-hand side in assignment");
+    });
+
+    test("Cannot change constant declaration in body", () => {
+        const vals = [];
+        for (const v of [1, 2]) {
+            expect(() => v++).toThrowWithMessage(TypeError, "Invalid assignment to const variable");
+            vals.push(v);
+        }
+
+        expect(vals).toEqual([1, 2]);
+    });
 });

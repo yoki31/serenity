@@ -13,11 +13,22 @@
 namespace Wasm {
 
 struct BytecodeInterpreter : public Interpreter {
+    explicit BytecodeInterpreter(StackInfo const& stack_info)
+        : m_stack_info(stack_info)
+    {
+    }
+
     virtual void interpret(Configuration&) override;
     virtual ~BytecodeInterpreter() override = default;
-    virtual bool did_trap() const override { return m_trap.has_value(); }
-    virtual String trap_reason() const override { return m_trap.value().reason; }
-    virtual void clear_trap() override { m_trap.clear(); }
+    virtual bool did_trap() const override { return !m_trap.has<Empty>(); }
+    virtual DeprecatedString trap_reason() const override
+    {
+        return m_trap.visit(
+            [](Empty) -> DeprecatedString { VERIFY_NOT_REACHED(); },
+            [](Trap const& trap) { return trap.reason; },
+            [](JS::Completion const& completion) { return completion.value()->to_string_without_side_effects().release_value().to_deprecated_string(); });
+    }
+    virtual void clear_trap() override { m_trap = Empty {}; }
 
     struct CallFrameHandle {
         explicit CallFrameHandle(BytecodeInterpreter& interpreter, Configuration& configuration)
@@ -39,7 +50,7 @@ protected:
     void load_and_push(Configuration&, Instruction const&);
     template<typename PopT, typename StoreT>
     void pop_and_store(Configuration&, Instruction const&);
-    void store_to_memory(Configuration&, Instruction const&, ReadonlyBytes data);
+    void store_to_memory(Configuration&, Instruction const&, ReadonlyBytes data, i32 base);
     void call_address(Configuration&, FunctionAddress);
 
     template<typename PopType, typename PushType, typename Operator>
@@ -62,14 +73,18 @@ protected:
     {
         if (!value)
             m_trap = Trap { reason };
-        return m_trap.has_value();
+        return !m_trap.has<Empty>();
     }
 
-    Optional<Trap> m_trap;
-    StackInfo m_stack_info;
+    Variant<Trap, JS::Completion, Empty> m_trap;
+    StackInfo const& m_stack_info;
 };
 
 struct DebuggerBytecodeInterpreter : public BytecodeInterpreter {
+    DebuggerBytecodeInterpreter(StackInfo const& stack_info)
+        : BytecodeInterpreter(stack_info)
+    {
+    }
     virtual ~DebuggerBytecodeInterpreter() override = default;
 
     Function<bool(Configuration&, InstructionPointer&, Instruction const&)> pre_interpret_hook;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Tim Flynn <trflynn89@pm.me>
+ * Copyright (c) 2021, Tim Flynn <trflynn89@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,6 +11,20 @@
 #include <AK/StringView.h>
 #include <AK/Variant.h>
 #include <AK/Vector.h>
+
+TEST_CASE(mix)
+{
+    double a = 1.0;
+    double b = 3.0;
+
+    EXPECT_APPROXIMATE(mix(a, b, 0.0), 1.0);
+    EXPECT_APPROXIMATE(mix(a, b, 0.5), 2.0);
+    EXPECT_APPROXIMATE(mix(a, b, 1.0), 3.0);
+
+    EXPECT_APPROXIMATE(mix(b, a, 0.0), 3.0);
+    EXPECT_APPROXIMATE(mix(b, a, 0.5), 2.0);
+    EXPECT_APPROXIMATE(mix(b, a, 1.0), 1.0);
+}
 
 TEST_CASE(swap)
 {

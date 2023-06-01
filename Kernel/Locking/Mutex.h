@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, Idan Horowitz <idan.horowitz@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -26,30 +27,37 @@ class Mutex {
 public:
     using Mode = LockMode;
 
-    Mutex(StringView name = {})
+    // FIXME: remove this after annihilating Process::m_big_lock
+    enum class MutexBehavior {
+        Regular,
+        BigLock,
+    };
+
+    Mutex(StringView name = {}, MutexBehavior behavior = MutexBehavior::Regular)
         : m_name(name)
+        , m_behavior(behavior)
     {
     }
     ~Mutex() = default;
 
     void lock(Mode mode = Mode::Exclusive, LockLocation const& location = LockLocation::current());
-    void restore_lock(Mode, u32, LockLocation const& location = LockLocation::current());
+    void restore_exclusive_lock(u32, LockLocation const& location = LockLocation::current());
 
     void unlock();
-    [[nodiscard]] Mode force_unlock_if_locked(u32&);
+    [[nodiscard]] Mode force_unlock_exclusive_if_locked(u32&);
     [[nodiscard]] bool is_locked() const
     {
         SpinlockLocker lock(m_lock);
         return m_mode != Mode::Unlocked;
     }
-    [[nodiscard]] bool is_locked_by_current_thread() const
+
+    [[nodiscard]] bool is_exclusively_locked_by_current_thread() const
     {
         SpinlockLocker lock(m_lock);
-        if (m_mode == Mode::Exclusive)
-            return m_holder == Thread::current();
-        if (m_mode == Mode::Shared)
-            return m_shared_holders.contains(Thread::current());
-        return false;
+        VERIFY(m_mode != Mode::Shared); // This method should only be used on exclusively-held locks
+        if (m_mode == Mode::Unlocked)
+            return false;
+        return m_holder == bit_cast<uintptr_t>(Thread::current());
     }
 
     [[nodiscard]] StringView name() const { return m_name; }
@@ -71,34 +79,52 @@ public:
 private:
     using BlockedThreadList = IntrusiveList<&Thread::m_blocked_threads_list_node>;
 
-    ALWAYS_INLINE BlockedThreadList& thread_list_for_mode(Mode mode)
-    {
-        VERIFY(mode == Mode::Exclusive || mode == Mode::Shared);
-        return mode == Mode::Exclusive ? m_blocked_threads_list_exclusive : m_blocked_threads_list_shared;
-    }
+    // FIXME: remove this after annihilating Process::m_big_lock
+    using BigLockBlockedThreadList = IntrusiveList<&Thread::m_big_lock_blocked_threads_list_node>;
 
-    void block(Thread&, Mode, SpinlockLocker<Spinlock>&, u32);
+    // FIXME: Allow any lock rank.
+    void block(Thread&, Mode, SpinlockLocker<Spinlock<LockRank::None>>&, u32);
     void unblock_waiters(Mode);
 
     StringView m_name;
     Mode m_mode { Mode::Unlocked };
 
+    // FIXME: remove this after annihilating Process::m_big_lock
+    MutexBehavior m_behavior;
+
     // When locked exclusively, only the thread already holding the lock can
     // lock it again. When locked in shared mode, any thread can do that.
     u32 m_times_locked { 0 };
 
-    // One of the threads that hold this lock, or nullptr. When locked in shared
-    // mode, this is stored on best effort basis: nullptr value does *not* mean
+    // The address of one of the threads that hold this lock, or 0.
+    // When locked in shared mode, this is stored on best effort basis: 0 does *not* mean
     // the lock is unlocked, it just means we don't know which threads hold it.
-    // When locked exclusively, this is always the one thread that holds the
-    // lock.
-    RefPtr<Thread> m_holder;
-    HashMap<Thread*, u32> m_shared_holders;
+    // When locked exclusively, this is always the one thread that holds the lock.
+    uintptr_t m_holder { 0 };
+    size_t m_shared_holders { 0 };
 
-    BlockedThreadList m_blocked_threads_list_exclusive;
-    BlockedThreadList m_blocked_threads_list_shared;
+    struct BlockedThreadLists {
+        BlockedThreadList exclusive;
+        BlockedThreadList shared;
 
-    mutable Spinlock m_lock;
+        // FIXME: remove this after annihilating Process::m_big_lock
+        BigLockBlockedThreadList exclusive_big_lock;
+
+        ALWAYS_INLINE BlockedThreadList& list_for_mode(Mode mode)
+        {
+            VERIFY(mode == Mode::Exclusive || mode == Mode::Shared);
+            return mode == Mode::Exclusive ? exclusive : shared;
+        }
+    };
+    // FIXME: Use a specific lock rank passed by constructor.
+    SpinlockProtected<BlockedThreadLists, LockRank::None> m_blocked_thread_lists {};
+
+    // FIXME: See above.
+    mutable Spinlock<LockRank::None> m_lock {};
+
+#if LOCK_SHARED_UPGRADE_DEBUG
+    HashMap<uintptr_t, u32> m_shared_holders_map;
+#endif
 };
 
 class MutexLocker {

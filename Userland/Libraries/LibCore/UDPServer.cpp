@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, Alexander Narsudinov <a.narsudinov@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,6 +8,7 @@
 #include <AK/IPv4Address.h>
 #include <AK/Types.h>
 #include <LibCore/Notifier.h>
+#include <LibCore/System.h>
 #include <LibCore/UDPServer.h>
 #include <errno.h>
 #include <stdio.h>
@@ -38,7 +40,7 @@ UDPServer::~UDPServer()
     ::close(m_fd);
 }
 
-bool UDPServer::bind(const IPv4Address& address, u16 port)
+bool UDPServer::bind(IPv4Address const& address, u16 port)
 {
     if (m_bound)
         return false;
@@ -46,33 +48,27 @@ bool UDPServer::bind(const IPv4Address& address, u16 port)
     auto saddr = SocketAddress(address, port);
     auto in = saddr.to_sockaddr_in();
 
-    if (::bind(m_fd, (const sockaddr*)&in, sizeof(in)) != 0) {
+    if (::bind(m_fd, (sockaddr const*)&in, sizeof(in)) != 0) {
         perror("UDPServer::bind");
         return false;
     }
 
     m_bound = true;
 
-    m_notifier = Notifier::construct(m_fd, Notifier::Event::Read, this);
-    m_notifier->on_ready_to_read = [this] {
+    m_notifier = Notifier::construct(m_fd, Notifier::Type::Read, this);
+    m_notifier->on_activation = [this] {
         if (on_ready_to_receive)
             on_ready_to_receive();
     };
     return true;
 }
 
-ByteBuffer UDPServer::receive(size_t size, sockaddr_in& in)
+ErrorOr<ByteBuffer> UDPServer::receive(size_t size, sockaddr_in& in)
 {
-    // FIXME: Handle possible OOM situation.
-    auto buf = ByteBuffer::create_uninitialized(size).release_value();
+    auto buf = TRY(ByteBuffer::create_uninitialized(size));
     socklen_t in_len = sizeof(in);
-    ssize_t rlen = ::recvfrom(m_fd, buf.data(), size, 0, (sockaddr*)&in, &in_len);
-    if (rlen < 0) {
-        dbgln("recvfrom: {}", strerror(errno));
-        return {};
-    }
-
-    buf.resize(rlen);
+    auto bytes_received = TRY(Core::System::recvfrom(m_fd, buf.data(), size, 0, (sockaddr*)&in, &in_len));
+    buf.resize(bytes_received);
     return buf;
 }
 
@@ -100,6 +96,20 @@ Optional<u16> UDPServer::local_port() const
         return {};
 
     return ntohs(address.sin_port);
+}
+
+ErrorOr<size_t> UDPServer::send(ReadonlyBytes buffer, sockaddr_in const& to)
+{
+    if (m_fd < 0) {
+        return Error::from_errno(EBADF);
+    }
+
+    auto result = ::sendto(m_fd, buffer.data(), buffer.size(), 0, (sockaddr const*)&to, sizeof(to));
+    if (result < 0) {
+        return Error::from_errno(errno);
+    }
+
+    return result;
 }
 
 }

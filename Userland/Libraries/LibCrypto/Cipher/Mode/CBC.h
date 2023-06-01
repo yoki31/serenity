@@ -6,10 +6,13 @@
 
 #pragma once
 
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/StringView.h>
 #include <LibCrypto/Cipher/Mode/Mode.h>
+
+#ifndef KERNEL
+#    include <AK/DeprecatedString.h>
+#endif
 
 namespace Crypto {
 namespace Cipher {
@@ -26,15 +29,20 @@ public:
     {
     }
 
-    virtual String class_name() const override
+#ifndef KERNEL
+    virtual DeprecatedString class_name() const override
     {
         StringBuilder builder;
         builder.append(this->cipher().class_name());
-        builder.append("_CBC");
-        return builder.build();
+        builder.append("_CBC"sv);
+        return builder.to_deprecated_string();
     }
+#endif
 
-    virtual size_t IV_length() const override { return IVSizeInBits / 8; }
+    virtual size_t IV_length() const override
+    {
+        return IVSizeInBits / 8;
+    }
 
     virtual void encrypt(ReadonlyBytes in, Bytes& out, ReadonlyBytes ivec = {}, Bytes* ivec_out = nullptr) override
     {

@@ -1,9 +1,9 @@
 #!/usr/bin/env -S bash ../.port_include.sh
 port=vim
-version=8.2.2772
+version=8.2.4554
 workdir="${port}-${version}"
 useconfigure="true"
-files="https://github.com/vim/vim/archive/refs/tags/v${version}.tar.gz vim-v${version}.tar.gz 47613400943bbf3e110c38e8c4923b9e51c1d63d9774313820e1d9b4c4bb9e11"
+files="https://github.com/vim/vim/archive/refs/tags/v${version}.tar.gz vim-v${version}.tar.gz 206c8fc2535df33b9ea62fa1c9acae66c981a3e3aa4de0f652ef3a25e2b92571"
 auth_type=sha256
 configopts=("--with-tlib=tinfo" "--with-features=normal")
 depends=("ncurses" "gettext")

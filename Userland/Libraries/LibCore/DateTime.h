@@ -6,7 +6,8 @@
 
 #pragma once
 
-#include <AK/String.h>
+#include <AK/DeprecatedString.h>
+#include <AK/StringView.h>
 #include <LibIPC/Forward.h>
 #include <time.h>
 
@@ -30,14 +31,16 @@ public:
     bool is_leap_year() const;
 
     void set_time(int year, int month = 1, int day = 1, int hour = 0, int minute = 0, int second = 0);
-    String to_string(const String& format = "%Y-%m-%d %H:%M:%S") const;
+    ErrorOr<String> to_string(StringView format = "%Y-%m-%d %H:%M:%S"sv) const;
+    DeprecatedString to_deprecated_string(StringView format = "%Y-%m-%d %H:%M:%S"sv) const;
 
     static DateTime create(int year, int month = 1, int day = 1, int hour = 0, int minute = 0, int second = 0);
     static DateTime now();
     static DateTime from_timestamp(time_t);
-    static Optional<DateTime> parse(const String& format, const String& string);
+    static Optional<DateTime> parse(StringView format, DeprecatedString const& string);
 
-    bool operator<(const DateTime& other) const { return m_timestamp < other.m_timestamp; }
+    bool operator<(DateTime const& other) const { return m_timestamp < other.m_timestamp; }
+    bool operator==(DateTime const& other) const { return m_timestamp == other.m_timestamp; }
 
 private:
     time_t m_timestamp { 0 };
@@ -51,9 +54,25 @@ private:
 
 }
 
+namespace AK {
+template<>
+struct Formatter<Core::DateTime> : StandardFormatter {
+    ErrorOr<void> format(FormatBuilder& builder, Core::DateTime const& value)
+    {
+        // Can't use DateTime::to_string() here: It doesn't propagate allocation failure.
+        return builder.builder().try_appendff("{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}"sv,
+            value.year(), value.month(), value.day(),
+            value.hour(), value.minute(), value.second());
+    }
+};
+}
+
 namespace IPC {
 
-bool encode(IPC::Encoder&, const Core::DateTime&);
-bool decode(IPC::Decoder&, Core::DateTime&);
+template<>
+ErrorOr<void> encode(Encoder&, Core::DateTime const&);
+
+template<>
+ErrorOr<Core::DateTime> decode(Decoder&);
 
 }

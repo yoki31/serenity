@@ -11,24 +11,20 @@ namespace Web {
 
 ContentFilter& ContentFilter::the()
 {
-    static ContentFilter* filter = new ContentFilter;
-    return *filter;
+    static ContentFilter filter;
+    return filter;
 }
 
-ContentFilter::ContentFilter()
-{
-}
+ContentFilter::ContentFilter() = default;
 
-ContentFilter::~ContentFilter()
-{
-}
+ContentFilter::~ContentFilter() = default;
 
 bool ContentFilter::is_filtered(const AK::URL& url) const
 {
-    if (url.protocol() == "data")
+    if (url.scheme() == "data")
         return false;
 
-    auto url_string = url.to_string();
+    auto url_string = url.to_deprecated_string();
 
     for (auto& pattern : m_patterns) {
         if (url_string.matches(pattern.text, CaseSensitivity::CaseSensitive))
@@ -37,15 +33,23 @@ bool ContentFilter::is_filtered(const AK::URL& url) const
     return false;
 }
 
-void ContentFilter::add_pattern(const String& pattern)
+ErrorOr<void> ContentFilter::set_patterns(ReadonlySpan<String> patterns)
 {
-    StringBuilder builder;
-    if (!pattern.starts_with('*'))
-        builder.append('*');
-    builder.append(pattern);
-    if (!pattern.ends_with('*'))
-        builder.append('*');
-    m_patterns.empend(builder.to_string());
+    m_patterns.clear_with_capacity();
+
+    for (auto const& pattern : patterns) {
+        StringBuilder builder;
+
+        if (!pattern.starts_with('*'))
+            TRY(builder.try_append('*'));
+        TRY(builder.try_append(pattern));
+        if (!pattern.ends_with('*'))
+            TRY(builder.try_append('*'));
+
+        TRY(m_patterns.try_empend(TRY(builder.to_string())));
+    }
+
+    return {};
 }
 
 }

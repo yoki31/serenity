@@ -1,85 +1,72 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, Undefine <undefine@undefine.pl>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/ScopeGuard.h>
 #include <LibCore/Account.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/GetPassword.h>
-#include <stdio.h>
+#include <LibCore/System.h>
+#include <LibMain/Main.h>
 #include <unistd.h>
 
-extern "C" int main(int, char**);
-
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath tty exec id", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath tty exec id"));
 
-    if (!isatty(STDIN_FILENO)) {
-        warnln("{}: standard in is not a terminal", argv[0]);
-        return 1;
-    }
-
-    const char* user = nullptr;
+    StringView first_positional;
+    StringView second_positional;
+    DeprecatedString command;
+    bool simulate_login = false;
 
     Core::ArgsParser args_parser;
-    args_parser.add_positional_argument(user, "User to switch to (defaults to user with UID 0)", "user", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.add_positional_argument(first_positional, "See --login", "-", Core::ArgsParser::Required::No);
+    args_parser.add_positional_argument(second_positional, "User to switch to (defaults to user with UID 0)", "user", Core::ArgsParser::Required::No);
+    args_parser.add_option(command, "Command to execute", "command", 'c', "command");
+    args_parser.add_option(simulate_login, "Simulate login", "login", 'l');
+    args_parser.parse(arguments);
 
-    if (geteuid() != 0) {
-        warnln("Not running as root :(");
-        return 1;
+    StringView user = first_positional;
+
+    if (first_positional == '-') {
+        simulate_login = true;
+        user = second_positional;
     }
 
-    auto account_or_error = (user)
-        ? Core::Account::from_name(user)
-        : Core::Account::from_uid(0);
-    if (account_or_error.is_error()) {
-        warnln("Core::Account::from_name: {}", account_or_error.error());
-        return 1;
-    }
+    if (geteuid() != 0)
+        return Error::from_string_literal("Not running as root :(");
 
-    if (pledge("stdio tty exec id", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    auto account = TRY(user.is_empty() ? Core::Account::from_uid(0) : Core::Account::from_name(user));
 
-    const auto& account = account_or_error.value();
+    TRY(Core::System::pledge("stdio rpath tty exec id"));
 
     if (getuid() != 0 && account.has_password()) {
-        auto password = Core::get_password();
-        if (password.is_error()) {
-            warnln("{}", password.error());
-            return 1;
-        }
+        if (!TRY(Core::System::isatty(STDIN_FILENO)))
+            return Error::from_string_literal("Standard input is not a terminal");
 
-        if (!account.authenticate(password.value())) {
-            warnln("Incorrect or disabled password.");
-            return 1;
-        }
+        auto password = TRY(Core::get_password());
+        if (!account.authenticate(password))
+            return Error::from_string_literal("Incorrect or disabled password.");
     }
 
-    if (pledge("stdio exec id", nullptr) < 0) {
-        perror("pledge");
-        return 1;
+    TRY(Core::System::pledge("stdio rpath exec id"));
+
+    TRY(account.login());
+
+    if (simulate_login)
+        TRY(Core::System::chdir(account.home_directory()));
+
+    TRY(Core::System::pledge("stdio exec"));
+
+    TRY(Core::System::setenv("HOME"sv, account.home_directory(), true));
+
+    if (command.is_null()) {
+        TRY(Core::System::exec(account.shell(), Array<StringView, 1> { account.shell().view() }, Core::System::SearchInPath::No));
+    } else {
+        TRY(Core::System::exec(account.shell(), Array<StringView, 3> { account.shell().view(), "-c"sv, command.view() }, Core::System::SearchInPath::No));
     }
 
-    if (!account.login()) {
-        perror("Core::Account::login");
-        return 1;
-    }
-
-    if (pledge("stdio exec", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
-
-    execl(account.shell().characters(), account.shell().characters(), nullptr);
-    perror("execl");
     return 1;
 }

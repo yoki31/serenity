@@ -1,3 +1,25 @@
+#import <ARIA/ARIAMixin.idl>
+#import <DOM/Attr.idl>
+#import <DOM/ChildNode.idl>
+#import <DOM/DOMTokenList.idl>
+#import <DOM/InnerHTML.idl>
+#import <DOM/NamedNodeMap.idl>
+#import <DOM/Node.idl>
+#import <DOM/NodeList.idl>
+#import <DOM/ParentNode.idl>
+#import <DOM/ShadowRoot.idl>
+#import <Geometry/DOMRect.idl>
+#import <Geometry/DOMRectList.idl>
+#import <HTML/Window.idl>
+
+enum ScrollLogicalPosition { "start", "center", "end", "nearest" };
+dictionary ScrollIntoViewOptions : ScrollOptions {
+    ScrollLogicalPosition block = "start";
+    ScrollLogicalPosition inline = "nearest";
+};
+
+// https://dom.spec.whatwg.org/#element
+[Exposed=Window]
 interface Element : Node {
     readonly attribute DOMString? namespaceURI;
     readonly attribute DOMString? prefix;
@@ -5,24 +27,33 @@ interface Element : Node {
     readonly attribute DOMString tagName;
 
     DOMString? getAttribute(DOMString qualifiedName);
-    undefined setAttribute(DOMString qualifiedName, DOMString value);
-    undefined removeAttribute(DOMString qualifiedName);
+    [CEReactions] undefined setAttribute(DOMString qualifiedName, DOMString value);
+    [CEReactions] undefined setAttributeNS(DOMString? namespace , DOMString qualifiedName , DOMString value);
+    [CEReactions] Attr? setAttributeNode(Attr attr);
+    [CEReactions] Attr? setAttributeNodeNS(Attr attr);
+
+    [CEReactions] undefined removeAttribute(DOMString qualifiedName);
+    [CEReactions] boolean toggleAttribute(DOMString qualifiedName, optional boolean force);
     boolean hasAttribute(DOMString qualifiedName);
     boolean hasAttributes();
     [SameObject] readonly attribute NamedNodeMap attributes;
+    sequence<DOMString> getAttributeNames();
+
+    Attr? getAttributeNode(DOMString qualifiedName);
 
     HTMLCollection getElementsByTagName(DOMString tagName);
     HTMLCollection getElementsByTagNameNS(DOMString? namespace, DOMString localName);
     HTMLCollection getElementsByClassName(DOMString className);
 
-    // FIXME: This should come from a InnerHTML mixin.
-    [LegacyNullToEmptyString, CEReactions] attribute DOMString innerHTML;
-
-    [Reflect] attribute DOMString id;
-    [Reflect=class] attribute DOMString className;
+    [Reflect, CEReactions] attribute DOMString id;
+    [Reflect=class, CEReactions] attribute DOMString className;
     [SameObject, PutForwards=value] readonly attribute DOMTokenList classList;
 
+    ShadowRoot attachShadow(ShadowRootInit init);
+    readonly attribute ShadowRoot? shadowRoot;
+
     boolean matches(DOMString selectors);
+    Element? closest(DOMString selectors);
 
     // legacy alias of .matches
     [ImplementedAs=matches] boolean webkitMatchesSelector(DOMString selectors);
@@ -30,26 +61,34 @@ interface Element : Node {
     readonly attribute Element? nextElementSibling;
     readonly attribute Element? previousElementSibling;
 
-    [ImplementedAs=style_for_bindings] readonly attribute CSSStyleDeclaration style;
-
-    // FIXME: These should all come from a ParentNode mixin
-    readonly attribute Element? firstElementChild;
-    readonly attribute Element? lastElementChild;
-    readonly attribute unsigned long childElementCount;
-
-    Element? querySelector(DOMString selectors);
-    [NewObject] NodeList querySelectorAll(DOMString selectors);
-
-    [SameObject] readonly attribute HTMLCollection children;
-
     DOMRect getBoundingClientRect();
+    DOMRectList getClientRects();
 
+    attribute unrestricted double scrollTop;
+    attribute unrestricted double scrollLeft;
+    readonly attribute long scrollWidth;
+    readonly attribute long scrollHeight;
     readonly attribute long clientTop;
     readonly attribute long clientLeft;
     readonly attribute long clientWidth;
     readonly attribute long clientHeight;
 
-    // FIXME: This should come from a ChildNode mixin
-    [CEReactions, Unscopable, ImplementedAs=remove_binding] undefined remove();
+    [CEReactions] Element? insertAdjacentElement(DOMString where, Element element);
+    undefined insertAdjacentText(DOMString where, DOMString data);
+    [CEReactions] undefined insertAdjacentHTML(DOMString position, DOMString text);
+
+    undefined scrollIntoView(optional (boolean or ScrollIntoViewOptions) arg = {});
 
 };
+
+dictionary ShadowRootInit {
+    required ShadowRootMode mode;
+    boolean delegatesFocus = false;
+    // FIXME: SlotAssignmentMode slotAssignment = "named";
+};
+
+Element includes ParentNode;
+Element includes ChildNode;
+Element includes InnerHTML;
+// https://www.w3.org/TR/wai-aria-1.2/#idl_element
+Element includes ARIAMixin;

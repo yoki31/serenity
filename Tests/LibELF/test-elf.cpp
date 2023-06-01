@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibC/elf.h>
-#include <LibCore/File.h>
+#include <LibFileSystem/FileSystem.h>
 #include <LibTest/TestCase.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -58,7 +58,8 @@ TEST_CASE(test_interp_header_tiny_p_filesz)
     int nwritten = write(fd, buffer, sizeof(buffer));
     EXPECT(nwritten);
 
-    auto elf_path = Core::File::read_link(String::formatted("/proc/{}/fd/{}", getpid(), fd));
+    auto elf_path_string = TRY_OR_FAIL(FileSystem::read_link(DeprecatedString::formatted("/proc/{}/fd/{}", getpid(), fd)));
+    auto elf_path = elf_path_string.to_deprecated_string();
     EXPECT(elf_path.characters());
 
     int rc = execl(elf_path.characters(), "test-elf", nullptr);
@@ -112,7 +113,8 @@ TEST_CASE(test_interp_header_p_filesz_larger_than_p_memsz)
     int nwritten = write(fd, buffer, sizeof(buffer));
     EXPECT(nwritten);
 
-    auto elf_path = Core::File::read_link(String::formatted("/proc/{}/fd/{}", getpid(), fd));
+    auto elf_path_string = TRY_OR_FAIL(FileSystem::read_link(DeprecatedString::formatted("/proc/{}/fd/{}", getpid(), fd)));
+    auto elf_path = elf_path_string.to_deprecated_string();
     EXPECT(elf_path.characters());
 
     int rc = execl(elf_path.characters(), "test-elf", nullptr);
@@ -170,7 +172,8 @@ TEST_CASE(test_interp_header_p_filesz_plus_p_offset_overflow_p_memsz)
     int nwritten = write(fd, buffer, sizeof(buffer));
     EXPECT(nwritten);
 
-    auto elf_path = Core::File::read_link(String::formatted("/proc/{}/fd/{}", getpid(), fd));
+    auto elf_path_string = TRY_OR_FAIL(FileSystem::read_link(DeprecatedString::formatted("/proc/{}/fd/{}", getpid(), fd)));
+    auto elf_path = elf_path_string.to_deprecated_string();
     EXPECT(elf_path.characters());
 
     int rc = execl(elf_path.characters(), "test-elf", nullptr);
@@ -225,7 +228,8 @@ TEST_CASE(test_load_header_p_memsz_zero)
     int nwritten = write(fd, buffer, sizeof(buffer));
     EXPECT(nwritten);
 
-    auto elf_path = Core::File::read_link(String::formatted("/proc/{}/fd/{}", getpid(), fd));
+    auto elf_path_string = TRY_OR_FAIL(FileSystem::read_link(DeprecatedString::formatted("/proc/{}/fd/{}", getpid(), fd)));
+    auto elf_path = elf_path_string.to_deprecated_string();
     EXPECT(elf_path.characters());
 
     int rc = execl(elf_path.characters(), "test-elf", nullptr);
@@ -280,7 +284,8 @@ TEST_CASE(test_load_header_p_memsz_not_equal_to_p_align)
     int nwritten = write(fd, buffer, sizeof(buffer));
     EXPECT(nwritten);
 
-    auto elf_path = Core::File::read_link(String::formatted("/proc/{}/fd/{}", getpid(), fd));
+    auto elf_path_string = TRY_OR_FAIL(FileSystem::read_link(DeprecatedString::formatted("/proc/{}/fd/{}", getpid(), fd)));
+    auto elf_path = elf_path_string.to_deprecated_string();
     EXPECT(elf_path.characters());
 
     int rc = execl(elf_path.characters(), "test-elf", nullptr);

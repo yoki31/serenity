@@ -9,26 +9,41 @@
 #include "CompilationUnit.h"
 #include <AK/Forward.h>
 #include <AK/Function.h>
-#include <AK/MemoryStream.h>
 #include <AK/Noncopyable.h>
 
 namespace Debug::Dwarf {
 
-class AddressRanges {
-    AK_MAKE_NONCOPYABLE(AddressRanges);
-    AK_MAKE_NONMOVABLE(AddressRanges);
+struct Range {
+    FlatPtr start { 0 };
+    FlatPtr end { 0 };
+};
+
+class AddressRangesV5 {
+    AK_MAKE_NONCOPYABLE(AddressRangesV5);
+    AK_MAKE_NONMOVABLE(AddressRangesV5);
 
 public:
-    AddressRanges(ReadonlyBytes range_lists_data, size_t offset, CompilationUnit const& compilation_unit);
+    // FIXME: This should be fine with using a non-owned stream.
+    AddressRangesV5(NonnullOwnPtr<Stream> range_lists_stream, CompilationUnit const& compilation_unit);
 
-    struct Range {
-        FlatPtr start { 0 };
-        FlatPtr end { 0 };
-    };
-    void for_each_range(Function<void(Range)>);
+    ErrorOr<void> for_each_range(Function<void(Range)>);
 
 private:
-    InputMemoryStream m_range_lists_stream;
+    NonnullOwnPtr<Stream> m_range_lists_stream;
+    CompilationUnit const& m_compilation_unit;
+};
+
+class AddressRangesV4 {
+    AK_MAKE_NONCOPYABLE(AddressRangesV4);
+    AK_MAKE_NONMOVABLE(AddressRangesV4);
+
+public:
+    AddressRangesV4(NonnullOwnPtr<Stream> ranges_stream, CompilationUnit const&);
+
+    ErrorOr<void> for_each_range(Function<void(Range)>);
+
+private:
+    NonnullOwnPtr<Stream> m_ranges_stream;
     CompilationUnit const& m_compilation_unit;
 };
 

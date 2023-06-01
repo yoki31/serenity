@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, Alex McGrath <amk@amk.ie>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -11,29 +12,48 @@
 #include <LibGUI/Menu.h>
 #include <LibGUI/Painter.h>
 #include <LibGUI/Window.h>
-#include <LibGfx/Font.h>
+#include <LibGfx/Font/Font.h>
 #include <LibGfx/Palette.h>
 
 REGISTER_WIDGET(GUI, LinkLabel)
 
 namespace GUI {
 
+ErrorOr<NonnullRefPtr<LinkLabel>> LinkLabel::try_create(String text)
+{
+    auto label = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) LinkLabel(move(text))));
+    TRY(label->create_actions());
+    TRY(label->create_menus());
+    return label;
+}
+
 LinkLabel::LinkLabel(String text)
     : Label(move(text))
 {
     set_foreground_role(Gfx::ColorRole::Link);
     set_focus_policy(FocusPolicy::TabFocus);
-    setup_actions();
 }
 
-void LinkLabel::setup_actions()
+ErrorOr<void> LinkLabel::create_actions()
 {
-    m_open_action = GUI::Action::create("Show in File Manager", {}, Gfx::Bitmap::try_load_from_file("/res/icons/16x16/app-file-manager.png").release_value_but_fixme_should_propagate_errors(), [&](const GUI::Action&) {
-        if (on_click)
-            on_click();
-    });
+    m_open_action = GUI::Action::create(
+        "Show in File Manager", TRY(Gfx::Bitmap::load_from_file("/res/icons/16x16/app-file-manager.png"sv)), [&](const GUI::Action&) {
+            if (on_click)
+                on_click();
+        },
+        this);
 
     m_copy_action = CommonActions::make_copy_action([this](auto&) { Clipboard::the().set_plain_text(text()); }, this);
+    return {};
+}
+
+ErrorOr<void> LinkLabel::create_menus()
+{
+    m_context_menu = TRY(Menu::try_create());
+    TRY(m_context_menu->try_add_action(*m_open_action));
+    TRY(m_context_menu->try_add_separator());
+    TRY(m_context_menu->try_add_action(*m_copy_action));
+    return {};
 }
 
 void LinkLabel::set_hovered(bool hover)
@@ -48,7 +68,7 @@ void LinkLabel::set_hovered(bool hover)
 
 void LinkLabel::mousemove_event(MouseEvent& event)
 {
-    static const int extra_target_width = 3;
+    constexpr int extra_target_width = 3;
     set_hovered(event.position().x() <= font().width(text()) + extra_target_width);
 }
 
@@ -78,7 +98,7 @@ void LinkLabel::paint_event(PaintEvent& event)
     GUI::Painter painter(*this);
 
     if (m_hovered)
-        painter.draw_line({ 0, rect().bottom() }, { font().width(text()), rect().bottom() }, palette().link());
+        painter.draw_line({ 0, rect().bottom() - 1 }, { font().width_rounded_up(text()), rect().bottom() - 1 }, palette().link());
 
     if (is_focused())
         painter.draw_focus_rect(text_rect(), palette().focus_outline());
@@ -99,7 +119,7 @@ void LinkLabel::did_change_text()
 void LinkLabel::update_tooltip_if_needed()
 {
     if (width() < font().width(text())) {
-        set_tooltip(text());
+        set_tooltip(text().to_deprecated_string());
     } else {
         set_tooltip({});
     }
@@ -113,12 +133,6 @@ void LinkLabel::resize_event(ResizeEvent& event)
 
 void LinkLabel::context_menu_event(ContextMenuEvent& event)
 {
-    if (!m_context_menu) {
-        m_context_menu = Menu::construct();
-        m_context_menu->add_action(*m_open_action);
-        m_context_menu->add_separator();
-        m_context_menu->add_action(*m_copy_action);
-    }
     m_context_menu->popup(event.screen_position(), m_open_action);
 }
 

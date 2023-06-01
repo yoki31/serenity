@@ -15,13 +15,20 @@ public:
     virtual ~CharacterDevice() override;
 
 protected:
-    CharacterDevice(unsigned major, unsigned minor)
+    CharacterDevice(MajorNumber major, MinorNumber minor)
         : Device(major, minor)
     {
     }
 
+    virtual void after_inserting_add_symlink_to_device_identifier_directory() override final;
+    virtual void before_will_be_destroyed_remove_symlink_from_device_identifier_directory() override final;
+
 private:
     virtual bool is_character_device() const final { return true; }
+
+    // FIXME: These methods will be eventually removed after all nodes in /sys/dev/char/ are symlinks
+    virtual void after_inserting_add_to_device_identifier_directory() override final;
+    virtual void before_will_be_destroyed_remove_from_device_identifier_directory() override final;
 };
 
 }

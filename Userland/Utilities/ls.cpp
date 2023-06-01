@@ -5,10 +5,10 @@
  */
 
 #include <AK/Assertions.h>
+#include <AK/DeprecatedString.h>
 #include <AK/HashMap.h>
 #include <AK/NumberFormat.h>
 #include <AK/QuickSort.h>
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
 #include <AK/URL.h>
 #include <AK/Utf8View.h>
@@ -16,7 +16,9 @@
 #include <LibCore/ArgsParser.h>
 #include <LibCore/DateTime.h>
 #include <LibCore/DirIterator.h>
-#include <LibCore/File.h>
+#include <LibCore/System.h>
+#include <LibFileSystem/FileSystem.h>
+#include <LibMain/Main.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -28,21 +30,22 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
 struct FileMetadata {
-    String name;
-    String path;
+    DeprecatedString name;
+    DeprecatedString path;
     struct stat stat {
     };
 };
 
-static int do_file_system_object_long(const char* path);
-static int do_file_system_object_short(const char* path);
+static int do_file_system_object_long(DeprecatedString const& path);
+static int do_file_system_object_short(DeprecatedString const& path);
 
-static bool print_names(const char* path, size_t longest_name, const Vector<FileMetadata>& files);
+static bool print_names(char const* path, size_t longest_name, Vector<FileMetadata> const& files);
 
 static bool filemetadata_comparator(FileMetadata& a, FileMetadata& b);
 
@@ -57,26 +60,25 @@ static bool flag_show_inode = false;
 static bool flag_print_numeric = false;
 static bool flag_hide_group = false;
 static bool flag_human_readable = false;
+static bool flag_human_readable_si = false;
 static bool flag_sort_by_timestamp = false;
 static bool flag_reverse_sort = false;
 static bool flag_disable_hyperlinks = false;
 static bool flag_recursive = false;
+static bool flag_force_newline = false;
 
 static size_t terminal_rows = 0;
 static size_t terminal_columns = 0;
 static bool output_is_terminal = false;
 
-static HashMap<uid_t, String> users;
-static HashMap<gid_t, String> groups;
+static HashMap<uid_t, DeprecatedString> users;
+static HashMap<gid_t, DeprecatedString> groups;
 
 static bool is_a_tty = false;
 
-int main(int argc, char** argv)
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    if (pledge("stdio rpath tty", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath tty"));
 
     struct winsize ws;
     int rc = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
@@ -93,18 +95,15 @@ int main(int argc, char** argv)
         flag_colorize = true;
     }
 
-    if (pledge("stdio rpath", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Core::System::pledge("stdio rpath"));
 
-    Vector<String> paths;
+    Vector<StringView> paths;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("List files in a directory.");
     args_parser.add_option(flag_show_dotfiles, "Show dotfiles", "all", 'a');
     args_parser.add_option(flag_show_almost_all_dotfiles, "Do not list implied . and .. directories", nullptr, 'A');
-    args_parser.add_option(flag_ignore_backups, "Do not list implied entries ending with ~", "--ignore-backups", 'B');
+    args_parser.add_option(flag_ignore_backups, "Do not list implied entries ending with ~", "ignore-backups", 'B');
     args_parser.add_option(flag_list_directories_only, "List directories themselves, not their contents", "directory", 'd');
     args_parser.add_option(flag_long, "Display long info", "long", 'l');
     args_parser.add_option(flag_sort_by_timestamp, "Sort files by timestamp", nullptr, 't');
@@ -115,10 +114,12 @@ int main(int argc, char** argv)
     args_parser.add_option(flag_print_numeric, "In long format, display numeric UID/GID", "numeric-uid-gid", 'n');
     args_parser.add_option(flag_hide_group, "In long format, do not show group information", nullptr, 'o');
     args_parser.add_option(flag_human_readable, "Print human-readable sizes", "human-readable", 'h');
+    args_parser.add_option(flag_human_readable_si, "Print human-readable sizes in SI units", "si", 0);
     args_parser.add_option(flag_disable_hyperlinks, "Disable hyperlinks", "no-hyperlinks", 'K');
     args_parser.add_option(flag_recursive, "List subdirectories recursively", "recursive", 'R');
+    args_parser.add_option(flag_force_newline, "List one file per line", nullptr, '1');
     args_parser.add_positional_argument(paths, "Directory to list", "path", Core::ArgsParser::Required::No);
-    args_parser.parse(argc, argv);
+    args_parser.parse(arguments);
 
     if (flag_show_almost_all_dotfiles)
         flag_show_dotfiles = true;
@@ -134,23 +135,25 @@ int main(int argc, char** argv)
         endgrent();
     }
 
-    auto do_file_system_object = [&](const char* path) {
+    auto do_file_system_object = [&](DeprecatedString const& path) {
         if (flag_long)
             return do_file_system_object_long(path);
         return do_file_system_object_short(path);
     };
 
     if (paths.is_empty())
-        paths.append(".");
+        paths.append("."sv);
 
     Vector<FileMetadata> files;
     for (auto& path : paths) {
         FileMetadata metadata;
         metadata.name = path;
 
-        int rc = lstat(path.characters(), &metadata.stat);
-        if (rc < 0)
+        int rc = lstat(DeprecatedString(path).characters(), &metadata.stat);
+        if (rc < 0) {
             perror("lstat");
+            continue;
+        }
 
         files.append(metadata);
     }
@@ -161,18 +164,18 @@ int main(int argc, char** argv)
     for (size_t i = 0; i < files.size(); i++) {
         auto path = files[i].name;
 
-        if (flag_recursive && Core::File::is_directory(path)) {
+        if (flag_recursive && FileSystem::is_directory(path)) {
             size_t subdirs = 0;
             Core::DirIterator di(path, Core::DirIterator::SkipParentAndBaseDir);
 
             if (di.has_error()) {
                 status = 1;
-                fprintf(stderr, "%s: %s\n", path.characters(), di.error_string());
+                fprintf(stderr, "%s: %s\n", path.characters(), strerror(di.error().code()));
             }
 
             while (di.has_next()) {
-                String directory = di.next_full_path();
-                if (Core::File::is_directory(directory) && !Core::File::is_link(directory)) {
+                DeprecatedString directory = di.next_full_path();
+                if (FileSystem::is_directory(directory) && !FileSystem::is_link(directory)) {
                     ++subdirs;
                     FileMetadata new_file;
                     new_file.name = move(directory);
@@ -181,11 +184,11 @@ int main(int argc, char** argv)
             }
         }
 
-        bool show_dir_separator = files.size() > 1 && Core::File::is_directory(path) && !flag_list_directories_only;
+        bool show_dir_separator = files.size() > 1 && FileSystem::is_directory(path) && !flag_list_directories_only;
         if (show_dir_separator) {
             printf("%s:\n", path.characters());
         }
-        auto rc = do_file_system_object(path.characters());
+        auto rc = do_file_system_object(path);
         if (rc != 0)
             status = rc;
         if (show_dir_separator && i != files.size() - 1) {
@@ -206,21 +209,21 @@ static int print_escaped(StringView name)
         return utf8_name.length();
     }
 
-    for (int i = 0; name[i] != '\0'; i++) {
-        if (isprint(name[i])) {
-            putchar(name[i]);
+    for (auto c : name) {
+        if (is_ascii_printable(c)) {
+            putchar(c);
             printed++;
         } else {
-            printed += printf("\\%03d", name[i]);
+            printed += printf("\\%03d", c);
         }
     }
 
     return printed;
 }
 
-static String& hostname()
+static DeprecatedString& hostname()
 {
-    static String s_hostname;
+    static DeprecatedString s_hostname;
     if (s_hostname.is_null()) {
         char buffer[HOST_NAME_MAX];
         if (gethostname(buffer, sizeof(buffer)) == 0)
@@ -231,12 +234,13 @@ static String& hostname()
     return s_hostname;
 }
 
-static size_t print_name(const struct stat& st, const String& name, const char* path_for_link_resolution, const char* path_for_hyperlink)
+static size_t print_name(const struct stat& st, DeprecatedString const& name, Optional<StringView> path_for_link_resolution, StringView path_for_hyperlink)
 {
     if (!flag_disable_hyperlinks) {
-        auto full_path = Core::File::real_path_for(path_for_hyperlink);
-        if (!full_path.is_null()) {
-            auto url = URL::create_with_file_scheme(full_path, {}, hostname());
+        auto full_path_or_error = FileSystem::real_path(path_for_hyperlink);
+        if (!full_path_or_error.is_error()) {
+            auto fullpath = full_path_or_error.release_value();
+            auto url = URL::create_with_file_scheme(fullpath.to_deprecated_string(), {}, hostname());
             out("\033]8;;{}\033\\", url.serialize());
         }
     }
@@ -246,8 +250,8 @@ static size_t print_name(const struct stat& st, const String& name, const char* 
     if (!flag_colorize || !output_is_terminal) {
         nprinted = printf("%s", name.characters());
     } else {
-        const char* begin_color = "";
-        const char* end_color = "\033[0m";
+        char const* begin_color = "";
+        char const* end_color = "\033[0m";
 
         if (st.st_mode & S_ISVTX)
             begin_color = "\033[42;30;1m";
@@ -266,16 +270,16 @@ static size_t print_name(const struct stat& st, const String& name, const char* 
         else if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode))
             begin_color = "\033[33;1m";
         printf("%s", begin_color);
-        nprinted = print_escaped(name.characters());
+        nprinted = print_escaped(name);
         printf("%s", end_color);
     }
     if (S_ISLNK(st.st_mode)) {
-        if (path_for_link_resolution) {
-            auto link_destination = Core::File::read_link(path_for_link_resolution);
-            if (link_destination.is_null()) {
-                perror("readlink");
+        if (path_for_link_resolution.has_value()) {
+            auto link_destination_or_error = FileSystem::read_link(path_for_link_resolution.value());
+            if (link_destination_or_error.is_error()) {
+                warnln("readlink of {} failed: {}", path_for_link_resolution.value(), link_destination_or_error.error());
             } else {
-                nprinted += printf(" -> ") + print_escaped(link_destination.characters());
+                nprinted += printf(" -> ") + print_escaped(link_destination_or_error.value());
             }
         } else {
             if (flag_classify)
@@ -296,10 +300,10 @@ static size_t print_name(const struct stat& st, const String& name, const char* 
     return nprinted;
 }
 
-static bool print_filesystem_object(const String& path, const String& name, const struct stat& st)
+static bool print_filesystem_object(DeprecatedString const& path, DeprecatedString const& name, const struct stat& st)
 {
     if (flag_show_inode)
-        printf("%s ", String::formatted("{}", st.st_ino).characters());
+        printf("%s ", DeprecatedString::formatted("{}", st.st_ino).characters());
 
     if (S_ISDIR(st.st_mode))
         printf("d");
@@ -333,7 +337,7 @@ static bool print_filesystem_object(const String& path, const String& name, cons
     else
         printf("%c", st.st_mode & S_IXOTH ? 'x' : '-');
 
-    printf(" %3u", st.st_nlink);
+    printf(" %3lu", st.st_nlink);
 
     auto username = users.get(st.st_uid);
     if (!flag_print_numeric && username.has_value()) {
@@ -356,25 +360,27 @@ static bool print_filesystem_object(const String& path, const String& name, cons
     } else {
         if (flag_human_readable) {
             printf(" %10s ", human_readable_size(st.st_size).characters());
+        } else if (flag_human_readable_si) {
+            printf(" %10s ", human_readable_size(st.st_size, AK::HumanReadableBasedOn::Base10).characters());
         } else {
             printf(" %10" PRIu64 " ", (uint64_t)st.st_size);
         }
     }
 
-    printf("  %s  ", Core::DateTime::from_timestamp(st.st_mtime).to_string().characters());
+    printf("  %s  ", Core::DateTime::from_timestamp(st.st_mtime).to_deprecated_string().characters());
 
-    print_name(st, name, path.characters(), path.characters());
+    print_name(st, name, path.view(), path);
 
     printf("\n");
     return true;
 }
 
-static int do_file_system_object_long(const char* path)
+static int do_file_system_object_long(DeprecatedString const& path)
 {
     if (flag_list_directories_only) {
         struct stat stat {
         };
-        int rc = lstat(path, &stat);
+        int rc = lstat(path.characters(), &stat);
         if (rc < 0)
             perror("lstat");
         if (print_filesystem_object(path, path, stat))
@@ -391,17 +397,18 @@ static int do_file_system_object_long(const char* path)
     Core::DirIterator di(path, flags);
 
     if (di.has_error()) {
-        if (di.error() == ENOTDIR) {
+        auto error = di.error();
+        if (error.code() == ENOTDIR) {
             struct stat stat {
             };
-            int rc = lstat(path, &stat);
+            int rc = lstat(path.characters(), &stat);
             if (rc < 0)
                 perror("lstat");
             if (print_filesystem_object(path, path, stat))
                 return 0;
             return 2;
         }
-        fprintf(stderr, "%s: %s\n", path, di.error_string());
+        fprintf(stderr, "%s: %s\n", path.characters(), strerror(di.error().code()));
         return 1;
     }
 
@@ -418,7 +425,7 @@ static int do_file_system_object_long(const char* path)
         builder.append(path);
         builder.append('/');
         builder.append(metadata.name);
-        metadata.path = builder.to_string();
+        metadata.path = builder.to_deprecated_string();
         VERIFY(!metadata.path.is_null());
         int rc = lstat(metadata.path.characters(), &metadata.stat);
         if (rc < 0)
@@ -436,33 +443,33 @@ static int do_file_system_object_long(const char* path)
     return 0;
 }
 
-static bool print_filesystem_object_short(const char* path, const char* name, size_t* nprinted)
+static bool print_filesystem_object_short(DeprecatedString const& path, char const* name, size_t* nprinted)
 {
     struct stat st;
-    int rc = lstat(path, &st);
+    int rc = lstat(path.characters(), &st);
     if (rc == -1) {
-        printf("lstat(%s) failed: %s\n", path, strerror(errno));
+        printf("lstat(%s) failed: %s\n", path.characters(), strerror(errno));
         return false;
     }
 
     if (flag_show_inode)
-        printf("%s ", String::formatted("{}", st.st_ino).characters());
+        printf("%s ", DeprecatedString::formatted("{}", st.st_ino).characters());
 
-    *nprinted = print_name(st, name, nullptr, path);
+    *nprinted = print_name(st, name, {}, path);
     return true;
 }
 
-static bool print_names(const char* path, size_t longest_name, const Vector<FileMetadata>& files)
+static bool print_names(char const* path, size_t longest_name, Vector<FileMetadata> const& files)
 {
     size_t printed_on_row = 0;
     size_t nprinted = 0;
     for (size_t i = 0; i < files.size(); ++i) {
         auto& name = files[i].name;
         StringBuilder builder;
-        builder.append(path);
+        builder.append({ path, strlen(path) });
         builder.append('/');
         builder.append(name);
-        if (!print_filesystem_object_short(builder.to_string().characters(), name.characters(), &nprinted))
+        if (!print_filesystem_object_short(builder.to_deprecated_string(), name.characters(), &nprinted))
             return 2;
         int offset = 0;
         if (terminal_columns > longest_name)
@@ -478,7 +485,7 @@ static bool print_names(const char* path, size_t longest_name, const Vector<File
             for (size_t j = nprinted; i != (files.size() - 1) && j < column_width; ++j)
                 printf(" ");
         }
-        if ((printed_on_row + column_width) >= terminal_columns) {
+        if ((printed_on_row + column_width) >= terminal_columns || flag_force_newline) {
             printf("\n");
             printed_on_row = 0;
         }
@@ -486,11 +493,11 @@ static bool print_names(const char* path, size_t longest_name, const Vector<File
     return printed_on_row;
 }
 
-int do_file_system_object_short(const char* path)
+int do_file_system_object_short(DeprecatedString const& path)
 {
     if (flag_list_directories_only) {
         size_t nprinted = 0;
-        bool status = print_filesystem_object_short(path, path, &nprinted);
+        bool status = print_filesystem_object_short(path, path.characters(), &nprinted);
         printf("\n");
         if (status)
             return 0;
@@ -505,15 +512,16 @@ int do_file_system_object_short(const char* path)
 
     Core::DirIterator di(path, flags);
     if (di.has_error()) {
-        if (di.error() == ENOTDIR) {
+        auto error = di.error();
+        if (error.code() == ENOTDIR) {
             size_t nprinted = 0;
-            bool status = print_filesystem_object_short(path, path, &nprinted);
+            bool status = print_filesystem_object_short(path, path.characters(), &nprinted);
             printf("\n");
             if (status)
                 return 0;
             return 2;
         }
-        fprintf(stderr, "%s: %s\n", path, di.error_string());
+        fprintf(stderr, "%s: %s\n", path.characters(), strerror(di.error().code()));
         return 1;
     }
 
@@ -530,7 +538,7 @@ int do_file_system_object_short(const char* path)
         builder.append(path);
         builder.append('/');
         builder.append(metadata.name);
-        metadata.path = builder.to_string();
+        metadata.path = builder.to_deprecated_string();
         VERIFY(!metadata.path.is_null());
         int rc = lstat(metadata.path.characters(), &metadata.stat);
         if (rc < 0)
@@ -542,7 +550,7 @@ int do_file_system_object_short(const char* path)
     }
     quick_sort(files, filemetadata_comparator);
 
-    if (print_names(path, longest_name, files))
+    if (print_names(path.characters(), longest_name, files))
         printf("\n");
     return 0;
 }

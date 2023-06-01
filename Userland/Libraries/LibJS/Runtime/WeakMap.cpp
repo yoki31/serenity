@@ -8,31 +8,22 @@
 
 namespace JS {
 
-WeakMap* WeakMap::create(GlobalObject& global_object)
+NonnullGCPtr<WeakMap> WeakMap::create(Realm& realm)
 {
-    return global_object.heap().allocate<WeakMap>(global_object, *global_object.weak_map_prototype());
+    return realm.heap().allocate<WeakMap>(realm, realm.intrinsics().weak_map_prototype()).release_allocated_value_but_fixme_should_propagate_errors();
 }
 
 WeakMap::WeakMap(Object& prototype)
-    : Object(prototype)
+    : Object(ConstructWithPrototypeTag::Tag, prototype)
     , WeakContainer(heap())
-{
-}
-
-WeakMap::~WeakMap()
 {
 }
 
 void WeakMap::remove_dead_cells(Badge<Heap>)
 {
-    // FIXME: Do this in a single pass.
-    Vector<Cell*> to_remove;
-    for (auto& it : m_values) {
-        if (it.key->state() != Cell::State::Live)
-            to_remove.append(it.key);
-    }
-    for (auto* cell : to_remove)
-        m_values.remove(cell);
+    m_values.remove_all_matching([](Cell* key, Value) {
+        return key->state() != Cell::State::Live;
+    });
 }
 
 void WeakMap::visit_edges(Visitor& visitor)

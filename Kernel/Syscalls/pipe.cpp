@@ -9,21 +9,18 @@
 
 namespace Kernel {
 
-ErrorOr<FlatPtr> Process::sys$pipe(int pipefd[2], int flags)
+ErrorOr<FlatPtr> Process::sys$pipe(Userspace<int*> pipefd, int flags)
 {
-    VERIFY_PROCESS_BIG_LOCK_ACQUIRED(this)
-    REQUIRE_PROMISE(stdio);
-    if (fds().open_count() + 2 > fds().max_open())
-        return EMFILE;
+    VERIFY_NO_PROCESS_BIG_LOCK(this);
+    TRY(require_promise(Pledge::stdio));
+
     // Reject flags other than O_CLOEXEC, O_NONBLOCK
     if ((flags & (O_CLOEXEC | O_NONBLOCK)) != flags)
         return EINVAL;
 
     u32 fd_flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
-    auto fifo = TRY(FIFO::try_create(uid()));
-
-    auto reader_fd_allocation = TRY(m_fds.allocate());
-    auto writer_fd_allocation = TRY(m_fds.allocate());
+    auto credentials = this->credentials();
+    auto fifo = TRY(FIFO::try_create(credentials->uid()));
 
     auto reader_description = TRY(fifo->open_direction(FIFO::Direction::Reader));
     auto writer_description = TRY(fifo->open_direction(FIFO::Direction::Writer));
@@ -35,11 +32,25 @@ ErrorOr<FlatPtr> Process::sys$pipe(int pipefd[2], int flags)
         writer_description->set_blocking(false);
     }
 
-    m_fds[reader_fd_allocation.fd].set(move(reader_description), fd_flags);
-    m_fds[writer_fd_allocation.fd].set(move(writer_description), fd_flags);
+    TRY(m_fds.with_exclusive([&](auto& fds) -> ErrorOr<void> {
+        auto reader_fd_allocation = TRY(fds.allocate());
+        auto writer_fd_allocation = TRY(fds.allocate());
 
-    TRY(copy_to_user(&pipefd[0], &reader_fd_allocation.fd));
-    TRY(copy_to_user(&pipefd[1], &writer_fd_allocation.fd));
+        fds[reader_fd_allocation.fd].set(move(reader_description), fd_flags);
+        fds[writer_fd_allocation.fd].set(move(writer_description), fd_flags);
+
+        int fds_for_userspace[2] = {
+            reader_fd_allocation.fd,
+            writer_fd_allocation.fd,
+        };
+        if (copy_n_to_user(pipefd, fds_for_userspace, 2).is_error()) {
+            // Avoid leaking both file descriptors on error.
+            fds[reader_fd_allocation.fd] = {};
+            fds[writer_fd_allocation.fd] = {};
+            return EFAULT;
+        }
+        return {};
+    }));
     return 0;
 }
 

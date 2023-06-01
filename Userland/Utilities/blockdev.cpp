@@ -8,27 +8,23 @@
 #include <LibCore/System.h>
 #include <LibMain/Main.h>
 #include <fcntl.h>
-#include <stdio.h>
 #include <sys/ioctl.h>
-#include <unistd.h>
 
-static void fetch_ioctl(int fd, int request)
+static ErrorOr<void> fetch_ioctl(int fd, int request)
 {
-    size_t value;
-    if (ioctl(fd, request, &value) < 0) {
-        perror("ioctl");
-        exit(1);
-    }
+    u64 value;
+    TRY(Core::System::ioctl(fd, request, &value));
     outln("{}", value);
+    return {};
 }
 
 ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
     TRY(Core::System::unveil("/dev", "r"));
     TRY(Core::System::unveil(nullptr, nullptr));
-    TRY(Core::System::pledge("stdio rpath", nullptr));
+    TRY(Core::System::pledge("stdio rpath"));
 
-    const char* device = nullptr;
+    StringView device;
 
     bool flag_get_disk_size = false;
     bool flag_get_block_size = false;
@@ -40,17 +36,13 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     args_parser.add_positional_argument(device, "Device to query", "device");
     args_parser.parse(arguments);
 
-    int fd = open(device, O_RDONLY);
-    if (fd < 0) {
-        perror("open");
-        return 1;
-    }
+    int fd = TRY(Core::System::open(device, O_RDONLY));
 
     if (flag_get_disk_size) {
-        fetch_ioctl(fd, STORAGE_DEVICE_GET_SIZE);
+        TRY(fetch_ioctl(fd, STORAGE_DEVICE_GET_SIZE));
     }
     if (flag_get_block_size) {
-        fetch_ioctl(fd, STORAGE_DEVICE_GET_BLOCK_SIZE);
+        TRY(fetch_ioctl(fd, STORAGE_DEVICE_GET_BLOCK_SIZE));
     }
 
     return 0;

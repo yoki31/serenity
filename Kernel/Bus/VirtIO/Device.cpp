@@ -18,7 +18,7 @@ UNMAP_AFTER_INIT void detect()
 {
     if (kernel_command_line().disable_virtio())
         return;
-    PCI::enumerate([&](PCI::DeviceIdentifier const& device_identifier) {
+    MUST(PCI::enumerate([&](PCI::DeviceIdentifier const& device_identifier) {
         if (device_identifier.hardware_id().is_null())
             return;
         // TODO: We should also be checking that the device_id is in between 0x1000 - 0x107F inclusive
@@ -27,12 +27,12 @@ UNMAP_AFTER_INIT void detect()
         switch (device_identifier.hardware_id().device_id) {
         case PCI::DeviceID::VirtIOConsole: {
             auto& console = Console::must_create(device_identifier).leak_ref();
-            console.initialize();
+            MUST(console.initialize_virtio_resources());
             break;
         }
         case PCI::DeviceID::VirtIOEntropy: {
             auto& rng = RNG::must_create(device_identifier).leak_ref();
-            rng.initialize();
+            MUST(rng.initialize_virtio_resources());
             break;
         }
         case PCI::DeviceID::VirtIOGPU: {
@@ -43,10 +43,10 @@ UNMAP_AFTER_INIT void detect()
             dbgln_if(VIRTIO_DEBUG, "VirtIO: Unknown VirtIO device with ID: {}", device_identifier.hardware_id().device_id);
             break;
         }
-    });
+    }));
 }
 
-static StringView const determine_device_class(PCI::DeviceIdentifier const& device_identifier)
+static StringView determine_device_class(PCI::DeviceIdentifier const& device_identifier)
 {
     if (device_identifier.revision_id().value() == 0) {
         // Note: If the device is a legacy (or transitional) device, therefore,
@@ -86,133 +86,156 @@ static StringView const determine_device_class(PCI::DeviceIdentifier const& devi
     }
 }
 
-UNMAP_AFTER_INIT void Device::initialize()
+UNMAP_AFTER_INIT ErrorOr<void> Device::initialize_virtio_resources()
 {
-    auto address = pci_address();
-    enable_bus_mastering(pci_address());
-    PCI::enable_interrupt_line(pci_address());
-    enable_irq();
+    enable_bus_mastering(device_identifier());
 
-    auto capabilities = PCI::get_device_identifier(address).capabilities();
+    auto capabilities = device_identifier().capabilities();
     for (auto& capability : capabilities) {
         if (capability.id().value() == PCI::Capabilities::ID::VendorSpecific) {
             // We have a virtio_pci_cap
-            auto cfg = make<Configuration>();
+            Configuration config {};
             auto raw_config_type = capability.read8(0x3);
-            if (raw_config_type < static_cast<u8>(ConfigurationType::Common) || raw_config_type > static_cast<u8>(ConfigurationType::PCI)) {
+            // NOTE: The VirtIO specification allows iteration of configurations
+            // through a special PCI capbility structure with the VIRTIO_PCI_CAP_PCI_CFG tag:
+            //
+            // "Each structure can be mapped by a Base Address register (BAR) belonging to the function, or accessed via
+            // the special VIRTIO_PCI_CAP_PCI_CFG field in the PCI configuration space"
+            //
+            // "The VIRTIO_PCI_CAP_PCI_CFG capability creates an alternative (and likely suboptimal) access method
+            // to the common configuration, notification, ISR and device-specific configuration regions."
+            //
+            // Also, it is *very* likely to see this PCI capability as the first vendor-specific capbility of a certain PCI function,
+            // but this is not guaranteed by the VirtIO specification.
+            // Therefore, ignore this type of configuration as this is not needed by our implementation currently.
+            if (raw_config_type == static_cast<u8>(ConfigurationType::PCICapabilitiesAccess))
+                continue;
+            if (raw_config_type < static_cast<u8>(ConfigurationType::Common) || raw_config_type > static_cast<u8>(ConfigurationType::PCICapabilitiesAccess)) {
                 dbgln("{}: Unknown capability configuration type: {}", m_class_name, raw_config_type);
-                return;
+                return Error::from_errno(ENXIO);
             }
-            cfg->cfg_type = static_cast<ConfigurationType>(raw_config_type);
+            config.cfg_type = static_cast<ConfigurationType>(raw_config_type);
             auto cap_length = capability.read8(0x2);
             if (cap_length < 0x10) {
                 dbgln("{}: Unexpected capability size: {}", m_class_name, cap_length);
                 break;
             }
-            cfg->bar = capability.read8(0x4);
-            if (cfg->bar > 0x5) {
-                dbgln("{}: Unexpected capability bar value: {}", m_class_name, cfg->bar);
+            config.bar = capability.read8(0x4);
+            if (config.bar > 0x5) {
+                dbgln("{}: Unexpected capability bar value: {}", m_class_name, config.bar);
                 break;
             }
-            cfg->offset = capability.read32(0x8);
-            cfg->length = capability.read32(0xc);
-            dbgln_if(VIRTIO_DEBUG, "{}: Found configuration {}, bar: {}, offset: {}, length: {}", m_class_name, (u32)cfg->cfg_type, cfg->bar, cfg->offset, cfg->length);
-            if (cfg->cfg_type == ConfigurationType::Common)
+            config.offset = capability.read32(0x8);
+            config.length = capability.read32(0xc);
+            // NOTE: Configuration length of zero is an invalid configuration, or at the very least a configuration
+            // type we don't know how to handle correctly...
+            // The VIRTIO_PCI_CAP_PCI_CFG configuration structure has length of 0
+            // but because we ignore that type and all other types should have a length
+            // greater than 0, we should ignore any other configuration in case this condition is not met.
+            if (config.length == 0) {
+                dbgln("{}: Found configuration {}, with invalid length of 0", m_class_name, (u32)config.cfg_type);
+                continue;
+            }
+            dbgln_if(VIRTIO_DEBUG, "{}: Found configuration {}, bar: {}, offset: {}, length: {}", m_class_name, (u32)config.cfg_type, config.bar, config.offset, config.length);
+            if (config.cfg_type == ConfigurationType::Common)
                 m_use_mmio = true;
-            else if (cfg->cfg_type == ConfigurationType::Notify)
+            else if (config.cfg_type == ConfigurationType::Notify)
                 m_notify_multiplier = capability.read32(0x10);
 
-            m_configs.append(move(cfg));
+            m_configs.append(config);
         }
     }
 
     if (m_use_mmio) {
         for (auto& cfg : m_configs) {
-            auto& mapping = m_mmio[cfg.bar];
-            mapping.size = PCI::get_BAR_space_size(pci_address(), cfg.bar);
-            if (!mapping.base && mapping.size) {
-                auto region_or_error = MM.allocate_kernel_region(PhysicalAddress(page_base_of(PCI::get_BAR(pci_address(), cfg.bar))), Memory::page_round_up(mapping.size), "VirtIO MMIO", Memory::Region::Access::ReadWrite, Memory::Region::Cacheable::No);
-                if (region_or_error.is_error()) {
-                    dbgln_if(VIRTIO_DEBUG, "{}: Failed to map bar {} - (size={}) {}", m_class_name, cfg.bar, mapping.size, region_or_error.error());
-                } else {
-                    mapping.base = region_or_error.release_value();
-                }
-            }
+            auto mapping_io_window = TRY(IOWindow::create_for_pci_device_bar(device_identifier(), static_cast<PCI::HeaderType0BaseRegister>(cfg.bar)));
+            m_register_bases[cfg.bar] = move(mapping_io_window);
         }
-        m_common_cfg = get_config(ConfigurationType::Common, 0);
-        m_notify_cfg = get_config(ConfigurationType::Notify, 0);
-        m_isr_cfg = get_config(ConfigurationType::ISR, 0);
+        m_common_cfg = TRY(get_config(ConfigurationType::Common, 0));
+        m_notify_cfg = TRY(get_config(ConfigurationType::Notify, 0));
+        m_isr_cfg = TRY(get_config(ConfigurationType::ISR, 0));
+    } else {
+        auto mapping_io_window = TRY(IOWindow::create_for_pci_device_bar(device_identifier(), PCI::HeaderType0BaseRegister::BAR0));
+        m_register_bases[0] = move(mapping_io_window);
     }
+
+    // Note: We enable interrupts at least after the m_register_bases[0] ptr is
+    // assigned with an IOWindow, to ensure that in case of getting an interrupt
+    // we can access registers from that IO window range.
+    PCI::enable_interrupt_line(device_identifier());
+    enable_irq();
 
     reset_device();
     set_status_bit(DEVICE_STATUS_ACKNOWLEDGE);
 
     set_status_bit(DEVICE_STATUS_DRIVER);
+    return {};
 }
 
 UNMAP_AFTER_INIT VirtIO::Device::Device(PCI::DeviceIdentifier const& device_identifier)
-    : PCI::Device(device_identifier.address())
+    : PCI::Device(const_cast<PCI::DeviceIdentifier&>(device_identifier))
     , IRQHandler(device_identifier.interrupt_line().value())
-    , m_io_base(IOAddress(PCI::get_BAR0(pci_address()) & ~1))
     , m_class_name(VirtIO::determine_device_class(device_identifier))
 {
-    dbgln("{}: Found @ {}", m_class_name, pci_address());
-}
-
-auto Device::mapping_for_bar(u8 bar) -> MappedMMIO&
-{
-    VERIFY(m_use_mmio);
-    return m_mmio[bar];
+    dbgln("{}: Found @ {}", m_class_name, device_identifier.address());
 }
 
 void Device::notify_queue(u16 queue_index)
 {
     dbgln_if(VIRTIO_DEBUG, "{}: notifying about queue change at idx: {}", m_class_name, queue_index);
     if (!m_notify_cfg)
-        out<u16>(REG_QUEUE_NOTIFY, queue_index);
+        base_io_window().write16(REG_QUEUE_NOTIFY, queue_index);
     else
         config_write16(*m_notify_cfg, get_queue(queue_index).notify_offset() * m_notify_multiplier, queue_index);
 }
 
-u8 Device::config_read8(const Configuration& config, u32 offset)
+auto Device::mapping_for_bar(u8 bar) -> IOWindow&
 {
-    return mapping_for_bar(config.bar).read<u8>(config.offset + offset);
+    VERIFY(m_use_mmio);
+    VERIFY(m_register_bases[bar]);
+    return *m_register_bases[bar];
 }
 
-u16 Device::config_read16(const Configuration& config, u32 offset)
+u8 Device::config_read8(Configuration const& config, u32 offset)
 {
-    return mapping_for_bar(config.bar).read<u16>(config.offset + offset);
+    return mapping_for_bar(config.bar).read8(config.offset + offset);
 }
 
-u32 Device::config_read32(const Configuration& config, u32 offset)
+u16 Device::config_read16(Configuration const& config, u32 offset)
 {
-    return mapping_for_bar(config.bar).read<u32>(config.offset + offset);
+    return mapping_for_bar(config.bar).read16(config.offset + offset);
 }
 
-void Device::config_write8(const Configuration& config, u32 offset, u8 value)
+u32 Device::config_read32(Configuration const& config, u32 offset)
 {
-    mapping_for_bar(config.bar).write(config.offset + offset, value);
+    return mapping_for_bar(config.bar).read32(config.offset + offset);
 }
 
-void Device::config_write16(const Configuration& config, u32 offset, u16 value)
+void Device::config_write8(Configuration const& config, u32 offset, u8 value)
 {
-    mapping_for_bar(config.bar).write(config.offset + offset, value);
+    mapping_for_bar(config.bar).write8(config.offset + offset, value);
 }
 
-void Device::config_write32(const Configuration& config, u32 offset, u32 value)
+void Device::config_write16(Configuration const& config, u32 offset, u16 value)
 {
-    mapping_for_bar(config.bar).write(config.offset + offset, value);
+    mapping_for_bar(config.bar).write16(config.offset + offset, value);
 }
 
-void Device::config_write64(const Configuration& config, u32 offset, u64 value)
+void Device::config_write32(Configuration const& config, u32 offset, u32 value)
 {
-    mapping_for_bar(config.bar).write(config.offset + offset, value);
+    mapping_for_bar(config.bar).write32(config.offset + offset, value);
+}
+
+void Device::config_write64(Configuration const& config, u32 offset, u64 value)
+{
+    mapping_for_bar(config.bar).write32(config.offset + offset, (u32)(value & 0xFFFFFFFF));
+    mapping_for_bar(config.bar).write32(config.offset + offset + 4, (u32)(value >> 32));
 }
 
 u8 Device::read_status_bits()
 {
     if (!m_common_cfg)
-        return in<u8>(REG_DEVICE_STATUS);
+        return base_io_window().read8(REG_DEVICE_STATUS);
     return config_read8(*m_common_cfg, COMMON_CFG_DEVICE_STATUS);
 }
 
@@ -220,7 +243,7 @@ void Device::mask_status_bits(u8 status_mask)
 {
     m_status &= status_mask;
     if (!m_common_cfg)
-        out<u8>(REG_DEVICE_STATUS, m_status);
+        base_io_window().write8(REG_DEVICE_STATUS, m_status);
     else
         config_write8(*m_common_cfg, COMMON_CFG_DEVICE_STATUS, m_status);
 }
@@ -229,7 +252,7 @@ void Device::set_status_bit(u8 status_bit)
 {
     m_status |= status_bit;
     if (!m_common_cfg)
-        out<u8>(REG_DEVICE_STATUS, m_status);
+        base_io_window().write8(REG_DEVICE_STATUS, m_status);
     else
         config_write8(*m_common_cfg, COMMON_CFG_DEVICE_STATUS, m_status);
 }
@@ -237,12 +260,18 @@ void Device::set_status_bit(u8 status_bit)
 u64 Device::get_device_features()
 {
     if (!m_common_cfg)
-        return in<u32>(REG_DEVICE_FEATURES);
+        return base_io_window().read32(REG_DEVICE_FEATURES);
     config_write32(*m_common_cfg, COMMON_CFG_DEVICE_FEATURE_SELECT, 0);
     auto lower_bits = config_read32(*m_common_cfg, COMMON_CFG_DEVICE_FEATURE);
     config_write32(*m_common_cfg, COMMON_CFG_DEVICE_FEATURE_SELECT, 1);
     u64 upper_bits = (u64)config_read32(*m_common_cfg, COMMON_CFG_DEVICE_FEATURE) << 32;
     return upper_bits | lower_bits;
+}
+
+IOWindow& Device::base_io_window()
+{
+    VERIFY(m_register_bases[0]);
+    return *m_register_bases[0];
 }
 
 bool Device::accept_device_features(u64 device_features, u64 accepted_features)
@@ -272,7 +301,7 @@ bool Device::accept_device_features(u64 device_features, u64 accepted_features)
     dbgln_if(VIRTIO_DEBUG, "{}: Accepted features: {}", m_class_name, accepted_features);
 
     if (!m_common_cfg) {
-        out<u32>(REG_GUEST_FEATURES, accepted_features);
+        base_io_window().write32(REG_GUEST_FEATURES, accepted_features);
     } else {
         config_write32(*m_common_cfg, COMMON_CFG_DRIVER_FEATURE_SELECT, 0);
         config_write32(*m_common_cfg, COMMON_CFG_DRIVER_FEATURE, accepted_features);
@@ -322,9 +351,10 @@ bool Device::setup_queue(u16 queue_index)
 
     u16 queue_notify_offset = config_read16(*m_common_cfg, COMMON_CFG_QUEUE_NOTIFY_OFF);
 
-    auto queue = make<Queue>(queue_size, queue_notify_offset);
-    if (queue->is_null())
+    auto queue_or_error = Queue::try_create(queue_size, queue_notify_offset);
+    if (queue_or_error.is_error())
         return false;
+    auto queue = queue_or_error.release_value();
 
     config_write64(*m_common_cfg, COMMON_CFG_QUEUE_DESC, queue->descriptor_area().get());
     config_write64(*m_common_cfg, COMMON_CFG_QUEUE_DRIVER, queue->driver_area().get());
@@ -393,11 +423,11 @@ void Device::finish_init()
 u8 Device::isr_status()
 {
     if (!m_isr_cfg)
-        return in<u8>(REG_ISR_STATUS);
+        return base_io_window().read8(REG_ISR_STATUS);
     return config_read8(*m_isr_cfg, 0);
 }
 
-bool Device::handle_irq(const RegisterState&)
+bool Device::handle_irq(RegisterState const&)
 {
     u8 isr_type = isr_status();
     if ((isr_type & (QUEUE_INTERRUPT | DEVICE_CONFIG_INTERRUPT)) == 0) {

@@ -7,9 +7,14 @@
 #pragma once
 
 #include <AK/ByteBuffer.h>
-#include <AK/Optional.h>
-#include <AK/String.h>
+#include <AK/Error.h>
 #include <AK/StringView.h>
+
+#ifdef KERNEL
+#    include <Kernel/KString.h>
+#else
+#    include <AK/DeprecatedString.h>
+#endif
 
 namespace AK {
 
@@ -24,12 +29,18 @@ constexpr u8 decode_hex_digit(char digit)
     return 255;
 }
 
-Optional<ByteBuffer> decode_hex(StringView);
+ErrorOr<ByteBuffer> decode_hex(StringView);
 
-String encode_hex(ReadonlyBytes);
+#ifdef KERNEL
+ErrorOr<NonnullOwnPtr<Kernel::KString>> encode_hex(ReadonlyBytes);
+#else
+DeprecatedString encode_hex(ReadonlyBytes);
+#endif
 
 }
 
+#if USING_AK_GLOBALLY
 using AK::decode_hex;
 using AK::decode_hex_digit;
 using AK::encode_hex;
+#endif

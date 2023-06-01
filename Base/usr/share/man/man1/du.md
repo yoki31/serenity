@@ -16,12 +16,14 @@ $ du [files...]
 
 * `-a`, `--all`: Write counts for all files, not just directories
 * `--apparent-size`: Print apparent sizes, rather than disk usage
+* `-h` , `--human-readable`: Print human-readable sizes
+* `--si`: Print human-readable sizes in SI units
 * `-d N`, `--max-depth N`: Print the total for a directory or file only if it is N or fewer levels below the command line argument
 * `-s`, `--summarize`: Display only a total for each argument
 * `-t size`, `--threshold size`: Exclude entries smaller than size if positive, or entries greater than size if negative
 * `--time time-type`: Show time of time time-type of any file in the directory, or any of its subdirectories. Available choices: mtime, modification, ctime, status, use, atime, access
 * `--exclude pattern`: Exclude files that match pattern
-* `-X file, --exclude_from`: Exclude files that match any pattern in file
+* `-X file, --exclude-from`: Exclude files that match any pattern in file
 
 ## Arguments
 

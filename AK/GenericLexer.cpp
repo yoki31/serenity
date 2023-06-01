@@ -7,9 +7,12 @@
 #include <AK/Assertions.h>
 #include <AK/CharacterTypes.h>
 #include <AK/GenericLexer.h>
-#include <AK/String.h>
 #include <AK/StringBuilder.h>
-#include <AK/Utf16View.h>
+
+#ifndef KERNEL
+#    include <AK/DeprecatedString.h>
+#    include <AK/Utf16View.h>
+#endif
 
 namespace AK {
 // Consume a number of characters
@@ -53,7 +56,6 @@ StringView GenericLexer::consume_line()
 }
 
 // Consume and return characters until `stop` is peek'd
-// The `stop` character is ignored, as it is user-defined
 StringView GenericLexer::consume_until(char stop)
 {
     size_t start = m_index;
@@ -61,7 +63,18 @@ StringView GenericLexer::consume_until(char stop)
         m_index++;
     size_t length = m_index - start;
 
-    ignore();
+    if (length == 0)
+        return {};
+    return m_input.substring_view(start, length);
+}
+
+// Consume and return characters until the string `stop` is found
+StringView GenericLexer::consume_until(char const* stop)
+{
+    size_t start = m_index;
+    while (!is_eof() && !next_is(stop))
+        m_index++;
+    size_t length = m_index - start;
 
     if (length == 0)
         return {};
@@ -69,15 +82,12 @@ StringView GenericLexer::consume_until(char stop)
 }
 
 // Consume and return characters until the string `stop` is found
-// The `stop` string is ignored, as it is user-defined
-StringView GenericLexer::consume_until(const char* stop)
+StringView GenericLexer::consume_until(StringView stop)
 {
     size_t start = m_index;
     while (!is_eof() && !next_is(stop))
         m_index++;
     size_t length = m_index - start;
-
-    ignore(__builtin_strlen(stop));
 
     if (length == 0)
         return {};
@@ -118,7 +128,8 @@ StringView GenericLexer::consume_quoted_string(char escape_char)
     return m_input.substring_view(start, length);
 }
 
-String GenericLexer::consume_and_unescape_string(char escape_char)
+#ifndef KERNEL
+DeprecatedString GenericLexer::consume_and_unescape_string(char escape_char)
 {
     auto view = consume_quoted_string(escape_char);
     if (view.is_null())
@@ -127,7 +138,7 @@ String GenericLexer::consume_and_unescape_string(char escape_char)
     StringBuilder builder;
     for (size_t i = 0; i < view.length(); ++i)
         builder.append(consume_escaped_character(escape_char));
-    return builder.to_string();
+    return builder.to_deprecated_string();
 }
 
 auto GenericLexer::consume_escaped_code_point(bool combine_surrogate_pairs) -> Result<u32, UnicodeEscapeError>
@@ -199,5 +210,6 @@ auto GenericLexer::decode_single_or_paired_surrogate(bool combine_surrogate_pair
     retreat(6);
     return *high_surrogate;
 }
+#endif
 
 }

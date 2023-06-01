@@ -67,8 +67,66 @@ test("allow binding patterns", () => {
     expect(counter).toBe(3);
 });
 
-test("allow member expression as variable", () => {
-    const f = {};
-    for (f.a in "abc");
-    expect(f.a).toBe("2");
+describe("special left hand sides", () => {
+    test("allow member expression as variable", () => {
+        const f = {};
+        for (f.a in "abc");
+        expect(f.a).toBe("2");
+    });
+
+    test("allow member expression of function call", () => {
+        const b = {};
+        function f() {
+            return b;
+        }
+
+        for (f().a in "abc");
+
+        expect(f().a).toBe("2");
+        expect(b.a).toBe("2");
+    });
+
+    test("call function is allowed in parsing but fails in runtime", () => {
+        function f() {
+            expect().fail();
+        }
+
+        // Does not fail since it does not iterate
+        expect("for (f() in []);").toEvalTo(undefined);
+
+        expect(() => {
+            eval("for (f() in [0]) { expect().fail() }");
+        }).toThrowWithMessage(ReferenceError, "Invalid left-hand side in assignment");
+    });
+
+    test("Cannot change constant declaration in body", () => {
+        const vals = [];
+        for (const v in [1, 2]) {
+            expect(() => v++).toThrowWithMessage(TypeError, "Invalid assignment to const variable");
+            vals.push(v);
+        }
+
+        expect(vals).toEqual(["0", "1"]);
+    });
+});
+
+test("remove properties while iterating", () => {
+    const from = [1, 2, 3];
+    const to = [];
+    for (const prop in from) {
+        to.push(prop);
+        from.pop();
+    }
+    expect(to).toEqual(["0", "1"]);
+});
+
+test("duplicated properties in prototype", () => {
+    const object = { a: 1 };
+    const proto = { a: 2 };
+    Object.setPrototypeOf(object, proto);
+    const a = [];
+    for (const prop in object) {
+        a.push(prop);
+    }
+    expect(a).toEqual(["a"]);
 });

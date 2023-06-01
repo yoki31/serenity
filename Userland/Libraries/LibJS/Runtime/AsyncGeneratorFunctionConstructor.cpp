@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibJS/Interpreter.h>
 #include <LibJS/Runtime/AsyncGeneratorFunctionConstructor.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
 #include <LibJS/Runtime/FunctionConstructor.h>
@@ -13,24 +12,23 @@
 
 namespace JS {
 
-AsyncGeneratorFunctionConstructor::AsyncGeneratorFunctionConstructor(GlobalObject& global_object)
-    : NativeFunction(vm().names.AsyncGeneratorFunction.as_string(), *global_object.function_prototype())
+AsyncGeneratorFunctionConstructor::AsyncGeneratorFunctionConstructor(Realm& realm)
+    : NativeFunction(realm.vm().names.AsyncGeneratorFunction.as_string(), realm.intrinsics().function_prototype())
 {
 }
 
-void AsyncGeneratorFunctionConstructor::initialize(GlobalObject& global_object)
+ThrowCompletionOr<void> AsyncGeneratorFunctionConstructor::initialize(Realm& realm)
 {
     auto& vm = this->vm();
-    NativeFunction::initialize(global_object);
-
-    // 27.4.2.2 AsyncGeneratorFunction.prototype, https://tc39.es/ecma262/#sec-asyncgeneratorfunction-prototype
-    define_direct_property(vm.names.prototype, global_object.async_generator_function_prototype(), 0);
+    MUST_OR_THROW_OOM(NativeFunction::initialize(realm));
 
     // 27.4.2.1 AsyncGeneratorFunction.length, https://tc39.es/ecma262/#sec-asyncgeneratorfunction-length
     define_direct_property(vm.names.length, Value(1), Attribute::Configurable);
 
     // 27.4.2.2 AsyncGeneratorFunction.prototype, https://tc39.es/ecma262/#sec-asyncgeneratorfunction-prototype
-    define_direct_property(vm.names.prototype, global_object.async_generator_function_prototype(), 0);
+    define_direct_property(vm.names.prototype, realm.intrinsics().async_generator_function_prototype(), 0);
+
+    return {};
 }
 
 // 27.4.1.1 AsyncGeneratorFunction ( p1, p2, … , pn, body ), https://tc39.es/ecma262/#sec-asyncgeneratorfunction
@@ -40,25 +38,18 @@ ThrowCompletionOr<Value> AsyncGeneratorFunctionConstructor::call()
 }
 
 // 27.4.1.1 AsyncGeneratorFunction ( p1, p2, … , pn, body ), https://tc39.es/ecma262/#sec-asyncgeneratorfunction
-ThrowCompletionOr<Object*> AsyncGeneratorFunctionConstructor::construct(FunctionObject& new_target)
+ThrowCompletionOr<NonnullGCPtr<Object>> AsyncGeneratorFunctionConstructor::construct(FunctionObject& new_target)
 {
     auto& vm = this->vm();
-    auto function = TRY(FunctionConstructor::create_dynamic_function_node(global_object(), new_target, FunctionKind::AsyncGenerator));
 
-    OwnPtr<Interpreter> local_interpreter;
-    Interpreter* interpreter = vm.interpreter_if_exists();
+    // 1. Let C be the active function object.
+    auto* constructor = vm.active_function_object();
 
-    if (!interpreter) {
-        local_interpreter = Interpreter::create_with_existing_realm(*realm());
-        interpreter = local_interpreter.ptr();
-    }
+    // 2. Let args be the argumentsList that was passed to this function by [[Call]] or [[Construct]].
+    auto& args = vm.running_execution_context().arguments;
 
-    VM::InterpreterExecutionScope scope(*interpreter);
-    auto result = function->execute(*interpreter, global_object());
-    if (auto* exception = vm.exception())
-        return throw_completion(exception->value());
-    VERIFY(result.is_object() && is<ECMAScriptFunctionObject>(result.as_object()));
-    return &result.as_object();
+    // 3. Return ? CreateDynamicFunction(C, NewTarget, asyncGenerator, args).
+    return *TRY(FunctionConstructor::create_dynamic_function(vm, *constructor, &new_target, FunctionKind::AsyncGenerator, args));
 }
 
 }

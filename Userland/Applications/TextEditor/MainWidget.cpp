@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,8 +10,10 @@
 #include <AK/StringBuilder.h>
 #include <AK/URL.h>
 #include <Applications/TextEditor/TextEditorWindowGML.h>
+#include <LibCMake/CMakeCache/SyntaxHighlighter.h>
+#include <LibCMake/SyntaxHighlighter.h>
 #include <LibConfig/Client.h>
-#include <LibCore/File.h>
+#include <LibCore/Debounce.h>
 #include <LibCpp/SyntaxHighlighter.h>
 #include <LibDesktop/Launcher.h>
 #include <LibGUI/Action.h>
@@ -19,7 +22,8 @@
 #include <LibGUI/CheckBox.h>
 #include <LibGUI/FilePicker.h>
 #include <LibGUI/FontPicker.h>
-#include <LibGUI/GMLSyntaxHighlighter.h>
+#include <LibGUI/GML/SyntaxHighlighter.h>
+#include <LibGUI/GitCommitSyntaxHighlighter.h>
 #include <LibGUI/GroupBox.h>
 #include <LibGUI/INISyntaxHighlighter.h>
 #include <LibGUI/Menu.h>
@@ -32,21 +36,22 @@
 #include <LibGUI/Toolbar.h>
 #include <LibGUI/ToolbarContainer.h>
 #include <LibGUI/VimEditingEngine.h>
-#include <LibGfx/Font.h>
+#include <LibGfx/Font/Font.h>
 #include <LibGfx/Painter.h>
 #include <LibJS/SyntaxHighlighter.h>
 #include <LibMarkdown/Document.h>
+#include <LibMarkdown/SyntaxHighlighter.h>
 #include <LibSQL/AST/SyntaxHighlighter.h>
 #include <LibWeb/CSS/SyntaxHighlighter/SyntaxHighlighter.h>
 #include <LibWeb/HTML/SyntaxHighlighter/SyntaxHighlighter.h>
-#include <LibWeb/OutOfProcessWebView.h>
+#include <LibWebView/OutOfProcessWebView.h>
 #include <Shell/SyntaxHighlighter.h>
 
 namespace TextEditor {
 
 MainWidget::MainWidget()
 {
-    load_from_gml(text_editor_window_gml);
+    load_from_gml(text_editor_window_gml).release_value_but_fixme_should_propagate_errors();
 
     m_toolbar = *find_descendant_of_type_named<GUI::Toolbar>("toolbar");
     m_toolbar_container = *find_descendant_of_type_named<GUI::ToolbarContainer>("toolbar_container");
@@ -54,11 +59,21 @@ MainWidget::MainWidget()
     m_editor = *find_descendant_of_type_named<GUI::TextEditor>("editor");
     m_editor->set_ruler_visible(true);
     m_editor->set_automatic_indentation_enabled(true);
-    m_editor->set_editing_engine(make<GUI::RegularEditingEngine>());
+    if (m_editor->editing_engine()->is_regular())
+        m_editor->set_editing_engine(make<GUI::RegularEditingEngine>());
+    else if (m_editor->editing_engine()->is_vim())
+        m_editor->set_editing_engine(make<GUI::VimEditingEngine>());
+    else
+        VERIFY_NOT_REACHED();
 
-    m_editor->on_change = [this] {
+    auto font_entry = Config::read_string("TextEditor"sv, "Text"sv, "Font"sv, "default"sv);
+    if (font_entry != "default")
+        m_editor->set_font(Gfx::FontDatabase::the().get_by_name(font_entry));
+
+    m_editor->on_change = Core::debounce([this] {
         update_preview();
-    };
+    },
+        100);
 
     m_editor->on_modified_change = [this](bool modified) {
         window()->set_modified(modified);
@@ -69,10 +84,10 @@ MainWidget::MainWidget()
     m_replace_widget = *find_descendant_of_type_named<GUI::Widget>("replace_widget");
 
     m_find_textbox = *find_descendant_of_type_named<GUI::TextBox>("find_textbox");
-    m_find_textbox->set_placeholder("Find");
+    m_find_textbox->set_placeholder("Find"sv);
 
     m_replace_textbox = *find_descendant_of_type_named<GUI::TextBox>("replace_textbox");
-    m_replace_textbox->set_placeholder("Replace");
+    m_replace_textbox->set_placeholder("Replace"sv);
 
     m_match_case_checkbox = *find_descendant_of_type_named<GUI::CheckBox>("match_case_checkbox");
     m_match_case_checkbox->on_checked = [this](auto is_checked) {
@@ -92,46 +107,12 @@ MainWidget::MainWidget()
     };
     m_wrap_around_checkbox->set_checked(true);
 
-    m_find_next_action = GUI::Action::create("Find &Next", { Mod_Ctrl, Key_G }, Gfx::Bitmap::try_load_from_file("/res/icons/16x16/find-next.png").release_value_but_fixme_should_propagate_errors(), [&](auto&) {
-        auto needle = m_find_textbox->text();
-        if (needle.is_empty())
-            return;
-        if (m_use_regex)
-            m_editor->document().update_regex_matches(needle);
-
-        auto found_range = m_editor->document().find_next(needle, m_editor->normalized_selection().end(), m_should_wrap ? GUI::TextDocument::SearchShouldWrap::Yes : GUI::TextDocument::SearchShouldWrap::No, m_use_regex, m_match_case);
-        dbgln("find_next('{}') returned {}", needle, found_range);
-        if (found_range.is_valid()) {
-            m_editor->set_selection(found_range);
-        } else {
-            GUI::MessageBox::show(window(),
-                String::formatted("Not found: \"{}\"", needle),
-                "Not found",
-                GUI::MessageBox::Type::Information);
-        }
+    m_find_next_action = GUI::Action::create("Find &Next", { Mod_Ctrl, Key_G }, Gfx::Bitmap::load_from_file("/res/icons/16x16/find-next.png"sv).release_value_but_fixme_should_propagate_errors(), [this](auto&) {
+        find_text(GUI::TextEditor::SearchDirection::Forward, ShowMessageIfNoResults::Yes);
     });
 
-    m_find_previous_action = GUI::Action::create("Find Pr&evious", { Mod_Ctrl | Mod_Shift, Key_G }, Gfx::Bitmap::try_load_from_file("/res/icons/16x16/find-previous.png").release_value_but_fixme_should_propagate_errors(), [&](auto&) {
-        auto needle = m_find_textbox->text();
-        if (needle.is_empty())
-            return;
-        if (m_use_regex)
-            m_editor->document().update_regex_matches(needle);
-
-        auto selection_start = m_editor->normalized_selection().start();
-        if (!selection_start.is_valid())
-            selection_start = m_editor->normalized_selection().end();
-
-        auto found_range = m_editor->document().find_previous(needle, selection_start, m_should_wrap ? GUI::TextDocument::SearchShouldWrap::Yes : GUI::TextDocument::SearchShouldWrap::No, m_use_regex, m_match_case);
-        dbgln("find_prev(\"{}\") returned {}", needle, found_range);
-        if (found_range.is_valid()) {
-            m_editor->set_selection(found_range);
-        } else {
-            GUI::MessageBox::show(window(),
-                String::formatted("Not found: \"{}\"", needle),
-                "Not found",
-                GUI::MessageBox::Type::Information);
-        }
+    m_find_previous_action = GUI::Action::create("Find Pr&evious", { Mod_Ctrl | Mod_Shift, Key_G }, Gfx::Bitmap::load_from_file("/res/icons/16x16/find-previous.png"sv).release_value_but_fixme_should_propagate_errors(), [this](auto&) {
+        find_text(GUI::TextEditor::SearchDirection::Backward, ShowMessageIfNoResults::Yes);
     });
 
     m_replace_action = GUI::Action::create("Rep&lace", { Mod_Ctrl, Key_F1 }, [&](auto&) {
@@ -148,8 +129,8 @@ MainWidget::MainWidget()
             m_editor->insert_at_cursor_or_replace_selection(substitute);
         } else {
             GUI::MessageBox::show(window(),
-                String::formatted("Not found: \"{}\"", needle),
-                "Not found",
+                DeprecatedString::formatted("Not found: \"{}\"", needle),
+                "Not found"sv,
                 GUI::MessageBox::Type::Information);
         }
     });
@@ -164,21 +145,28 @@ MainWidget::MainWidget()
             m_editor->document().update_regex_matches(needle);
 
         auto found_range = m_editor->document().find_next(needle, {}, GUI::TextDocument::SearchShouldWrap::No, m_use_regex, m_match_case);
-        while (found_range.is_valid()) {
-            m_editor->set_selection(found_range);
-            m_editor->insert_at_cursor_or_replace_selection(substitute);
-            auto next_start = GUI::TextPosition(found_range.end().line(), found_range.end().column() + length_delta);
-            found_range = m_editor->document().find_next(needle, next_start, GUI::TextDocument::SearchShouldWrap::No, m_use_regex, m_match_case);
+        if (found_range.is_valid()) {
+            while (found_range.is_valid()) {
+                m_editor->set_selection(found_range);
+                m_editor->insert_at_cursor_or_replace_selection(substitute);
+                auto next_start = GUI::TextPosition(found_range.end().line(), found_range.end().column() + length_delta);
+                found_range = m_editor->document().find_next(needle, next_start, GUI::TextDocument::SearchShouldWrap::No, m_use_regex, m_match_case);
+            }
+        } else {
+            GUI::MessageBox::show(window(),
+                DeprecatedString::formatted("Not found: \"{}\"", needle),
+                "Not found"sv,
+                GUI::MessageBox::Type::Information);
         }
     });
 
     m_find_previous_button = *find_descendant_of_type_named<GUI::Button>("find_previous_button");
     m_find_previous_button->set_action(*m_find_previous_action);
-    m_find_previous_button->set_icon(Gfx::Bitmap::try_load_from_file("/res/icons/16x16/find-previous.png").release_value_but_fixme_should_propagate_errors());
+    m_find_previous_button->set_icon(Gfx::Bitmap::load_from_file("/res/icons/16x16/find-previous.png"sv).release_value_but_fixme_should_propagate_errors());
 
     m_find_next_button = *find_descendant_of_type_named<GUI::Button>("find_next_button");
     m_find_next_button->set_action(*m_find_next_action);
-    m_find_next_button->set_icon(Gfx::Bitmap::try_load_from_file("/res/icons/16x16/find-next.png").release_value_but_fixme_should_propagate_errors());
+    m_find_next_button->set_icon(Gfx::Bitmap::load_from_file("/res/icons/16x16/find-next.png"sv).release_value_but_fixme_should_propagate_errors());
 
     m_find_textbox->on_return_pressed = [this] {
         m_find_next_button->click();
@@ -187,6 +175,12 @@ MainWidget::MainWidget()
     m_find_textbox->on_escape_pressed = [this] {
         m_find_replace_widget->set_visible(false);
         m_editor->set_focus(true);
+        m_editor->reset_search_results();
+    };
+
+    m_find_textbox->on_change = [this] {
+        m_editor->reset_search_results();
+        find_text(GUI::TextEditor::SearchDirection::Forward, ShowMessageIfNoResults::No);
     };
 
     m_replace_button = *find_descendant_of_type_named<GUI::Button>("replace_button");
@@ -212,7 +206,7 @@ MainWidget::MainWidget()
     });
     m_vim_emulation_setting_action->set_checked(false);
 
-    m_find_replace_action = GUI::Action::create("&Find/Replace...", { Mod_Ctrl, Key_F }, Gfx::Bitmap::try_load_from_file("/res/icons/16x16/find.png").release_value_but_fixme_should_propagate_errors(), [this](auto&) {
+    m_find_replace_action = GUI::Action::create("&Find/Replace...", { Mod_Ctrl | Mod_Shift, Key_F }, Gfx::Bitmap::load_from_file("/res/icons/16x16/find.png"sv).release_value_but_fixme_should_propagate_errors(), [this](auto&) {
         m_find_replace_widget->set_visible(true);
         m_find_widget->set_visible(true);
         m_replace_widget->set_visible(true);
@@ -229,7 +223,18 @@ MainWidget::MainWidget()
     m_editor->add_custom_context_menu_action(*m_find_next_action);
     m_editor->add_custom_context_menu_action(*m_find_previous_action);
 
+    m_line_column_statusbar_menu = GUI::Menu::construct();
+    m_syntax_statusbar_menu = GUI::Menu::construct();
+
     m_statusbar = *find_descendant_of_type_named<GUI::Statusbar>("statusbar");
+    m_statusbar->segment(1).set_mode(GUI::Statusbar::Segment::Mode::Auto);
+    m_statusbar->segment(1).set_clickable(true);
+    m_statusbar->segment(1).set_menu(m_syntax_statusbar_menu);
+    m_statusbar->segment(2).set_mode(GUI::Statusbar::Segment::Mode::Fixed);
+    auto width = font().width("Ln 0,000  Col 000"sv) + font().max_glyph_width();
+    m_statusbar->segment(2).set_fixed_width(width);
+    m_statusbar->segment(2).set_clickable(true);
+    m_statusbar->segment(2).set_menu(m_line_column_statusbar_menu);
 
     GUI::Application::the()->on_action_enter = [this](GUI::Action& action) {
         auto text = action.status_tip();
@@ -244,13 +249,14 @@ MainWidget::MainWidget()
 
     m_editor->on_cursor_change = [this] { update_statusbar(); };
     m_editor->on_selection_change = [this] { update_statusbar(); };
+    m_editor->on_highlighter_change = [this] { update_statusbar(); };
 
-    m_new_action = GUI::Action::create("&New", { Mod_Ctrl, Key_N }, Gfx::Bitmap::try_load_from_file("/res/icons/16x16/new.png").release_value_but_fixme_should_propagate_errors(), [this](GUI::Action const&) {
+    m_new_action = GUI::Action::create("&New", { Mod_Ctrl, Key_N }, Gfx::Bitmap::load_from_file("/res/icons/16x16/new.png"sv).release_value_but_fixme_should_propagate_errors(), [this](GUI::Action const&) {
         if (editor().document().is_modified()) {
-            auto save_document_first_result = GUI::MessageBox::show(window(), "Save changes to current document first?", "Warning", GUI::MessageBox::Type::Warning, GUI::MessageBox::InputType::YesNoCancel);
-            if (save_document_first_result == GUI::Dialog::ExecResult::ExecYes)
+            auto save_document_first_result = GUI::MessageBox::ask_about_unsaved_changes(window(), m_path, editor().document().undo_stack().last_unmodified_timestamp());
+            if (save_document_first_result == GUI::Dialog::ExecResult::Yes)
                 m_save_action->activate();
-            if (save_document_first_result != GUI::Dialog::ExecResult::ExecNo && editor().document().is_modified())
+            if (save_document_first_result != GUI::Dialog::ExecResult::No && editor().document().is_modified())
                 return;
         }
 
@@ -260,67 +266,71 @@ MainWidget::MainWidget()
     });
 
     m_open_action = GUI::CommonActions::make_open_action([this](auto&) {
-        auto response = FileSystemAccessClient::Client::the().open_file(window()->window_id());
-
-        if (response.error != 0) {
-            if (response.error != -1)
-                GUI::MessageBox::show_error(window(), String::formatted("Opening \"{}\" failed: {}", *response.chosen_file, strerror(response.error)));
-            return;
-        }
-
         if (editor().document().is_modified()) {
-            auto save_document_first_result = GUI::MessageBox::show(window(), "Save changes to current document first?", "Warning", GUI::MessageBox::Type::Warning, GUI::MessageBox::InputType::YesNoCancel);
-            if (save_document_first_result == GUI::Dialog::ExecResult::ExecYes)
+            auto save_document_first_result = GUI::MessageBox::ask_about_unsaved_changes(window(), m_path, editor().document().undo_stack().last_unmodified_timestamp());
+            if (save_document_first_result == GUI::Dialog::ExecResult::Yes)
                 m_save_action->activate();
-            if (save_document_first_result != GUI::Dialog::ExecResult::ExecNo && editor().document().is_modified())
+            if (save_document_first_result != GUI::Dialog::ExecResult::No && editor().document().is_modified())
                 return;
         }
 
-        read_file_and_close(*response.fd, *response.chosen_file);
+        auto response = FileSystemAccessClient::Client::the().open_file(window());
+        if (response.is_error())
+            return;
+
+        if (auto result = read_file(response.value().filename(), response.value().stream()); result.is_error())
+            GUI::MessageBox::show(window(), "Unable to open file.\n"sv, "Error"sv, GUI::MessageBox::Type::Error);
     });
 
     m_save_as_action = GUI::CommonActions::make_save_as_action([&](auto&) {
-        auto response = FileSystemAccessClient::Client::the().save_file(window()->window_id(), m_name, m_extension);
+        auto extension = m_extension;
+        if (extension.is_null() && m_editor->syntax_highlighter())
+            extension = Syntax::common_language_extension(m_editor->syntax_highlighter()->language());
 
-        if (response.error != 0) {
-            if (response.error != -1)
-                GUI::MessageBox::show_error(window(), String::formatted("Saving \"{}\" failed: {}", *response.chosen_file, strerror(response.error)));
+        auto response = FileSystemAccessClient::Client::the().save_file(window(), m_name, extension);
+        if (response.is_error())
+            return;
+
+        auto file = response.release_value();
+        if (auto result = m_editor->write_to_file(file.stream()); result.is_error()) {
+            GUI::MessageBox::show(window(), "Unable to save file.\n"sv, "Error"sv, GUI::MessageBox::Type::Error);
             return;
         }
 
-        if (!m_editor->write_to_file_and_close(*response.fd)) {
-            GUI::MessageBox::show(window(), "Unable to save file.\n", "Error", GUI::MessageBox::Type::Error);
-            return;
-        }
-
-        set_path(*response.chosen_file);
-        dbgln("Wrote document to {}", *response.chosen_file);
+        set_path(file.filename());
+        GUI::Application::the()->set_most_recently_open_file(file.filename());
+        dbgln("Wrote document to {}", file.filename());
     });
 
     m_save_action = GUI::CommonActions::make_save_action([&](auto&) {
-        if (!m_path.is_empty()) {
-            auto response = FileSystemAccessClient::Client::the().request_file(window()->window_id(), m_path, Core::OpenMode::Truncate | Core::OpenMode::WriteOnly);
-
-            if (response.error != 0) {
-                if (response.error != -1)
-                    GUI::MessageBox::show_error(window(), String::formatted("Unable to save file: {}", strerror(response.error)));
-                return;
-            }
-
-            int fd = *response.fd;
-
-            if (!m_editor->write_to_file_and_close(fd)) {
-                GUI::MessageBox::show(window(), "Unable to save file.\n", "Error", GUI::MessageBox::Type::Error);
-            }
+        if (m_path.is_empty()) {
+            m_save_as_action->activate();
             return;
         }
+        auto response = FileSystemAccessClient::Client::the().request_file(window(), m_path, Core::File::OpenMode::Truncate | Core::File::OpenMode::Write);
+        if (response.is_error())
+            return;
 
-        m_save_as_action->activate();
+        if (auto result = m_editor->write_to_file(response.value().stream()); result.is_error()) {
+            GUI::MessageBox::show(window(), "Unable to save file.\n"sv, "Error"sv, GUI::MessageBox::Type::Error);
+        }
     });
+
+    auto file_manager_icon = Gfx::Bitmap::load_from_file("/res/icons/16x16/app-file-manager.png"sv).release_value_but_fixme_should_propagate_errors();
+    m_open_folder_action = GUI::Action::create("Reveal in File Manager", { Mod_Ctrl | Mod_Shift, Key_O }, file_manager_icon, [&](auto&) {
+        auto lexical_path = LexicalPath(m_path);
+        Desktop::Launcher::open(URL::create_with_file_scheme(lexical_path.dirname(), lexical_path.basename()));
+    });
+    m_open_folder_action->set_enabled(!m_path.is_empty());
+    m_open_folder_action->set_status_tip("Open the current file location in File Manager");
 
     m_toolbar->add_action(*m_new_action);
     m_toolbar->add_action(*m_open_action);
     m_toolbar->add_action(*m_save_action);
+
+    m_toolbar->add_separator();
+
+    m_toolbar->add_action(*m_open_folder_action);
 
     m_toolbar->add_separator();
 
@@ -334,18 +344,14 @@ MainWidget::MainWidget()
     m_toolbar->add_action(m_editor->redo_action());
 }
 
-MainWidget::~MainWidget()
-{
-}
-
-Web::OutOfProcessWebView& MainWidget::ensure_web_view()
+WebView::OutOfProcessWebView& MainWidget::ensure_web_view()
 {
     if (!m_page_view) {
         auto& web_view_container = *find_descendant_of_type_named<GUI::Widget>("web_view_container");
-        m_page_view = web_view_container.add<Web::OutOfProcessWebView>();
+        m_page_view = web_view_container.add<WebView::OutOfProcessWebView>();
         m_page_view->on_link_hover = [this](auto& url) {
             if (url.is_valid())
-                m_statusbar->set_text(url.to_string());
+                m_statusbar->set_text(url.to_deprecated_string());
             else
                 update_statusbar();
         };
@@ -353,8 +359,8 @@ Web::OutOfProcessWebView& MainWidget::ensure_web_view()
             if (!Desktop::Launcher::open(url)) {
                 GUI::MessageBox::show(
                     window(),
-                    String::formatted("The link to '{}' could not be opened.", url),
-                    "Failed to open link",
+                    DeprecatedString::formatted("The link to '{}' could not be opened.", url),
+                    "Failed to open link"sv,
                     GUI::MessageBox::Type::Error);
             }
         };
@@ -362,35 +368,55 @@ Web::OutOfProcessWebView& MainWidget::ensure_web_view()
     return *m_page_view;
 }
 
-void MainWidget::initialize_menubar(GUI::Window& window)
+ErrorOr<void> MainWidget::initialize_menubar(GUI::Window& window)
 {
-    auto& file_menu = window.add_menu("&File");
-    file_menu.add_action(*m_new_action);
-    file_menu.add_action(*m_open_action);
-    file_menu.add_action(*m_save_action);
-    file_menu.add_action(*m_save_as_action);
-    file_menu.add_separator();
-    file_menu.add_action(GUI::CommonActions::make_quit_action([this](auto&) {
+    auto file_menu = TRY(window.try_add_menu("&File"_short_string));
+    TRY(file_menu->try_add_action(*m_new_action));
+    TRY(file_menu->try_add_action(*m_open_action));
+    TRY(file_menu->try_add_action(*m_save_action));
+    TRY(file_menu->try_add_action(*m_save_as_action));
+    TRY(file_menu->try_add_separator());
+    TRY(file_menu->try_add_action(*m_open_folder_action));
+    TRY(file_menu->try_add_separator());
+
+    TRY(file_menu->add_recent_files_list([&](auto& action) {
+        if (editor().document().is_modified()) {
+            auto save_document_first_result = GUI::MessageBox::ask_about_unsaved_changes(&window, m_path, editor().document().undo_stack().last_unmodified_timestamp());
+            if (save_document_first_result == GUI::Dialog::ExecResult::Yes)
+                m_save_action->activate();
+            if (save_document_first_result != GUI::Dialog::ExecResult::No && editor().document().is_modified())
+                return;
+        }
+
+        auto response = FileSystemAccessClient::Client::the().request_file_read_only_approved(&window, action.text());
+        if (response.is_error())
+            return;
+
+        if (auto result = read_file(response.value().filename(), response.value().stream()); result.is_error())
+            GUI::MessageBox::show(&window, "Unable to open file.\n"sv, "Error"sv, GUI::MessageBox::Type::Error);
+    }));
+    TRY(file_menu->try_add_action(GUI::CommonActions::make_quit_action([this](auto&) {
         if (!request_close())
             return;
         GUI::Application::the()->quit();
-    }));
+    })));
 
-    auto& edit_menu = window.add_menu("&Edit");
-    edit_menu.add_action(m_editor->undo_action());
-    edit_menu.add_action(m_editor->redo_action());
-    edit_menu.add_separator();
-    edit_menu.add_action(m_editor->cut_action());
-    edit_menu.add_action(m_editor->copy_action());
-    edit_menu.add_action(m_editor->paste_action());
-    edit_menu.add_separator();
-    edit_menu.add_action(*m_vim_emulation_setting_action);
-    edit_menu.add_separator();
-    edit_menu.add_action(*m_find_replace_action);
-    edit_menu.add_action(*m_find_next_action);
-    edit_menu.add_action(*m_find_previous_action);
-    edit_menu.add_action(*m_replace_action);
-    edit_menu.add_action(*m_replace_all_action);
+    auto edit_menu = TRY(window.try_add_menu("&Edit"_short_string));
+    TRY(edit_menu->try_add_action(m_editor->undo_action()));
+    TRY(edit_menu->try_add_action(m_editor->redo_action()));
+    TRY(edit_menu->try_add_separator());
+    TRY(edit_menu->try_add_action(m_editor->cut_action()));
+    TRY(edit_menu->try_add_action(m_editor->copy_action()));
+    TRY(edit_menu->try_add_action(m_editor->paste_action()));
+    TRY(edit_menu->try_add_separator());
+    TRY(edit_menu->try_add_action(m_editor->insert_emoji_action()));
+    TRY(edit_menu->try_add_action(*m_vim_emulation_setting_action));
+    TRY(edit_menu->try_add_separator());
+    TRY(edit_menu->try_add_action(*m_find_replace_action));
+    TRY(edit_menu->try_add_action(*m_find_next_action));
+    TRY(edit_menu->try_add_action(*m_find_previous_action));
+    TRY(edit_menu->try_add_action(*m_replace_action));
+    TRY(edit_menu->try_add_action(*m_replace_all_action));
 
     m_no_preview_action = GUI::Action::create_checkable(
         "&No Preview", [this](auto&) {
@@ -416,71 +442,86 @@ void MainWidget::initialize_menubar(GUI::Window& window)
 
     m_layout_toolbar_action = GUI::Action::create_checkable("&Toolbar", [&](auto& action) {
         action.is_checked() ? m_toolbar_container->set_visible(true) : m_toolbar_container->set_visible(false);
-        Config::write_bool("TextEditor", "Layout", "ShowToolbar", action.is_checked());
+        Config::write_bool("TextEditor"sv, "Layout"sv, "ShowToolbar"sv, action.is_checked());
     });
-    auto show_toolbar = Config::read_bool("TextEditor", "Layout", "ShowToolbar", true);
+    auto show_toolbar = Config::read_bool("TextEditor"sv, "Layout"sv, "ShowToolbar"sv, true);
     m_layout_toolbar_action->set_checked(show_toolbar);
     m_toolbar_container->set_visible(show_toolbar);
 
     m_layout_statusbar_action = GUI::Action::create_checkable("&Status Bar", [&](auto& action) {
         action.is_checked() ? m_statusbar->set_visible(true) : m_statusbar->set_visible(false);
-        Config::write_bool("TextEditor", "Layout", "ShowStatusbar", action.is_checked());
+        Config::write_bool("TextEditor"sv, "Layout"sv, "ShowStatusbar"sv, action.is_checked());
+        update_statusbar();
     });
-    auto show_statusbar = Config::read_bool("TextEditor", "Layout", "ShowStatusbar", true);
+    auto show_statusbar = Config::read_bool("TextEditor"sv, "Layout"sv, "ShowStatusbar"sv, true);
     m_layout_statusbar_action->set_checked(show_statusbar);
     m_statusbar->set_visible(show_statusbar);
 
-    m_layout_ruler_action = GUI::Action::create_checkable("Ruler", [&](auto& action) {
+    m_layout_ruler_action = GUI::Action::create_checkable("&Ruler", [&](auto& action) {
         action.is_checked() ? m_editor->set_ruler_visible(true) : m_editor->set_ruler_visible(false);
-        Config::write_bool("TextEditor", "Layout", "ShowRuler", action.is_checked());
+        Config::write_bool("TextEditor"sv, "Layout"sv, "ShowRuler"sv, action.is_checked());
     });
-    auto show_ruler = Config::read_bool("TextEditor", "Layout", "ShowRuler", true);
+    auto show_ruler = Config::read_bool("TextEditor"sv, "Layout"sv, "ShowRuler"sv, true);
     m_layout_ruler_action->set_checked(show_ruler);
     m_editor->set_ruler_visible(show_ruler);
 
-    auto& view_menu = window.add_menu("&View");
-    auto& layout_menu = view_menu.add_submenu("&Layout");
-    layout_menu.add_action(*m_layout_toolbar_action);
-    layout_menu.add_action(*m_layout_statusbar_action);
-    layout_menu.add_action(*m_layout_ruler_action);
+    auto view_menu = TRY(window.try_add_menu("&View"_short_string));
+    auto layout_menu = TRY(view_menu->try_add_submenu("&Layout"_short_string));
+    TRY(layout_menu->try_add_action(*m_layout_toolbar_action));
+    TRY(layout_menu->try_add_action(*m_layout_statusbar_action));
+    TRY(layout_menu->try_add_action(*m_layout_ruler_action));
 
-    view_menu.add_separator();
+    TRY(view_menu->try_add_separator());
 
-    view_menu.add_action(GUI::Action::create("Editor &Font...", Gfx::Bitmap::try_load_from_file("/res/icons/16x16/app-font-editor.png").release_value_but_fixme_should_propagate_errors(),
+    TRY(view_menu->try_add_action(GUI::Action::create("Change &Font...", TRY(Gfx::Bitmap::load_from_file("/res/icons/16x16/app-font-editor.png"sv)),
         [&](auto&) {
             auto picker = GUI::FontPicker::construct(&window, &m_editor->font(), false);
-            if (picker->exec() == GUI::Dialog::ExecOK) {
+            if (picker->exec() == GUI::Dialog::ExecResult::OK) {
                 dbgln("setting font {}", picker->font()->qualified_name());
                 m_editor->set_font(picker->font());
+                Config::write_string("TextEditor"sv, "Text"sv, "Font"sv, picker->font()->qualified_name());
             }
-        }));
+        })));
 
-    view_menu.add_separator();
+    TRY(view_menu->try_add_separator());
 
     m_wrapping_mode_actions.set_exclusive(true);
-    auto& wrapping_mode_menu = view_menu.add_submenu("&Wrapping Mode");
+    auto wrapping_mode_menu = TRY(view_menu->try_add_submenu(TRY("&Wrapping Mode"_string)));
     m_no_wrapping_action = GUI::Action::create_checkable("&No Wrapping", [&](auto&) {
         m_editor->set_wrapping_mode(GUI::TextEditor::WrappingMode::NoWrap);
+        Config::write_string("TextEditor"sv, "View"sv, "WrappingMode"sv, "None"sv);
     });
     m_wrap_anywhere_action = GUI::Action::create_checkable("Wrap &Anywhere", [&](auto&) {
         m_editor->set_wrapping_mode(GUI::TextEditor::WrappingMode::WrapAnywhere);
+        Config::write_string("TextEditor"sv, "View"sv, "WrappingMode"sv, "Anywhere"sv);
     });
     m_wrap_at_words_action = GUI::Action::create_checkable("Wrap at &Words", [&](auto&) {
         m_editor->set_wrapping_mode(GUI::TextEditor::WrappingMode::WrapAtWords);
+        Config::write_string("TextEditor"sv, "View"sv, "WrappingMode"sv, "Words"sv);
     });
 
     m_wrapping_mode_actions.add_action(*m_no_wrapping_action);
     m_wrapping_mode_actions.add_action(*m_wrap_anywhere_action);
     m_wrapping_mode_actions.add_action(*m_wrap_at_words_action);
 
-    wrapping_mode_menu.add_action(*m_no_wrapping_action);
-    wrapping_mode_menu.add_action(*m_wrap_anywhere_action);
-    wrapping_mode_menu.add_action(*m_wrap_at_words_action);
+    TRY(wrapping_mode_menu->try_add_action(*m_no_wrapping_action));
+    TRY(wrapping_mode_menu->try_add_action(*m_wrap_anywhere_action));
+    TRY(wrapping_mode_menu->try_add_action(*m_wrap_at_words_action));
 
-    m_no_wrapping_action->set_checked(true);
+    auto word_wrap = Config::read_string("TextEditor"sv, "View"sv, "WrappingMode"sv, "Words"sv);
+    if (word_wrap == "None") {
+        m_no_wrapping_action->set_checked(true);
+        m_editor->set_wrapping_mode(GUI::TextEditor::WrappingMode::NoWrap);
+    } else if (word_wrap == "Anywhere") {
+        m_wrap_anywhere_action->set_checked(true);
+        m_editor->set_wrapping_mode(GUI::TextEditor::WrappingMode::WrapAnywhere);
+    } else {
+        m_wrap_at_words_action->set_checked(true);
+        m_editor->set_wrapping_mode(GUI::TextEditor::WrappingMode::WrapAtWords);
+    }
 
     m_soft_tab_width_actions.set_exclusive(true);
-    auto& soft_tab_width_menu = view_menu.add_submenu("&Tab Width");
+    auto soft_tab_width_menu = TRY(view_menu->try_add_submenu(TRY("&Tab Width"_string)));
     m_soft_tab_1_width_action = GUI::Action::create_checkable("1", [&](auto&) {
         m_editor->set_soft_tab_width(1);
     });
@@ -503,15 +544,15 @@ void MainWidget::initialize_menubar(GUI::Window& window)
     m_soft_tab_width_actions.add_action(*m_soft_tab_8_width_action);
     m_soft_tab_width_actions.add_action(*m_soft_tab_16_width_action);
 
-    soft_tab_width_menu.add_action(*m_soft_tab_1_width_action);
-    soft_tab_width_menu.add_action(*m_soft_tab_2_width_action);
-    soft_tab_width_menu.add_action(*m_soft_tab_4_width_action);
-    soft_tab_width_menu.add_action(*m_soft_tab_8_width_action);
-    soft_tab_width_menu.add_action(*m_soft_tab_16_width_action);
+    TRY(soft_tab_width_menu->try_add_action(*m_soft_tab_1_width_action));
+    TRY(soft_tab_width_menu->try_add_action(*m_soft_tab_2_width_action));
+    TRY(soft_tab_width_menu->try_add_action(*m_soft_tab_4_width_action));
+    TRY(soft_tab_width_menu->try_add_action(*m_soft_tab_8_width_action));
+    TRY(soft_tab_width_menu->try_add_action(*m_soft_tab_16_width_action));
 
     m_soft_tab_4_width_action->set_checked(true);
 
-    view_menu.add_separator();
+    TRY(view_menu->try_add_separator());
 
     m_visualize_trailing_whitespace_action = GUI::Action::create_checkable("T&railing Whitespace", [&](auto&) {
         m_editor->set_visualize_trailing_whitespace(m_visualize_trailing_whitespace_action->is_checked());
@@ -524,97 +565,172 @@ void MainWidget::initialize_menubar(GUI::Window& window)
     m_visualize_trailing_whitespace_action->set_status_tip("Visualize trailing whitespace");
     m_visualize_leading_whitespace_action->set_status_tip("Visualize leading whitespace");
 
-    view_menu.add_action(*m_visualize_trailing_whitespace_action);
-    view_menu.add_action(*m_visualize_leading_whitespace_action);
+    TRY(view_menu->try_add_action(*m_visualize_trailing_whitespace_action));
+    TRY(view_menu->try_add_action(*m_visualize_leading_whitespace_action));
 
-    m_cursor_line_highlighting_action = GUI::Action::create_checkable("Line High&lighting", [&](auto&) {
+    m_cursor_line_highlighting_action = GUI::Action::create_checkable("L&ine Highlighting", [&](auto&) {
         m_editor->set_cursor_line_highlighting(m_cursor_line_highlighting_action->is_checked());
     });
 
     m_cursor_line_highlighting_action->set_checked(true);
-    m_cursor_line_highlighting_action->set_status_tip("Highlight text on the cursor's line");
+    m_cursor_line_highlighting_action->set_status_tip("Highlight the current line");
 
-    view_menu.add_action(*m_cursor_line_highlighting_action);
+    TRY(view_menu->try_add_action(*m_cursor_line_highlighting_action));
 
-    view_menu.add_separator();
-    view_menu.add_action(*m_no_preview_action);
-    view_menu.add_action(*m_markdown_preview_action);
-    view_menu.add_action(*m_html_preview_action);
+    m_relative_line_number_action = GUI::Action::create_checkable("R&elative Line Number", [&](auto& action) {
+        m_editor->set_relative_line_number(action.is_checked());
+        Config::write_bool("TextEditor"sv, "View"sv, "RelativeLineNumber"sv, action.is_checked());
+    });
+
+    auto show_relative_line_number = Config::read_bool("TextEditor"sv, "View"sv, "RelativeLineNumber"sv, false);
+    m_relative_line_number_action->set_checked(show_relative_line_number);
+    m_editor->set_relative_line_number(show_relative_line_number);
+
+    m_relative_line_number_action->set_status_tip("Set relative line number");
+
+    TRY(view_menu->try_add_action(*m_relative_line_number_action));
+
+    TRY(view_menu->try_add_separator());
+    TRY(view_menu->try_add_action(*m_no_preview_action));
+    TRY(view_menu->try_add_action(*m_markdown_preview_action));
+    TRY(view_menu->try_add_action(*m_html_preview_action));
     m_no_preview_action->set_checked(true);
-    view_menu.add_separator();
+    TRY(view_menu->try_add_separator());
 
     syntax_actions.set_exclusive(true);
 
-    auto& syntax_menu = view_menu.add_submenu("&Syntax");
+    auto syntax_menu = TRY(view_menu->try_add_submenu("&Syntax"_short_string));
     m_plain_text_highlight = GUI::Action::create_checkable("&Plain Text", [&](auto&) {
+        m_statusbar->set_text(1, "Plain Text");
         m_editor->set_syntax_highlighter({});
         m_editor->update();
     });
     m_plain_text_highlight->set_checked(true);
+    m_statusbar->set_text(1, "Plain Text");
     syntax_actions.add_action(*m_plain_text_highlight);
-    syntax_menu.add_action(*m_plain_text_highlight);
+    TRY(syntax_menu->try_add_action(*m_plain_text_highlight));
 
     m_cpp_highlight = GUI::Action::create_checkable("&C++", [&](auto&) {
         m_editor->set_syntax_highlighter(make<Cpp::SyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_cpp_highlight);
-    syntax_menu.add_action(*m_cpp_highlight);
+    TRY(syntax_menu->try_add_action(*m_cpp_highlight));
+
+    m_cmake_highlight = GUI::Action::create_checkable("C&Make", [&](auto&) {
+        m_editor->set_syntax_highlighter(make<CMake::SyntaxHighlighter>());
+        m_editor->update();
+    });
+    syntax_actions.add_action(*m_cmake_highlight);
+    TRY(syntax_menu->try_add_action(*m_cmake_highlight));
+
+    m_cmakecache_highlight = GUI::Action::create_checkable("CM&akeCache", [&](auto&) {
+        m_editor->set_syntax_highlighter(make<CMake::Cache::SyntaxHighlighter>());
+        m_editor->update();
+    });
+    syntax_actions.add_action(*m_cmakecache_highlight);
+    TRY(syntax_menu->try_add_action(*m_cmakecache_highlight));
 
     m_js_highlight = GUI::Action::create_checkable("&JavaScript", [&](auto&) {
         m_editor->set_syntax_highlighter(make<JS::SyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_js_highlight);
-    syntax_menu.add_action(*m_js_highlight);
+    TRY(syntax_menu->try_add_action(*m_js_highlight));
 
-    m_css_highlight = GUI::Action::create_checkable("CSS", [&](auto&) {
+    m_css_highlight = GUI::Action::create_checkable("C&SS", [&](auto&) {
         m_editor->set_syntax_highlighter(make<Web::CSS::SyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_css_highlight);
-    syntax_menu.add_action(*m_css_highlight);
+    TRY(syntax_menu->try_add_action(*m_css_highlight));
 
     m_html_highlight = GUI::Action::create_checkable("&HTML File", [&](auto&) {
         m_editor->set_syntax_highlighter(make<Web::HTML::SyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_html_highlight);
-    syntax_menu.add_action(*m_html_highlight);
+    TRY(syntax_menu->try_add_action(*m_html_highlight));
+
+    m_git_highlight = GUI::Action::create_checkable("Gi&t Commit", [&](auto&) {
+        m_editor->set_syntax_highlighter(make<GUI::GitCommitSyntaxHighlighter>());
+        m_editor->update();
+    });
+    syntax_actions.add_action(*m_git_highlight);
+    TRY(syntax_menu->try_add_action(*m_git_highlight));
 
     m_gml_highlight = GUI::Action::create_checkable("&GML", [&](auto&) {
-        m_editor->set_syntax_highlighter(make<GUI::GMLSyntaxHighlighter>());
+        m_editor->set_syntax_highlighter(make<GUI::GML::SyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_gml_highlight);
-    syntax_menu.add_action(*m_gml_highlight);
+    TRY(syntax_menu->try_add_action(*m_gml_highlight));
 
     m_ini_highlight = GUI::Action::create_checkable("&INI File", [&](auto&) {
         m_editor->set_syntax_highlighter(make<GUI::IniSyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_ini_highlight);
-    syntax_menu.add_action(*m_ini_highlight);
+    TRY(syntax_menu->try_add_action(*m_ini_highlight));
 
-    m_shell_highlight = GUI::Action::create_checkable("&Shell File", [&](auto&) {
+    m_markdown_highlight = GUI::Action::create_checkable("Ma&rkdown", [&](auto&) {
+        m_editor->set_syntax_highlighter(make<Markdown::SyntaxHighlighter>());
+        m_editor->update();
+    });
+    syntax_actions.add_action(*m_markdown_highlight);
+    TRY(syntax_menu->try_add_action(*m_markdown_highlight));
+
+    m_shell_highlight = GUI::Action::create_checkable("Sh&ell File", [&](auto&) {
         m_editor->set_syntax_highlighter(make<Shell::SyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_shell_highlight);
-    syntax_menu.add_action(*m_shell_highlight);
+    TRY(syntax_menu->try_add_action(*m_shell_highlight));
 
     m_sql_highlight = GUI::Action::create_checkable("S&QL File", [&](auto&) {
         m_editor->set_syntax_highlighter(make<SQL::AST::SyntaxHighlighter>());
         m_editor->update();
     });
     syntax_actions.add_action(*m_sql_highlight);
-    syntax_menu.add_action(*m_sql_highlight);
+    TRY(syntax_menu->try_add_action(*m_sql_highlight));
 
-    auto& help_menu = window.add_menu("&Help");
-    help_menu.add_action(GUI::CommonActions::make_help_action([](auto&) {
-        Desktop::Launcher::open(URL::create_with_file_protocol("/usr/share/man/man1/TextEditor.md"), "/bin/Help");
-    }));
-    help_menu.add_action(GUI::CommonActions::make_about_action("Text Editor", GUI::Icon::default_icon("app-text-editor"), &window));
+    auto help_menu = TRY(window.try_add_menu("&Help"_short_string));
+    TRY(help_menu->try_add_action(GUI::CommonActions::make_command_palette_action(&window)));
+    TRY(help_menu->try_add_action(GUI::CommonActions::make_help_action([](auto&) {
+        Desktop::Launcher::open(URL::create_with_file_scheme("/usr/share/man/man1/Applications/TextEditor.md"), "/bin/Help");
+    })));
+    TRY(help_menu->try_add_action(GUI::CommonActions::make_about_action("Text Editor", GUI::Icon::default_icon("app-text-editor"sv), &window)));
+
+    auto wrapping_statusbar_menu = TRY(m_line_column_statusbar_menu->try_add_submenu(TRY("&Wrapping Mode"_string)));
+    TRY(wrapping_statusbar_menu->try_add_action(*m_no_wrapping_action));
+    TRY(wrapping_statusbar_menu->try_add_action(*m_wrap_anywhere_action));
+    TRY(wrapping_statusbar_menu->try_add_action(*m_wrap_at_words_action));
+
+    auto tab_width_statusbar_menu = TRY(m_line_column_statusbar_menu->try_add_submenu(TRY("&Tab Width"_string)));
+    TRY(tab_width_statusbar_menu->try_add_action(*m_soft_tab_1_width_action));
+    TRY(tab_width_statusbar_menu->try_add_action(*m_soft_tab_2_width_action));
+    TRY(tab_width_statusbar_menu->try_add_action(*m_soft_tab_4_width_action));
+    TRY(tab_width_statusbar_menu->try_add_action(*m_soft_tab_8_width_action));
+    TRY(tab_width_statusbar_menu->try_add_action(*m_soft_tab_16_width_action));
+
+    TRY(m_line_column_statusbar_menu->try_add_separator());
+    TRY(m_line_column_statusbar_menu->try_add_action(*m_cursor_line_highlighting_action));
+
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_plain_text_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_cpp_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_cmake_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_cmakecache_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_css_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_git_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_gml_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_html_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_ini_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_js_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_markdown_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_shell_highlight));
+    TRY(m_syntax_statusbar_menu->try_add_action(*m_sql_highlight));
+
+    return {};
 }
 
 void MainWidget::set_path(StringView path)
@@ -633,12 +749,20 @@ void MainWidget::set_path(StringView path)
     if (m_extension == "c" || m_extension == "cc" || m_extension == "cxx" || m_extension == "cpp" || m_extension == "c++"
         || m_extension == "h" || m_extension == "hh" || m_extension == "hxx" || m_extension == "hpp" || m_extension == "h++") {
         m_cpp_highlight->activate();
+    } else if (m_extension == "cmake" || (m_extension == "txt" && m_name == "CMakeLists")) {
+        m_cmake_highlight->activate();
+    } else if (m_extension == "txt" && m_name == "CMakeCache") {
+        m_cmakecache_highlight->activate();
     } else if (m_extension == "js" || m_extension == "mjs" || m_extension == "json") {
         m_js_highlight->activate();
+    } else if (m_name == "COMMIT_EDITMSG") {
+        m_git_highlight->activate();
     } else if (m_extension == "gml") {
         m_gml_highlight->activate();
-    } else if (m_extension == "ini") {
+    } else if (m_extension == "ini" || m_extension == "af") {
         m_ini_highlight->activate();
+    } else if (m_extension == "md") {
+        m_markdown_highlight->activate();
     } else if (m_extension == "sh" || m_extension == "bash") {
         m_shell_highlight->activate();
     } else if (m_extension == "sql") {
@@ -660,6 +784,7 @@ void MainWidget::set_path(StringView path)
             set_preview_mode(PreviewMode::None);
     }
 
+    m_open_folder_action->set_enabled(!path.is_empty());
     update_title();
 }
 
@@ -667,43 +792,23 @@ void MainWidget::update_title()
 {
     StringBuilder builder;
     if (m_path.is_empty())
-        builder.append("Untitled");
+        builder.append("Untitled"sv);
     else
         builder.append(m_path);
-    builder.append("[*] - Text Editor");
-    window()->set_title(builder.to_string());
+    builder.append("[*] - Text Editor"sv);
+    window()->set_title(builder.to_deprecated_string());
 }
 
-bool MainWidget::read_file_and_close(int fd, String const& path)
+ErrorOr<void> MainWidget::read_file(String const& filename, Core::File& file)
 {
-    VERIFY(path.starts_with("/"sv));
-    auto file = Core::File::construct();
-
-    if (!file->open(fd, Core::OpenMode::ReadOnly, Core::File::ShouldCloseFileDescriptor::Yes) && file->error() != ENOENT) {
-        GUI::MessageBox::show(window(), String::formatted("Opening \"{}\" failed: {}", path, strerror(errno)), "Error", GUI::MessageBox::Type::Error);
-        return false;
-    }
-
-    if (file->is_device()) {
-        GUI::MessageBox::show(window(), String::formatted("Opening \"{}\" failed: Can't open device files", path), "Error", GUI::MessageBox::Type::Error);
-        return false;
-    }
-
-    if (file->is_directory()) {
-        GUI::MessageBox::show(window(), String::formatted("Opening \"{}\" failed: Can't open directories", path), "Error", GUI::MessageBox::Type::Error);
-        return false;
-    }
-
-    m_editor->set_text(file->read_all());
-
-    set_path(path);
-
+    m_editor->set_text(TRY(file.read_until_eof()));
+    set_path(filename);
+    GUI::Application::the()->set_most_recently_open_file(filename);
     m_editor->set_focus(true);
-
-    return true;
+    return {};
 }
 
-void MainWidget::open_nonexistent_file(String const& path)
+void MainWidget::open_nonexistent_file(DeprecatedString const& path)
 {
     m_editor->set_text({});
     set_path(path);
@@ -714,19 +819,26 @@ bool MainWidget::request_close()
 {
     if (!editor().document().is_modified())
         return true;
-    auto result = GUI::MessageBox::show(window(), "The document has been modified. Would you like to save?", "Unsaved changes", GUI::MessageBox::Type::Warning, GUI::MessageBox::InputType::YesNoCancel);
+    auto result = GUI::MessageBox::ask_about_unsaved_changes(window(), m_path, editor().document().undo_stack().last_unmodified_timestamp());
 
-    if (result == GUI::MessageBox::ExecYes) {
+    if (result == GUI::MessageBox::ExecResult::Yes) {
         m_save_action->activate();
         if (editor().document().is_modified())
             return false;
         return true;
     }
 
-    if (result == GUI::MessageBox::ExecNo)
+    if (result == GUI::MessageBox::ExecResult::No)
         return true;
 
     return false;
+}
+
+void MainWidget::drag_enter_event(GUI::DragEvent& event)
+{
+    auto const& mime_types = event.mime_types();
+    if (mime_types.contains_slow("text/uri-list"))
+        event.accept();
 }
 
 void MainWidget::drop_event(GUI::DropEvent& event)
@@ -739,17 +851,17 @@ void MainWidget::drop_event(GUI::DropEvent& event)
         if (urls.is_empty())
             return;
         if (urls.size() > 1) {
-            GUI::MessageBox::show(window(), "TextEditor can only open one file at a time!", "One at a time please!", GUI::MessageBox::Type::Error);
+            GUI::MessageBox::show(window(), "TextEditor can only open one file at a time!"sv, "One at a time please!"sv, GUI::MessageBox::Type::Error);
             return;
         }
-
-        // TODO: A drop event should be considered user consent for opening a file
-        auto file_response = FileSystemAccessClient::Client::the().request_file(window()->window_id(), urls.first().path(), Core::OpenMode::ReadOnly);
-
-        if (file_response.error != 0)
+        if (!request_close())
             return;
 
-        read_file_and_close(*file_response.fd, urls.first().path());
+        auto response = FileSystemAccessClient::Client::the().request_file_read_only_approved(window(), urls.first().serialize_path());
+        if (response.is_error())
+            return;
+        if (auto result = read_file(response.value().filename(), response.value().stream()); result.is_error())
+            GUI::MessageBox::show(window(), "Unable to open file.\n"sv, "Error"sv, GUI::MessageBox::Type::Error);
     }
 }
 
@@ -778,7 +890,6 @@ void MainWidget::set_preview_mode(PreviewMode mode)
         update_markdown_preview();
     } else {
         m_no_preview_action->set_checked(true);
-        m_editor->set_fixed_width(-1);
         set_web_view_visible(false);
     }
 }
@@ -803,7 +914,7 @@ void MainWidget::update_markdown_preview()
     if (document) {
         auto html = document->render_to_html();
         auto current_scroll_pos = m_page_view->visible_content_rect();
-        m_page_view->load_html(html, URL::create_with_file_protocol(m_path));
+        m_page_view->load_html(html, URL::create_with_file_scheme(m_path));
         m_page_view->scroll_into_view(current_scroll_pos, true, true);
     }
 }
@@ -811,26 +922,52 @@ void MainWidget::update_markdown_preview()
 void MainWidget::update_html_preview()
 {
     auto current_scroll_pos = m_page_view->visible_content_rect();
-    m_page_view->load_html(m_editor->text(), URL::create_with_file_protocol(m_path));
+    m_page_view->load_html(m_editor->text(), URL::create_with_file_scheme(m_path));
     m_page_view->scroll_into_view(current_scroll_pos, true, true);
 }
 
 void MainWidget::update_statusbar()
 {
+    if (!m_statusbar->is_visible())
+        return;
+
     StringBuilder builder;
-    builder.appendff("Line: {}, Column: {}", m_editor->cursor().line() + 1, m_editor->cursor().column());
-    m_statusbar->set_text(0, builder.to_string());
-    builder.clear();
     if (m_editor->has_selection()) {
-        String selected_text = m_editor->selected_text();
+        DeprecatedString selected_text = m_editor->selected_text();
         auto word_count = m_editor->number_of_selected_words();
-        builder.appendff("{} {} ({} {}) selected", selected_text.length(), selected_text.length() == 1 ? "character" : "characters", word_count, word_count != 1 ? "words" : "word");
+        builder.appendff("{:'d} {} ({:'d} {}) selected", selected_text.length(), selected_text.length() == 1 ? "character" : "characters", word_count, word_count != 1 ? "words" : "word");
     } else {
-        String text = m_editor->text();
+        DeprecatedString text = m_editor->text();
         auto word_count = m_editor->number_of_words();
-        builder.appendff("{} {} ({} {})", text.length(), text.length() == 1 ? "character" : "characters", word_count, word_count != 1 ? "words" : "word");
+        builder.appendff("{:'d} {} ({:'d} {})", text.length(), text.length() == 1 ? "character" : "characters", word_count, word_count != 1 ? "words" : "word");
     }
-    m_statusbar->set_text(1, builder.to_string());
+    m_statusbar->set_text(0, builder.to_deprecated_string());
+
+    if (m_editor && m_editor->syntax_highlighter()) {
+        auto language = m_editor->syntax_highlighter()->language();
+        m_statusbar->set_text(1, Syntax::language_to_string(language));
+    }
+    m_statusbar->set_text(2, DeprecatedString::formatted("Ln {:'d}  Col {:'d}", m_editor->cursor().line() + 1, m_editor->cursor().column()));
+}
+
+void MainWidget::find_text(GUI::TextEditor::SearchDirection direction, ShowMessageIfNoResults show_message)
+{
+    auto needle = m_find_textbox->text();
+    if (needle.is_empty())
+        return;
+    if (m_use_regex)
+        m_editor->document().update_regex_matches(needle);
+
+    auto result = m_editor->find_text(needle, direction,
+        m_should_wrap ? GUI::TextDocument::SearchShouldWrap::Yes : GUI::TextDocument::SearchShouldWrap::No,
+        m_use_regex, m_match_case);
+
+    if (!result.is_valid() && show_message == ShowMessageIfNoResults::Yes) {
+        GUI::MessageBox::show(window(),
+            DeprecatedString::formatted("Not found: \"{}\"", needle),
+            "Not found"sv,
+            GUI::MessageBox::Type::Information);
+    }
 }
 
 }

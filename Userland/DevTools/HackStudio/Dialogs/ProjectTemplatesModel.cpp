@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2021, Nick Vella <nick@nxk.io>
  * Copyright (c) 2021, sin-ack <sin-ack@protonmail.com>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -42,10 +43,6 @@ ProjectTemplatesModel::ProjectTemplatesModel()
     rescan_templates();
 }
 
-ProjectTemplatesModel::~ProjectTemplatesModel()
-{
-}
-
 int ProjectTemplatesModel::row_count(const GUI::ModelIndex&) const
 {
     return m_mapping.size();
@@ -60,11 +57,11 @@ String ProjectTemplatesModel::column_name(int column) const
 {
     switch (column) {
     case Column::Icon:
-        return "Icon";
+        return "Icon"_short_string;
     case Column::Id:
-        return "ID";
+        return "ID"_short_string;
     case Column::Name:
-        return "Name";
+        return "Name"_short_string;
     }
     VERIFY_NOT_REACHED();
 }
@@ -114,13 +111,13 @@ void ProjectTemplatesModel::rescan_templates()
     // Iterate over template manifest INI files in the templates path
     Core::DirIterator di(ProjectTemplate::templates_path(), Core::DirIterator::SkipDots);
     if (di.has_error()) {
-        warnln("DirIterator: {}", di.error_string());
+        warnln("DirIterator: {}", di.error());
         return;
     }
 
     while (di.has_next()) {
         auto full_path = LexicalPath(di.next_full_path());
-        if (!full_path.has_extension(".ini"))
+        if (!full_path.has_extension(".ini"sv))
             continue;
 
         auto project_template = ProjectTemplate::load_from_manifest(full_path.string());
@@ -135,7 +132,7 @@ void ProjectTemplatesModel::rescan_templates()
     // Enumerate the loaded projects into a sorted mapping, by priority value descending.
     m_mapping.clear();
     for (auto& project_template : m_templates)
-        m_mapping.append(&project_template);
+        m_mapping.append(project_template);
     quick_sort(m_mapping, [](auto a, auto b) {
         return a->priority() > b->priority();
     });

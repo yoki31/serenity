@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018-2021, Andreas Kling <kling@serenityos.org>
+ * Copyright (c) 2022, the SerenityOS developers.
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -28,7 +29,7 @@ Object::Object(Object* parent)
         m_parent->add_child(*this);
 
     REGISTER_READONLY_STRING_PROPERTY("class_name", class_name);
-    REGISTER_STRING_PROPERTY("name", name, set_name);
+    REGISTER_DEPRECATED_STRING_PROPERTY("name", name, set_name);
 
     register_property(
         "address", [this] { return FlatPtr(this); },
@@ -47,7 +48,7 @@ Object::~Object()
     // NOTE: We also unparent the children, so that they won't try to unparent
     //       themselves in their own destructors.
     for (auto& child : children)
-        child.m_parent = nullptr;
+        child->m_parent = nullptr;
 
     all_objects().remove(*this);
     stop_timer();
@@ -102,7 +103,7 @@ void Object::insert_child_before(Object& new_child, Object& before_child)
 void Object::remove_child(Object& object)
 {
     for (size_t i = 0; i < m_children.size(); ++i) {
-        if (m_children.ptr_at(i).ptr() == &object) {
+        if (m_children[i] == &object) {
             // NOTE: We protect the child so it survives the handling of ChildRemoved.
             NonnullRefPtr<Object> protector = object;
             object.m_parent = nullptr;
@@ -118,7 +119,7 @@ void Object::remove_child(Object& object)
 void Object::remove_all_children()
 {
     while (!m_children.is_empty())
-        m_children.first().remove_from_parent();
+        m_children.first()->remove_from_parent();
 }
 
 void Object::timer_event(Core::TimerEvent&)
@@ -148,7 +149,9 @@ void Object::stop_timer()
     if (!m_timer_id)
         return;
     bool success = Core::EventLoop::unregister_timer(m_timer_id);
-    VERIFY(success);
+    if (!success) {
+        dbgln("{} {:p} could not unregister timer {}", class_name(), this, m_timer_id);
+    }
     m_timer_id = 0;
 }
 
@@ -173,15 +176,7 @@ void Object::deferred_invoke(Function<void()> invokee)
     Core::deferred_invoke([invokee = move(invokee), strong_this = NonnullRefPtr(*this)] { invokee(); });
 }
 
-void Object::save_to(JsonObject& json)
-{
-    for (auto& it : m_properties) {
-        auto& property = it.value;
-        json.set(property->name(), property->get());
-    }
-}
-
-JsonValue Object::property(String const& name) const
+JsonValue Object::property(DeprecatedString const& name) const
 {
     auto it = m_properties.find(name);
     if (it == m_properties.end())
@@ -189,7 +184,7 @@ JsonValue Object::property(String const& name) const
     return it->value->get();
 }
 
-bool Object::set_property(String const& name, JsonValue const& value)
+bool Object::set_property(DeprecatedString const& name, JsonValue const& value)
 {
     auto it = m_properties.find(name);
     if (it == m_properties.end())
@@ -197,7 +192,7 @@ bool Object::set_property(String const& name, JsonValue const& value)
     return it->value->set(value);
 }
 
-bool Object::is_ancestor_of(const Object& other) const
+bool Object::is_ancestor_of(Object const& other) const
 {
     if (&other == this)
         return false;
@@ -246,7 +241,7 @@ void Object::decrement_inspector_count(Badge<InspectorServerConnection>)
         did_end_inspection();
 }
 
-void Object::register_property(const String& name, Function<JsonValue()> getter, Function<bool(const JsonValue&)> setter)
+void Object::register_property(DeprecatedString const& name, Function<JsonValue()> getter, Function<bool(JsonValue const&)> setter)
 {
     m_properties.set(name, make<Property>(name, move(getter), move(setter)));
 }
@@ -258,13 +253,11 @@ void Object::set_event_filter(Function<bool(Core::Event&)> filter)
 
 static HashMap<StringView, ObjectClassRegistration*>& object_classes()
 {
-    static HashMap<StringView, ObjectClassRegistration*>* map;
-    if (!map)
-        map = new HashMap<StringView, ObjectClassRegistration*>;
-    return *map;
+    static HashMap<StringView, ObjectClassRegistration*> s_map;
+    return s_map;
 }
 
-ObjectClassRegistration::ObjectClassRegistration(StringView class_name, Function<RefPtr<Object>()> factory, ObjectClassRegistration* parent_class)
+ObjectClassRegistration::ObjectClassRegistration(StringView class_name, Function<ErrorOr<NonnullRefPtr<Object>>()> factory, ObjectClassRegistration* parent_class)
     : m_class_name(class_name)
     , m_factory(move(factory))
     , m_parent_class(parent_class)
@@ -272,11 +265,7 @@ ObjectClassRegistration::ObjectClassRegistration(StringView class_name, Function
     object_classes().set(class_name, this);
 }
 
-ObjectClassRegistration::~ObjectClassRegistration()
-{
-}
-
-bool ObjectClassRegistration::is_derived_from(const ObjectClassRegistration& base_class) const
+bool ObjectClassRegistration::is_derived_from(ObjectClassRegistration const& base_class) const
 {
     if (&base_class == this)
         return true;
@@ -285,14 +274,14 @@ bool ObjectClassRegistration::is_derived_from(const ObjectClassRegistration& bas
     return m_parent_class->is_derived_from(base_class);
 }
 
-void ObjectClassRegistration::for_each(Function<void(const ObjectClassRegistration&)> callback)
+void ObjectClassRegistration::for_each(Function<void(ObjectClassRegistration const&)> callback)
 {
     for (auto& it : object_classes()) {
         callback(*it.value);
     }
 }
 
-const ObjectClassRegistration* ObjectClassRegistration::find(StringView class_name)
+ObjectClassRegistration const* ObjectClassRegistration::find(StringView class_name)
 {
     return object_classes().get(class_name).value_or(nullptr);
 }

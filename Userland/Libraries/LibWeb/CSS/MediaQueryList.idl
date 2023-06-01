@@ -1,3 +1,6 @@
+#import <DOM/EventTarget.idl>
+#import <DOM/EventHandler.idl>
+
 [Exposed=Window]
 interface MediaQueryList : EventTarget {
     readonly attribute CSSOMString media;

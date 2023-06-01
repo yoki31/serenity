@@ -10,13 +10,13 @@ This guide assumes several things:
 
 - The TFTP server root is `/srv/tftp/`
 - Bootloaders are located inside `/srv/tftp/boot/`
-- SerenityOS artefacts are located inside `/srv/tftp/serenity/`:
+- SerenityOS artifacts are located inside `/srv/tftp/serenity/`:
     - The prekernel is located at `/srv/tftp/serenity/prekernel`
-        - You can find it at `Build/i686/Kernel/Prekernel/Prekernel`
+        - You can find it at `Build/x86_64/Kernel/Prekernel/Prekernel`
     - The kernel is located at `/srv/tftp/serenity/kernel`
-        - You can find it at `Build/i686/Kernel/Kernel`
+        - You can find it at `Build/x86_64/Kernel/Kernel`
     - The ramdisk is located at `/srv/tftp/serenity/ramdisk`
-        - You can use the QEMU image at `Build/i686/_disk_image` as a ramdisk
+        - You can use the QEMU image at `Build/x86_64/_disk_image` as a ramdisk
         
 `grub-pc-bin`, which contains the BIOS modules for PXE booting GRUB2, isn't available from the ARM repos of Debian and Ubuntu so if you are using an ARM machine for your TFTP server you will need to extract and copy across the contents of the `/usr/lib/grub/i386-pc/` directory from the x86 package or build the files manually.
 
@@ -87,7 +87,7 @@ menuentry 'SerenityOS - netboot diskless text mode' {
         set gfxkeep=text
         terminal_output console
         echo 'Loading prekernel...'
-        multiboot (tftp)/serenity/prekernel root=/dev/ramdisk0 fbdev=off
+        multiboot (tftp)/serenity/prekernel root=/dev/ramdisk0 graphics_subsystem_mode=off
         echo 'Loading kernel...'
         module (tftp)/serenity/kernel
         echo 'Loading ramdisk...'
@@ -134,7 +134,7 @@ LABEL SerenityOS
 ### Troubleshooting
 
 - Issues with DHCP or TFTP usually require sniffing packets on the network to figure out.
-- TFTP is a slow protocol, transferring the QEMU disk image (~ 200 MiB) will take some time. Consider setting up a FTP or HTTP server for faster downloading of SerenityOS artefacts if your bootloader supports it.
+- TFTP is a slow protocol, transferring the QEMU disk image (~ 200 MiB) will take some time. Consider setting up a FTP or HTTP server for faster downloading of SerenityOS artifacts if your bootloader supports it.
 - Remember that SerenityOS has not been extensively tested on physical hardware.
 - Some BIOS implementations of PXE are buggy or some machines may not have a PXE boot option at all in which case you could try using [iPXE](https://ipxe.org/).
 - Virtual machines can also be booted over the network. Cheat notes for QEMU on Linux, assuming `br0` is already set up:
@@ -175,11 +175,10 @@ Don't forget to replace `X.Y.Z.W` with your HTTP server IP address.
 
 For troubleshooting purposes, you can add the following command line arguments if you suspect our implementation fails to work with your hardware:
 - `disable_physical_storage`
-- `disable_ps2_controller`
 - `disable_uhci_controller`
 
 Because iPXE (unlike GRUB) doesn't support VESA VBE modesetting when booting a multiboot kernel,
-you might not see any output, so add the `fbdev=off` argument as well to boot into VGA text mode.
+you might not see any output, so add the `graphics_subsystem_mode=off` argument as well to boot into VGA text mode.
 
 Afterwards you will need to enable the `console` iPXE command by uncommenting the following line in `src/config/general.h`:
 ```c

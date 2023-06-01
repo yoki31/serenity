@@ -1,47 +1,45 @@
 /*
  * Copyright (c) 2021, Kyle Pereira <kyle@xylepereira.me>
+ * Copyright (c) 2023, Caoimhe Byrne <caoimhebyrne06@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include "SpiceAgent.h"
-#include <AK/Format.h>
-#include <LibC/fcntl.h>
-#include <LibC/unistd.h>
-#include <LibIPC/ServerConnection.h>
+#include <AK/URL.h>
+#include <LibCore/StandardPaths.h>
+#include <LibCore/System.h>
+#include <LibDesktop/Launcher.h>
+#include <LibGUI/Application.h>
+#include <LibGUI/Clipboard.h>
+#include <LibIPC/ConnectionToServer.h>
+#include <LibMain/Main.h>
+#include <fcntl.h>
 
-static constexpr auto SPICE_DEVICE = "/dev/hvc0p1";
+static constexpr auto SPICE_DEVICE = "/dev/hvc0p1"sv;
 
-int main()
+ErrorOr<int> serenity_main(Main::Arguments arguments)
 {
-    Core::EventLoop loop;
+    // We use the application to be able to easily write to the user's clipboard.
+    auto app = TRY(GUI::Application::create(arguments));
 
-    if (pledge("unix rpath wpath stdio sendfd recvfd", nullptr) < 0) {
-        perror("pledge");
-        return 1;
-    }
+    TRY(Desktop::Launcher::add_allowed_url(URL::create_with_file_scheme(Core::StandardPaths::downloads_directory())));
+    TRY(Desktop::Launcher::seal_allowlist());
 
-    if (unveil(SPICE_DEVICE, "rw") < 0) {
-        perror("unveil");
-        return 1;
-    }
-    if (unveil("/tmp/portal/clipboard", "rw") < 0) {
-        perror("unveil");
-        return 1;
-    }
-    if (unveil(nullptr, nullptr) < 0) {
-        perror("unveil");
-        return 1;
-    }
+    // FIXME: Make Core::File support reading and writing, but without creating:
+    //        By default, Core::File opens the file descriptor with O_CREAT when using OpenMode::Write (and subsequently, OpenMode::ReadWrite).
+    //        To minimise confusion for people that have already used Core::File, we can probably just do `OpenMode::ReadWrite | OpenMode::DontCreate`.
+    TRY(Core::System::pledge("unix rpath wpath stdio sendfd recvfd cpath"));
+    TRY(Core::System::unveil(SPICE_DEVICE, "rwc"sv));
+    TRY(Core::System::unveil(Core::StandardPaths::downloads_directory(), "rwc"sv));
+    TRY(Core::System::unveil(nullptr, nullptr));
 
-    int serial_port_fd = open(SPICE_DEVICE, O_RDWR);
-    if (serial_port_fd < 0) {
-        dbgln("Couldn't open spice serial port!");
-        return 1;
-    }
+    auto agent = TRY(SpiceAgent::SpiceAgent::create(SPICE_DEVICE));
 
-    auto conn = ClipboardServerConnection::construct();
-    auto agent = SpiceAgent(serial_port_fd, conn);
+    agent->on_disconnected_from_spice_server = [&]() {
+        app->quit();
+    };
 
-    return loop.exec();
+    TRY(agent->start());
+    return app->exec();
 }
